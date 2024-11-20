@@ -54,13 +54,6 @@ func main() {
 
 	// Initialize blockchain instance
 	blockchainInstance := blockchain.InitialiseBlockchain()
-
-	// Validate genesis block consistency
-	genesis := blockchain.GenesisBlock()
-	if !blockchain.ValidateGenesisBlock(blockchainInstance, genesis) {
-		log.Fatal("Genesis block mismatch! Ensure all nodes use the same genesis block.")
-	}
-
 	fmt.Println("Blockchain initialized with genesis block:", blockchainInstance.GetLatestBlock())
 
 	// Role-specific behavior: Node 1 mines blocks

@@ -39,7 +39,7 @@ func NewNode(listenAddr string) (*Node, error) {
 
 // setupStreamHandler sets up a handler for incoming streams
 func (n *Node) setupStreamHandler() {
-	// Handle block messages
+	// Handle block messages.
 	n.Host.SetStreamHandler("/blockchain/1.0.0/block", func(s network.Stream) {
 		defer s.Close()
 
@@ -58,8 +58,8 @@ func (n *Node) setupStreamHandler() {
 		log.Printf("Received Block: %+v\n", block)
 	})
 
-	// Handle other messages (e.g., transactions)
-	n.Host.SetStreamHandler("/blockchain/1.0.0", func(s network.Stream) {
+	// Handle transaction messages.
+	n.Host.SetStreamHandler("/blockchain/1.0.0/transaction", func(s network.Stream) {
 		defer s.Close()
 
 		buf := make([]byte, 512)
@@ -69,9 +69,15 @@ func (n *Node) setupStreamHandler() {
 			return
 		}
 
-		log.Printf("Received Message: %s\n", string(buf[:bytesRead]))
+		tx, err := DeserializeTransaction(buf[:bytesRead])
+		if err != nil {
+			log.Println("Failed to deserialize transaction:", err)
+			return
+		}
+		log.Printf("Received Transaction: %+v\n", tx)
 	})
 }
+
 
 
 // BroadcastBlock broadcasts a block to all peers
@@ -83,18 +89,19 @@ func (n *Node) BroadcastBlock(block Block) {
 	}
 
 	for _, p := range n.Host.Peerstore().Peers() {
-		// Avoid dialing to self
 		if p == n.Host.ID() {
 			continue
 		}
 
-		stream, err := n.Host.NewStream(context.Background(), p, "/blockchain/1.0.0/block")
-		if err != nil {
-			log.Printf("Failed to open stream to peer %s: %v\n", p.String(), err)
-			continue
-		}
-		defer stream.Close()
-		_, _ = stream.Write(data)
+		go func(peerID peer.ID) {
+			stream, err := n.Host.NewStream(context.Background(), peerID, "/blockchain/1.0.0/block")
+			if err != nil {
+				log.Printf("Failed to open stream to peer %s: %v", peerID.String(), err)
+				return
+			}
+			defer stream.Close()
+			_, _ = stream.Write(data)
+		}(p)
 	}
 }
 

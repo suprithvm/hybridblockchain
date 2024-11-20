@@ -6,22 +6,24 @@ import (
 	"time"
 	"bytes"
 	"encoding/gob"
+	"strconv"
+	"log"
 )
 
-//Block represents a single block in the blockchain
-type Block struct{
-	BlockNumber int
-	PreviousHash string
-	Timestamp int64
-	Transactions []Transaction
-	Nonce int
-	Hash string
-	Difficulty int
+// Block represents a single block in the blockchain
+type Block struct {
+	BlockNumber   int
+	PreviousHash  string
+	Timestamp     int64
+	PatriciaRoot  string        // Root of the Patricia Trie
+	Transactions  *PatriciaTrie // Replace list with Patricia Trie
+	Nonce         int
+	Hash          string
+	Difficulty    int
 }
 
-//GensisBlock creates the first block in the blockchain
-
-func GenesisBlock() Block{
+// GenesisBlock creates the first block in the blockchain
+func GenesisBlock() Block {
 	genesis := Block{
 		BlockNumber: 0,
 		PreviousHash: "0x00000000000000000000000000000000",
@@ -34,34 +36,49 @@ func GenesisBlock() Block{
 	return genesis
 }
 
-//function to calculate the hash of a block
-func calculateHash(block Block) string{
-	data := string(block.BlockNumber) + block.PreviousHash + string(block.Timestamp) + string(block.Nonce)
+// function to calculate the hash of a block
+func calculateHash(block Block) string {
+	data := strconv.Itoa(block.BlockNumber) + block.PreviousHash + strconv.FormatInt(block.Timestamp, 10) + strconv.Itoa(block.Nonce)
 	
 	hash := sha256.Sum256([]byte(data))
 
 	return hex.EncodeToString(hash[:])
 }
 
+// NewBlock creates a new block in the blockchain.
+func NewBlock(previousBlock Block, transactions []Transaction, difficulty int) Block {
+	trie := NewPatriciaTrie()
+	for _, tx := range transactions {
+		trie.Insert(tx)
+	}
 
-//newblock creates a new block in the blockchain
-
-func NewBlock(previousBlock Block, transactions []Transaction, difficulty int)Block{
 	block := Block{
-		BlockNumber: previousBlock.BlockNumber + 1,
+		BlockNumber:  previousBlock.BlockNumber + 1,
 		PreviousHash: previousBlock.Hash,
-		Timestamp: time.Now().Unix(),
-		Transactions: transactions,
-		Nonce: 0,
-		Difficulty: difficulty,
+		Timestamp:    time.Now().Unix(),
+		PatriciaRoot: trie.GenerateRootHash(),
+		Transactions: trie,
+		Nonce:        0,
+		Difficulty:   difficulty,
 	}
 	block.Hash = calculateHash(block)
 	return block
 }
 
 
-// MineBlock performs Proof of Work to find a valid nonce
-func MineBlock(block *Block) {
+// MineBlock performs mining with validator selection.
+func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, targetTime int64) error {
+	// Select validator based on stake pool.
+	validator, err := stakePool.SelectValidator()
+	if err != nil {
+		return err
+	}
+	log.Printf("Selected Validator: %s\n", validator)
+
+	// Adjust difficulty based on the target time.
+	block.Difficulty = AdjustDifficulty(previousBlock, targetTime)
+
+	// Perform Proof of Work.
 	for {
 		block.Hash = calculateHash(*block)
 		if isHashValid(block.Hash, block.Difficulty) {
@@ -69,7 +86,10 @@ func MineBlock(block *Block) {
 		}
 		block.Nonce++
 	}
+
+	return nil
 }
+
 
 // isHashValid checks if a hash meets the difficulty target
 func isHashValid(hash string, difficulty int) bool {
@@ -79,7 +99,6 @@ func isHashValid(hash string, difficulty int) bool {
 	}
 	return hash[:difficulty] == prefix
 }
-
 
 // SerializeBlock serializes a block
 func SerializeBlock(block Block) ([]byte, error) {
@@ -99,3 +118,14 @@ func DeserializeBlock(data []byte) (Block, error) {
 	err := decoder.Decode(&block)
 	return block, err
 }
+
+func AdjustDifficulty(previousBlock Block, targetTime int64) int {
+	actualTime := time.Now().Unix() - previousBlock.Timestamp
+	if actualTime < targetTime/2 {
+		return previousBlock.Difficulty + 1 // Increase difficulty
+	} else if actualTime > targetTime*2 {
+		return previousBlock.Difficulty - 1 // Decrease difficulty
+	}
+	return previousBlock.Difficulty
+}
+
