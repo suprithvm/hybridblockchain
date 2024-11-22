@@ -22,24 +22,36 @@ type Wallet struct {
 }
 
 // NewWallet creates a new wallet by generating a key pair
-func NewWallet() *Wallet {
+func NewWallet() (*Wallet, error) {
 	// Generate mnemonic
-	mnemonic, err := GenerateMnemonic()
+	mnemonic, err := GenerateMnemonic(12)
 	if err != nil {
-		panic(fmt.Errorf("failed to generate mnemonic: %v", err))
+		return nil, fmt.Errorf("failed to generate mnemonic: %v", err)
 	}
 
-	// Create wallet from mnemonic
+	// Recover private key from the mnemonic
 	privateKey, err := RecoverFromMnemonic(mnemonic)
 	if err != nil {
-		panic(fmt.Errorf("failed to recover wallet from mnemonic: %v", err))
+		return nil, fmt.Errorf("failed to recover private key: %v", err)
 	}
 
-	return NewWalletFromPrivateKeyAndMnemonic(privateKey, mnemonic)
+	// Create the wallet
+	wallet, err := NewWalletFromPrivateKeyAndMnemonic(privateKey, mnemonic)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create wallet: %v", err)
+	}
+
+	return wallet, nil
 }
 
+
 // NewWalletFromPrivateKeyAndMnemonic creates a wallet from an existing private key and mnemonic
-func NewWalletFromPrivateKeyAndMnemonic(privateKey *ecdsa.PrivateKey, mnemonic string) *Wallet {
+func NewWalletFromPrivateKeyAndMnemonic(privateKey *ecdsa.PrivateKey, mnemonic string) (*Wallet, error) {
+	// Validate inputs
+	if privateKey == nil || len(mnemonic) == 0 {
+		return nil, fmt.Errorf("invalid private key or mnemonic")
+	}
+
 	// Derive public key
 	publicKey := &privateKey.PublicKey
 
@@ -49,6 +61,7 @@ func NewWalletFromPrivateKeyAndMnemonic(privateKey *ecdsa.PrivateKey, mnemonic s
 	// Generate blockchain address
 	address := generateAddress(publicKey)
 
+	// Return the wallet object
 	return &Wallet{
 		PrivateKey:      privateKey,
 		PublicKey:       publicKey,
@@ -56,8 +69,9 @@ func NewWalletFromPrivateKeyAndMnemonic(privateKey *ecdsa.PrivateKey, mnemonic s
 		PrivateKeyBytes: privateKeyBytes,
 		PublicKeyBytes:  publicKeyBytes,
 		Mnemonic:        mnemonic,
-	}
+	}, nil
 }
+
 
 // generateAddress derives a unique blockchain address from the public key
 func generateAddress(publicKey *ecdsa.PublicKey) string {
@@ -169,6 +183,22 @@ func RecoverWalletFromMnemonic(mnemonic string) (*Wallet, error) {
 	}, nil
 }
 
+func RecoverWallet(mnemonic string) (*Wallet, error) {
+	privateKey, err := RecoverFromMnemonic(mnemonic)
+	if err != nil {
+		return nil, fmt.Errorf("failed to recover wallet from mnemonic: %v", err)
+	}
+
+	address := generateAddress(&privateKey.PublicKey)
+	return &Wallet{
+		PrivateKey: privateKey,
+		PublicKey:  &privateKey.PublicKey,
+		Address:    address,
+		Mnemonic:   mnemonic,
+	}, nil
+}
+
+
 // LoadWalletFromFile loads a wallet from a file
 func LoadWalletFromFile(filename string) (*Wallet, error) {
 	data, err := os.ReadFile(filename)
@@ -211,4 +241,21 @@ func NewWalletFromPrivateKey(privateKey *ecdsa.PrivateKey) *Wallet {
 		PrivateKeyBytes: privateKeyBytes,
 		PublicKeyBytes:  publicKeyBytes,
 	}
+}
+
+
+// SignTransaction signs a transaction using the wallet's private key
+func (w *Wallet) SignTransaction(tx *Transaction) error {
+	txHash := tx.Hash()
+	signature, err := SignMessage(w.PrivateKey, txHash)
+	if err != nil {
+		return fmt.Errorf("failed to sign transaction: %v", err)
+	}
+	tx.Signature = signature
+	return nil
+}
+
+// VerifyTransaction verifies a transaction's signature using the wallet's public key
+func (w *Wallet) VerifyTransaction(tx *Transaction) bool {
+	return VerifySignature(w.PublicKey, tx.Hash(), tx.Signature)
 }

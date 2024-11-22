@@ -52,3 +52,4 @@ func DecryptData(encryptedData, key string) (string, error) {
 
 	return string(data), nil
 }
+

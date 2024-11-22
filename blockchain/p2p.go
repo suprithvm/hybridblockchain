@@ -107,7 +107,7 @@ func (n *Node) BroadcastBlock(block Block) {
 
 // BroadcastTransaction broadcasts a transaction to all peers
 func (n *Node) BroadcastTransaction(tx Transaction) {
-	data, err := SerializeTransaction(tx)
+	data, err := SerializeTransaction(&tx)
 	if err != nil {
 		log.Printf("Failed to serialize transaction: %v", err)
 		return
@@ -172,4 +172,6 @@ func (n *Node) BroadcastMessage(msg string) {
 		}
 	}
 }
+
+
 

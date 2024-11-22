@@ -45,3 +45,4 @@ func VerifySignature(publicKey *ecdsa.PublicKey, message, signature string) bool
 	// Verify the signature
 	return ecdsa.Verify(publicKey, hash[:], &r, &s)
 }
+

@@ -1,0 +1,7 @@
+{"address":"sup0eb97d1baaaede120acb9ef57823","private_key":"nd+MtKuJgjoJz4cbzm0/5hJQ2gQC7IiEqxe6vbc5abA=","public_key":"9AkgDUBJBzywONg1HHd952n3qLpmWoQCClH+P1tjJRijRQBpjiM9P4VuEuMzJzMfo0aC9a24tOidbj/jF3yFTA==","mnemonic":"65e2408f839e0ba70d9b346252008a0729ad43393d255837f76f50e640f80d7e"}
+
+
+Wallet Address: sup5ced9589021f4fdab75ed52aacfa
+Mnemonic: e6a76eebda1002f12c1515a7799c78b8d6d567cb98262021b09fa0c2b7e40dba
+Transaction verified successfully!
+Signed Transaction: &{Sender:sup5ced9589021f4fdab75ed52aacfa Receiver:receiver_address Amount:50 Timestamp:1732262664 Signature:5d8602a183740270246a25621dbf86aa7a152615f67800eb17e8cfae0d2eb3133c71b6c4273513a046ec0ea2c4e25dc4f3e6a859f5c79eb2ef75a2f2f819953f}

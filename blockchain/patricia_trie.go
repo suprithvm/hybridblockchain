@@ -80,3 +80,32 @@ func (t *PatriciaTrie) computeHash(node *PatriciaNode) string {
 	node.Hash = hex.EncodeToString(hash[:])
 	return node.Hash
 }
+
+// Add this new method to list all transactions in the trie
+func (t *PatriciaTrie) ListAll() []Transaction {
+	transactions := make([]Transaction, 0)
+	if t.Root == nil {
+		return transactions
+	}
+
+	// Helper function to traverse the trie
+	var traverse func(*PatriciaNode)
+	traverse = func(node *PatriciaNode) {
+		if node == nil {
+			return
+		}
+
+		// If this is a leaf node with a transaction
+		if node.Value != nil {
+			transactions = append(transactions, *node.Value)
+		}
+
+		// Recursively traverse all children
+		for _, child := range node.Children {
+			traverse(child)
+		}
+	}
+
+	traverse(t.Root)
+	return transactions
+}

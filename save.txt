@@ -1,0 +1,48 @@
+PS C:\Users\supri\Desktop\blockchain\blockchain-core> go run main.go
+=== Wallet Creation ===
+
+New Wallet Created Successfully!
+Wallet Address: supa54119351522ca4e4e7b6191f10b
+Mnemonic: avoid alpha ancient box bless approve attitude beyond army always bread animal
+Private Key (hex): 221ee8d90605cd578e54d3b839d51df4d7cf718870ba6c99c9e57d5f6a12b9e1
+Public Key (hex): 81d90f381c8d5bd923687b0f5966d63a332e85e36ca945ee34ccad3c6393fc7c33673f5e8fd013ab597e4c6a744c3b5d5a39fe94113cc142eb7b1c7a1a6ae6d9
+
+Wallet saved successfully to file: my_wallet.json
+
+=== Wallet Recovery ===
+Enter your 12-word mnemonic to recover the wallet: avoid alpha ancient box bless approve attitude beyond army always bread animal
+
+Wallet Recovered Successfully!
+Recovered Wallet Address: supa54119351522ca4e4e7b6191f10b
+Mnemonic: avoid alpha ancient box bless approve attitude beyond army always bread animal
+Private Key (hex): 221ee8d90605cd578e54d3b839d51df4d7cf718870ba6c99c9e57d5f6a12b9e1
+Public Key (hex): 81d90f381c8d5bd923687b0f5966d63a332e85e36ca945ee34ccad3c6393fc7c33673f5e8fd013ab597e4c6a744c3b5d5a39fe94113cc142eb7b1c7a1a6ae6d9
+
+Success: The recovered wallet matches the originally created wallet!
+
+=== HD Wallet Testing ===
+Generating child wallets from the master key...
+
+HD Wallet Created Successfully! Derived 5 child wallets:
+Child Wallet 1 Address: supd523de3cbb6d2f41cd9c8f0908f1
+Child Wallet 2 Address: sup03e2409f681de279ddef80ddad35
+Child Wallet 3 Address: sup40b5a8688545eb66fa2816369374
+Child Wallet 4 Address: sup1a5b27070e57141e1bace3a9d7ba
+Child Wallet 5 Address: sup27b0aaf012461a0068ff44bcc8e9
+
+All tests completed successfully. Thank you for using the Wallet System!
+
+
+
+
+
+
+among amazing atom arena account bounce aim border borrow bottom awkward best
+
+
+
+
+/ip4/127.0.0.1/tcp/59390/p2p/12D3KooWR2G1DaFktYhDKKbnhk9mKfjj1xgvWAAZFk3Faab1tM4J
+
+
+avoid alpha ancient box bless approve attitude beyond army always bread animal
