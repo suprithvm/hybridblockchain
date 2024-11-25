@@ -1,7 +1,8 @@
-package blockchain
+package test
 
 import (
 	"testing"
+	"blockchain-core/blockchain"
 )
 
 func TestHDWalletCreation(t *testing.T) {

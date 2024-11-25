@@ -8,11 +8,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"golang.org/x/crypto/sha3"
+	"log"
 	"math/big"
-	"strings"
 	"os"
 	"path/filepath"
+	"strings"
+	"sort"
+
+	"golang.org/x/crypto/sha3"
 )
 
 // GenerateMnemonic creates a new mnemonic phrase
@@ -107,7 +110,7 @@ func LoadBIP39Wordlist() ([]string, error) {
 	}
 
 	// Adjust the path based on the known location of the file
-	wordlistPath := filepath.Join(baseDir, "blockchain", "bip39_wordlist.txt")
+	wordlistPath := filepath.Join(baseDir, "bip39_wordlist.txt")
 
 	// Read the file
 	data, err := os.ReadFile(wordlistPath)
@@ -118,4 +121,37 @@ func LoadBIP39Wordlist() ([]string, error) {
 	// Split the data into words
 	words := strings.Split(strings.TrimSpace(string(data)), "\n")
 	return words, nil
+}
+
+
+func RecoverMultiSigWallet(mnemonic string, owners []string, requiredSigs int, publicKeyMap map[string]*ecdsa.PublicKey) (*MultiSigwWallet, error) {
+    // Recover master key from mnemonic
+    masterKey, err := RecoverFromMnemonic(mnemonic)
+    if err != nil {
+        return nil, fmt.Errorf("failed to recover master key: %v", err)
+    }
+	log.Printf("[DEBUG] Recovered Master Key: %x", masterKey.D)
+
+    // Sort the owners to ensure deterministic order
+    sort.Strings(owners)
+
+    // Generate the address deterministically
+    address := GenerateMultiSigAddress(publicKeyMap)
+
+    return &MultiSigwWallet{
+        Owners:       owners,
+        RequiredSigs: requiredSigs,
+        Balance:      0,
+        PublicKeyMap: publicKeyMap,
+        Address:      address,
+    }, nil
+}
+
+// GenerateNewPublicKey generates a new public key from a mnemonic phrase
+func GenerateNewPublicKey(mnemonic string) (*ecdsa.PublicKey, error) {
+    privateKey, err := RecoverFromMnemonic(mnemonic)
+    if err != nil {
+        return nil, fmt.Errorf("failed to generate new key from mnemonic: %v", err)
+    }
+    return &privateKey.PublicKey, nil
 }

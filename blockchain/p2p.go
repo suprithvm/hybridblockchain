@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 
 	"github.com/libp2p/go-libp2p"
@@ -39,44 +40,58 @@ func NewNode(listenAddr string) (*Node, error) {
 
 // setupStreamHandler sets up a handler for incoming streams
 func (n *Node) setupStreamHandler() {
-	// Handle block messages.
-	n.Host.SetStreamHandler("/blockchain/1.0.0/block", func(s network.Stream) {
-		defer s.Close()
+    // Handle block messages.
+    n.Host.SetStreamHandler("/blockchain/1.0.0/block", func(s network.Stream) {
+        defer s.Close()
 
-		buf := make([]byte, 1024)
-		bytesRead, err := s.Read(buf)
-		if err != nil {
-			log.Println("Error reading stream:", err)
-			return
-		}
+        // Use a larger buffer for block data
+        buf := make([]byte, 4096) // Increased buffer size
+        fullData := []byte{}
 
-		block, err := DeserializeBlock(buf[:bytesRead])
-		if err != nil {
-			log.Println("Failed to deserialize block:", err)
-			return
-		}
-		log.Printf("Received Block: %+v\n", block)
-	})
+        for {
+            n, err := s.Read(buf)
+            if err != nil {
+                if err == io.EOF {
+                    break
+                }
+                log.Printf("Stream read error: %v", err)
+                return
+            }
 
-	// Handle transaction messages.
-	n.Host.SetStreamHandler("/blockchain/1.0.0/transaction", func(s network.Stream) {
-		defer s.Close()
+            // Append the read data
+            fullData = append(fullData, buf[:n]...)
+        }
 
-		buf := make([]byte, 512)
-		bytesRead, err := s.Read(buf)
-		if err != nil {
-			log.Println("Error reading stream:", err)
-			return
-		}
+        // Deserialize the full data
+        block, err := DeserializeBlock(fullData)
+        if err != nil {
+            log.Printf("Failed to deserialize block: %v", err)
+            return
+        }
 
-		tx, err := DeserializeTransaction(buf[:bytesRead])
-		if err != nil {
-			log.Println("Failed to deserialize transaction:", err)
-			return
-		}
-		log.Printf("Received Transaction: %+v\n", tx)
-	})
+        log.Printf("Received Block: %+v\n", block)
+    })
+
+    // Handle transaction messages (no changes required for this handler).
+    n.Host.SetStreamHandler("/blockchain/1.0.0/transaction", func(s network.Stream) {
+        defer s.Close()
+
+        buf := make([]byte, 512)
+        bytesRead, err := s.Read(buf)
+        if err != nil {
+            log.Println("Error reading stream:", err)
+            return
+        }
+
+        tx, err := DeserializeTransaction(buf[:bytesRead])
+        if err != nil {
+            log.Println("Failed to deserialize transaction:", err)
+            return
+        }
+        log.Printf("Received Transaction: %+v\n", tx)
+    })
 }
+
 
 
 
