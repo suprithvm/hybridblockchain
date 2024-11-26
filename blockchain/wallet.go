@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"os"
 )
@@ -78,19 +79,19 @@ func generateAddress(publicKey *ecdsa.PublicKey) string {
 	// Concatenate public key coordinates
 	pubKeyBytes := append(publicKey.X.Bytes(), publicKey.Y.Bytes()...)
 
+
 	// Hash the concatenated bytes
 	hash := sha256.Sum256(pubKeyBytes)
 
+
 	// Create a checksum from the hash
-	checksum := sha256.Sum256(hash[:])
+	checksum := sha256.Sum256(hash[:10])
+
 
 	// Combine the prefix, hash, and checksum
 	fullAddress := fmt.Sprintf("sup%s%s", hex.EncodeToString(hash[:10]), hex.EncodeToString(checksum[:4]))
 
-	// Ensure the address length is between 30-36 characters
-	if len(fullAddress) > 36 {
-		return fullAddress[:36]
-	}
+
 	return fullAddress
 }
 
@@ -143,24 +144,31 @@ func EncodeAddress(publicKey string) string {
 	return address[:36] // Ensure length between 30-36
 }
 
-// ValidateAddress ensures the address is valid
 func ValidateAddress(address string) bool {
-	if len(address) < 30 || len(address) > 36 {
-		return false
-	}
+    if len(address) < 30 || len(address) > 36 {
+        return false
+    }
 
-	if address[:3] != "sup" {
-		return false
-	}
+    if address[:3] != "sup" {
+        return false
+    }
 
-	// Extract and verify checksum
-	addressBody := address[3:29]
-	expectedChecksum := address[29:]
-	hash := sha256.Sum256([]byte(addressBody))
-	computedChecksum := hex.EncodeToString(hash[:4])
+    // Extract the hash and checksum
+    hashPart := address[3:len(address)-8]
+    expectedChecksum := address[len(address)-8:]
 
-	return computedChecksum == expectedChecksum
+    // Recalculate the hash
+    hashBytes, err := hex.DecodeString(hashPart)
+    if err != nil {
+        log.Print("[ERROR] Failed to decode hash part: ", err)
+        return false
+    }
+
+    recalculatedChecksum := sha256.Sum256(hashBytes)
+    computedChecksum := hex.EncodeToString(recalculatedChecksum[:4])
+    return computedChecksum == expectedChecksum
 }
+
 
 // RecoverWalletFromMnemonic recovers a wallet using a mnemonic phrase
 func RecoverWalletFromMnemonic(mnemonic string) (*Wallet, error) {

@@ -191,3 +191,25 @@ func (t *PatriciaTrie) ProfiledInsert(tx Transaction) {
 		t.Insert(tx)
 	})
 }
+
+
+// Len returns the number of transactions in the Patricia Trie.
+func (t *PatriciaTrie) Len() int {
+    var count int
+
+    var traverse func(node *PatriciaNode)
+    traverse = func(node *PatriciaNode) {
+        if node == nil {
+            return
+        }
+        if node.IsLeaf && node.Value != nil {
+            count++
+        }
+        for _, child := range node.Children {
+            traverse(child)
+        }
+    }
+
+    traverse(t.Root)
+    return count
+}

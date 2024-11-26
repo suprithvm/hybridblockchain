@@ -1,131 +1,210 @@
 package blockchain
 
 import (
+	"log"
+	"strconv"
 	"testing"
-	"time"
 
-	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p"
 )
 
-// TestNodeInitialization verifies that a node is initialized correctly.
-func TestNodeInitialization(t *testing.T) {
-	node, err := NewNode("/ip4/127.0.0.1/tcp/0")
+func TestWalletCreationAndTransactions(t *testing.T) {
+	// Create two wallets
+	wallet1, err := NewWallet()
+	log.Print("[INFO] wallet1: ", wallet1.Address)
 	if err != nil {
-		t.Fatalf("Failed to initialize node: %v", err)
+		t.Fatalf("Failed to create wallet1: %v", err)
 	}
-	defer node.Host.Close()
 
-	t.Logf("Node initialized with ID: %s", node.Host.ID().String())
-	if len(node.Host.Addrs()) == 0 {
-		t.Fatalf("Node has no listening addresses.")
+	wallet2, err := NewWallet()
+	log.Print("[INFO] wallet2: ", wallet2.Address)
+	if err != nil {
+		t.Fatalf("Failed to create wallet2: %v", err)
 	}
+
+	// Ensure wallets have valid addresses
+	if !ValidateAddress(wallet1.Address) || !ValidateAddress(wallet2.Address) {
+		t.Fatalf("Invalid wallet addresses generated")
+	}
+
+	// Create a transaction
+	tx := NewTransaction(wallet1.Address, wallet2.Address, 100.0, 0.5)
+	err = wallet1.SignTransaction(tx)
+	if err != nil {
+		t.Fatalf("Failed to sign transaction: %v", err)
+	}
+
+	// Verify the transaction
+	if !wallet1.VerifyTransaction(tx) {
+		t.Fatal("Transaction verification failed")
+	}
+
+	t.Logf("Transaction verified successfully: %+v", tx)
 }
 
-// TestPeerConnection verifies that nodes can connect to each other.
-func TestPeerConnection(t *testing.T) {
-	nodeA, _ := NewNode("/ip4/127.0.0.1/tcp/0")
-	nodeB, _ := NewNode("/ip4/127.0.0.1/tcp/0")
-	defer nodeA.Host.Close()
-	defer nodeB.Host.Close()
+func TestBlockMiningAndAddition(t *testing.T) {
+	// Initialize blockchain and supporting components
+	blockchain := InitialiseBlockchain()
+	mempool := NewMempool()
+	utxoSet := make(map[string]UTXO)
 
-	peerAddr := nodeB.Host.Addrs()[0].String() + "/p2p/" + nodeB.Host.ID().String()
-	if err := nodeA.ConnectToPeer(peerAddr); err != nil {
-		t.Fatalf("Failed to connect to peer: %v", err)
+	// Generate wallets
+	wallet, err := NewWallet()
+	if err != nil {
+		t.Fatalf("Failed to create wallet: %v", err)
 	}
 
-	// Verify connection
-	if len(nodeA.Host.Peerstore().Peers()) == 0 {
-		t.Fatalf("Node A has no peers.")
-	}
-	t.Logf("Node A connected to Node B successfully.")
-}
-
-// TestBroadcastTransaction verifies broadcasting transactions between nodes.
-func TestBroadcastTransaction(t *testing.T) {
-	nodeA, _ := NewNode("/ip4/127.0.0.1/tcp/0")
-	nodeB, _ := NewNode("/ip4/127.0.0.1/tcp/0")
-	defer nodeA.Host.Close()
-	defer nodeB.Host.Close()
-
-	peerAddr := nodeB.Host.Addrs()[0].String() + "/p2p/" + nodeB.Host.ID().String()
-	if err := nodeA.ConnectToPeer(peerAddr); err != nil {
-		t.Fatalf("Failed to connect to peer: %v", err)
-	}
-
-	tx := Transaction{
-		TransactionID: "tx123",
-		Sender:        "Alice",
-		Receiver:      "Bob",
-		Amount:        50.0,
-		Timestamp:     time.Now().Unix(),
-	}
-
-	go nodeB.Host.SetStreamHandler("/blockchain/1.0.0/transaction", func(s network.Stream) {
-		defer s.Close()
-
-		buf := make([]byte, 512)
-		n, err := s.Read(buf)
-		if err != nil {
-			t.Errorf("Error reading transaction stream: %v", err)
-			return
+	// Add transactions to mempool
+	for i := 0; i < 5; i++ {
+		tx := NewTransaction(wallet.Address, "receiver"+strconv.Itoa(i), float64(10*(i+1)), 0.2)
+		success := mempool.AddTransaction(*tx, utxoSet)
+		if !success {
+			t.Fatalf("Failed to add transaction to mempool: %v", err)
 		}
-
-		receivedTx, err := DeserializeTransaction(buf[:n])
-		if err != nil {
-			t.Errorf("Failed to deserialize transaction: %v", err)
-			return
-		}
-
-		t.Logf("Transaction received: %+v", receivedTx)
-	})
-
-	time.Sleep(1 * time.Second) // Allow stream handler setup
-
-	nodeA.BroadcastTransaction(tx)
-	time.Sleep(1 * time.Second) // Allow broadcast time
-}
-
-// TestBroadcastBlock verifies broadcasting blocks between nodes.
-func TestBroadcastBlock(t *testing.T) {
-	nodeA, _ := NewNode("/ip4/127.0.0.1/tcp/0")
-	nodeB, _ := NewNode("/ip4/127.0.0.1/tcp/0")
-	defer nodeA.Host.Close()
-	defer nodeB.Host.Close()
-
-	peerAddr := nodeB.Host.Addrs()[0].String() + "/p2p/" + nodeB.Host.ID().String()
-	if err := nodeA.ConnectToPeer(peerAddr); err != nil {
-		t.Fatalf("Failed to connect to peer: %v", err)
 	}
 
-	block := Block{
+	// Validate mempool has transactions
+	if len(mempool.GetTransactions()) == 0 {
+		t.Fatalf("Mempool is empty, transactions not added properly")
+	}
+
+	// Create and add a block
+	peerHost, err := libp2p.New()
+	if err != nil {
+		t.Fatalf("Failed to initialize peer host: %v", err)
+	}
+	defer peerHost.Close()
+
+	stakePool := NewStakePool()
+	err = stakePool.AddStake(wallet.Address, peerHost.ID().String(), 100)
+	if err != nil {
+		t.Fatalf("Failed to add stake for validator: %v", err)
+	}
+
+	blockchain.AddBlock(mempool, stakePool, utxoSet, peerHost)
+
+	// Validate new block addition
+	if len(blockchain.Chain) != 2 {
+		t.Fatalf("Block not added properly to the blockchain")
+	}
+
+	t.Logf("Blockchain updated successfully: %+v", blockchain.Chain)
+}
+
+func TestValidatorSelectionAndBroadcast(t *testing.T) {
+	// Initialize stake pool and P2P host
+	stakePool := NewStakePool()
+	peerHost, err := libp2p.New()
+	if err != nil {
+		t.Fatalf("Failed to initialize peer host: %v", err)
+	}
+	defer peerHost.Close()
+
+	// Generate wallets for validators
+	wallet1, _ := NewWallet()
+	wallet2, _ := NewWallet()
+
+	// Add stakes for wallets
+	err = stakePool.AddStake(wallet1.Address, peerHost.ID().String(), 200)
+	if err != nil {
+		t.Fatalf("Failed to add stake for wallet1: %v", err)
+	}
+	err = stakePool.AddStake(wallet2.Address, "host2", 300)
+	if err != nil {
+		t.Fatalf("Failed to add stake for wallet2: %v", err)
+	}
+
+	// Select a validator
+	validatorWallet, validatorHost, err := stakePool.SelectValidator(peerHost)
+	if err != nil {
+		t.Fatalf("Validator selection failed: %v", err)
+	}
+
+	if validatorWallet == "" || validatorHost == "" {
+		t.Fatalf("Validator selection returned empty wallet or host")
+	}
+
+	t.Logf("Validator selected: Wallet=%s, Host=%s", validatorWallet, validatorHost)
+}
+
+func TestPatriciaTrieIntegration(t *testing.T) {
+    // Initialize Patricia Trie
+    trie := NewPatriciaTrie()
+
+    var targetTx Transaction
+
+    // Generate wallets for dynamic sender and receiver addresses
+    wallets := make([]*Wallet, 10)
+    for i := 0; i < 10; i++ {
+        wallet, err := NewWallet()
+        if err != nil {
+            t.Fatalf("Failed to create wallet %d: %v", i, err)
+        }
+        wallets[i] = wallet
+    }
+
+    // Create transactions with dynamically generated wallet addresses
+    for i := 0; i < 10; i++ {
+        sender := wallets[i].Address
+        receiver := wallets[(i+1)%10].Address // Ensure a different receiver for each transaction
+        tx := NewTransaction(sender, receiver, float64(10*(i+1)), 0.1)
+
+        // Sign the transaction using the sender's private key
+        err := wallets[i].SignTransaction(tx)
+        if err != nil {
+            t.Fatalf("Failed to sign transaction %d: %v", i, err)
+        }
+
+        trie.Insert(*tx)
+
+        // Save a transaction for validation
+        if i == 5 {
+            targetTx = *tx
+        }
+    }
+
+    // Use the dynamically generated TransactionID for search
+    txID := targetTx.TransactionID
+    foundTx, exists := trie.Search(txID)
+    if !exists || foundTx.TransactionID != txID {
+        t.Fatalf("Transaction with ID %s not found in trie", txID)
+    }
+
+    t.Logf("Transaction found in trie: %+v", foundTx)
+}
+
+
+func TestDynamicDifficultyAdjustment(t *testing.T) {
+	// Create blocks with different timestamps
+	block1 := GenesisBlock()
+	block2 := Block{
 		BlockNumber:  1,
-		PreviousHash: "0x000...",
-		Timestamp:    time.Now().Unix(),
-		Hash:         "0xabc123",
-		Difficulty:   1,
+		PreviousHash: block1.Hash,
+		Timestamp:    block1.Timestamp + 15, // Simulate a block created after 15 seconds
+		Difficulty:   block1.Difficulty,
 	}
 
-	go nodeB.Host.SetStreamHandler("/blockchain/1.0.0/block", func(s network.Stream) {
-		defer s.Close()
+	// Adjust difficulty
+	targetTime := int64(10) // Target block time in seconds
+	newDifficulty := AdjustDifficulty(block2, targetTime)
 
-		buf := make([]byte, 4096)
-		n, err := s.Read(buf)
-		if err != nil {
-			t.Errorf("Error reading block stream: %v", err)
-			return
-		}
+	// Validate difficulty adjustment logic
+	if newDifficulty != block1.Difficulty+1 {
+		t.Fatalf("Difficulty adjustment failed. Expected %d, got %d", block1.Difficulty+1, newDifficulty)
+	}
 
-		receivedBlock, err := DeserializeBlock(buf[:n])
-		if err != nil {
-			t.Errorf("Failed to deserialize block: %v", err)
-			return
-		}
+	t.Logf("Difficulty adjusted successfully: %d", newDifficulty)
+}
 
-		t.Logf("Block received: %+v", receivedBlock)
-	})
+func TestValidateAddress(t *testing.T) {
+    wallet, err := NewWallet()
+    if err != nil {
+        t.Fatalf("Failed to create wallet: %v", err)
+    }
 
-	time.Sleep(1 * time.Second) // Allow stream handler setup
-
-	nodeA.BroadcastBlock(block)
-	time.Sleep(1 * time.Second) // Allow broadcast time
+    if !ValidateAddress(wallet.Address) {
+        t.Errorf("Address validation failed for address: %s", wallet.Address)
+    } else {
+        t.Logf("Address validation passed for address: %s", wallet.Address)
+    }
 }

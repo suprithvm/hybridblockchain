@@ -3,6 +3,7 @@ package blockchain
 import (
 	"log"
 	"fmt"
+	"github.com/libp2p/go-libp2p/core/host"
 )
 
 //chain of blocks are stored
@@ -21,33 +22,33 @@ func InitialiseBlockchain() Blockchain {
 	return blockchain
 }
 
-//Add new block to the blockchain
-func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet map[string]UTXO) {
+// Add peerHost as a parameter to blockchain methods where necessary
+func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet map[string]UTXO, peerHost host.Host) {
 	previousBlock := bc.GetLatestBlock()
 
-	// Select validator using the stake pool
-	validator, err := stakePool.SelectValidator()
+	// Select validator
+	validatorWallet, validatorHost, err := stakePool.SelectValidator(peerHost)
 	if err != nil {
 		log.Printf("Failed to select validator: %v", err)
 		return
 	}
 
-	// Create the new block with mempool directly
-	newBlock := NewBlock(previousBlock, mempool, utxoSet, previousBlock.Difficulty, validator)
+	// Create the new block
+	newBlock := NewBlock(previousBlock, mempool, utxoSet, previousBlock.Difficulty, validatorWallet)
 
 	// Mine and validate the block
-	err = MineBlock(&newBlock, previousBlock, stakePool, 10)
+	err = MineBlock(&newBlock, previousBlock, stakePool, 10, peerHost)
 	if err != nil {
 		log.Printf("Failed to mine block: %v", err)
 		return
 	}
 
 	// Validate and add the block to the chain
-	if ValidateBlock(newBlock, previousBlock, validator, stakePool) {
+	if ValidateBlock(newBlock, previousBlock, validatorWallet, stakePool) {
 		bc.Chain = append(bc.Chain, newBlock)
-		log.Printf("Block %d added by validator %s.\n", newBlock.BlockNumber, validator)
+		log.Printf("Block %d added by validator Wallet=%s HostID=%s.\n", newBlock.BlockNumber, validatorWallet, validatorHost)
 
-		// Get transactions from the block's trie and remove them from mempool
+		// Remove transactions from mempool
 		blockTxs := newBlock.Transactions.GetAllTransactions()
 		for _, tx := range blockTxs {
 			mempool.RemoveTransaction(tx.TransactionID)
@@ -57,15 +58,21 @@ func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet m
 	}
 }
 
+
 // GetLatestBlock retrieves the most recent block in the chain
 func (bc *Blockchain) GetLatestBlock() Block {
 	return bc.Chain[len(bc.Chain)-1]
 }
 
 func ValidateBlock(newBlock Block, previousBlock Block, validator string, stakePool *StakePool) bool {
-	// Check previous hash
 	if newBlock.PreviousHash != previousBlock.Hash {
-		log.Println("Validation failed: Previous hash mismatch.")
+		log.Println("Validation failed: Previous hash mismatch. Checking fork resolution...")
+
+		// Compare chain lengths or cumulative difficulty
+		if newBlock.Difficulty > previousBlock.Difficulty || previousBlock.Transactions.Len() > 0  {
+			log.Println("Switching to the longer or higher difficulty chain.")
+			return true
+		}
 		return false
 	}
 

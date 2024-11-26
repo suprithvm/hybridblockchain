@@ -3,13 +3,14 @@ package blockchain
 import (
 	"bytes"
 	"crypto/sha256"
+	"github.com/libp2p/go-libp2p/core/host"
+	"encoding/binary"
 	"encoding/gob"
 	"encoding/hex"
 	"fmt"
 	"log"
 	"strconv"
 	"time"
-	"encoding/binary"
 )
 
 const BlockReward = 50.0                  // Reward for mining a block
@@ -123,13 +124,13 @@ func NewBlock(previousBlock Block, mempool *Mempool, utxoSet map[string]UTXO, di
 }
 
 // MineBlock performs mining with validator selection.
-func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, targetTime int64) error {
+func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, targetTime int64, peerHost host.Host) error {
 	// Select validator based on stake pool.
-	validator, err := stakePool.SelectValidator()
+	validatorWallet, validatorHost, err := stakePool.SelectValidator(peerHost)
 	if err != nil {
 		return err
 	}
-	log.Printf("Selected Validator: %s\n", validator)
+	log.Printf("Selected Validator: Wallet=%s, HostID=%s\n", validatorWallet, validatorHost)
 
 	// Adjust difficulty based on the target time.
 	block.Difficulty = AdjustDifficulty(previousBlock, targetTime)
@@ -145,6 +146,7 @@ func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, targetTi
 
 	return nil
 }
+
 
 // isHashValid checks if a hash meets the difficulty target
 func isHashValid(hash string, difficulty int) bool {
@@ -199,6 +201,18 @@ func AdjustDifficulty(previousBlock Block, targetTime int64) int {
 	}
 	return previousBlock.Difficulty
 }
+
+// Dynamic difficulty adjustment considering network latency and node power
+func AdjustDifficultyDynamic(previousBlock Block, networkLatency int64, nodeProcessingPower float64) int {
+	// Scale difficulty based on latency and processing power
+	if networkLatency > 100 && nodeProcessingPower < 0.5 {
+		return previousBlock.Difficulty - 1 // Lower difficulty for slower nodes
+	} else if networkLatency < 50 && nodeProcessingPower > 1.0 {
+		return previousBlock.Difficulty + 1 // Increase difficulty for faster nodes
+	}
+	return previousBlock.Difficulty
+}
+
 func AdjustDifficultyForTest() int {
 	return 1 // Minimum difficulty for faster tests
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"  // Updated import
@@ -90,6 +91,28 @@ func (n *Node) setupStreamHandler() {
         }
         log.Printf("Received Transaction: %+v\n", tx)
     })
+
+	// Add handler for validator messages
+	n.Host.SetStreamHandler("/blockchain/1.0.0/validator", func(s network.Stream) {
+		defer s.Close()
+		buf := make([]byte, 256)
+		n, err := s.Read(buf)
+		if err != nil {
+			log.Printf("Error reading validator stream: %v", err)
+			return
+		}
+
+		// Deserialize validator data (walletAddress, hostID)
+		data := string(buf[:n])
+		parts := strings.Split(data, ",")
+		if len(parts) != 2 {
+			log.Printf("Invalid validator data received: %s", data)
+			return
+		}
+		walletAddress, hostID := parts[0], parts[1]
+		log.Printf("Received validator announcement: Wallet=%s, HostID=%s", walletAddress, hostID)
+	})
+
 }
 
 
