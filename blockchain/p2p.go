@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"encoding/json"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"  // Updated import
@@ -113,6 +114,32 @@ func (n *Node) setupStreamHandler() {
 		log.Printf("Received validator announcement: Wallet=%s, HostID=%s", walletAddress, hostID)
 	})
 
+	// Handle incoming chain data
+	n.Host.SetStreamHandler("/blockchain/1.0.0/chain", func(s network.Stream) {
+		defer s.Close()
+		buf := make([]byte, 4096)
+		_, err := s.Read(buf)
+		if err != nil {
+			log.Printf("[P2P] Error reading chain data: %v", err)
+			return
+		}
+
+		var receivedChain []Block
+		err = json.Unmarshal(buf, &receivedChain)
+		if err != nil {
+			log.Printf("[P2P] Failed to deserialize chain: %v", err)
+			return
+		}
+
+		// Resolve fork if necessary
+		
+		tempchain := &Blockchain{Chain: receivedChain}
+		tempchain.ResolveFork(receivedChain)
+	})
+
+	
+
+
 }
 
 
@@ -212,4 +239,31 @@ func (n *Node) BroadcastMessage(msg string) {
 }
 
 
+
+// BroadcastChain sends the entire chain to all peers
+func (n *Node) BroadcastChain(blockchain *Blockchain) {
+    chainData, err := json.Marshal(blockchain.Chain)
+    if err != nil {
+        log.Printf("[P2P] Failed to serialize blockchain: %v", err)
+        return
+    }
+
+    for _, peer := range n.Host.Peerstore().Peers() {
+        if peer == n.Host.ID() {
+            continue
+        }
+
+        stream, err := n.Host.NewStream(context.Background(), peer, "/blockchain/1.0.0/chain")
+        if err != nil {
+            log.Printf("[P2P] Failed to open stream to peer %s: %v", peer.String(), err)
+            continue
+        }
+        defer stream.Close()
+
+        _, err = stream.Write(chainData)
+        if err != nil {
+            log.Printf("[P2P] Failed to send blockchain data to peer %s: %v", peer.String(), err)
+        }
+    }
+}
 

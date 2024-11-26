@@ -129,3 +129,70 @@ func (bc *Blockchain) ExecuteMultiSigTransaction(tx *MultiSigTransaction, wallet
     UpdateUTXOSet(tx.Transaction, utxoSet)
     return nil
 }
+
+
+// ResolveFork resolves forks by selecting the chain with the highest cumulative difficulty
+// ResolveFork selects the chain with the highest cumulative difficulty.
+func (bc *Blockchain) ResolveFork(candidateChain []Block) {
+	currentCumulativeDifficulty := bc.Chain[len(bc.Chain)-1].CumulativeDifficulty
+	candidateCumulativeDifficulty := candidateChain[len(candidateChain)-1].CumulativeDifficulty
+
+	// Validate candidate chain
+	if !bc.ValidateCandidateChain(candidateChain) {
+		log.Println("[Fork Resolution] Candidate chain is invalid.")
+		return
+	}
+
+	// Compare cumulative difficulties
+	if candidateCumulativeDifficulty > currentCumulativeDifficulty {
+		log.Printf("[Fork Resolution] Adopting new chain. Candidate cumulative difficulty: %d > Current: %d",
+			candidateCumulativeDifficulty, currentCumulativeDifficulty)
+		bc.Chain = candidateChain
+	} else {
+		log.Println("[Fork Resolution] Retaining current chain.")
+	}
+}
+
+
+// ValidateCandidateChain checks the structural and cryptographic validity of a candidate chain.
+func (bc *Blockchain) ValidateCandidateChain(candidateChain []Block) bool {
+    for i := 1; i < len(candidateChain); i++ {
+        currentBlock := candidateChain[i]
+        previousBlock := candidateChain[i-1]
+
+        // Check block linkage
+        if currentBlock.PreviousHash != previousBlock.Hash {
+            log.Printf("[Validation] Block %d has an invalid previous hash.", currentBlock.BlockNumber)
+            return false
+        }
+
+        // Validate PoW difficulty
+        if !isHashValid(currentBlock.Hash, currentBlock.Difficulty) {
+            log.Printf("[Validation] Block %d does not meet difficulty requirements.", currentBlock.BlockNumber)
+            return false
+        }
+
+        // Ensure cumulative difficulty is consistent
+        expectedCumulative := previousBlock.CumulativeDifficulty + currentBlock.Difficulty
+        if currentBlock.CumulativeDifficulty != expectedCumulative {
+            log.Printf("[Validation] Block %d has inconsistent cumulative difficulty.", currentBlock.BlockNumber)
+            return false
+        }
+    }
+    return true
+}
+
+
+// ReplaceChain replaces the current chain with a new one after validation
+func (bc *Blockchain) ReplaceChain(newChain []Block) {
+    if len(newChain) <= len(bc.Chain) {
+        log.Println("Chain replacement rejected: New chain is not longer.")
+        return
+    }
+    if bc.ValidateCandidateChain(newChain) {
+        bc.Chain = newChain
+        log.Println("Chain successfully replaced.")
+    } else {
+        log.Println("Chain replacement failed: Validation of the new chain failed.")
+    }
+}

@@ -19,15 +19,17 @@ const MaxBlockSizeLimit = 1 * 1024 * 1024 // 1MB block size limit
 
 // Block represents a single block in the blockchain
 type Block struct {
-	BlockNumber  int
-	PreviousHash string
-	Timestamp    int64
-	PatriciaRoot string        // Root of the Patricia Trie
-	Transactions *PatriciaTrie // Replace list with Patricia Trie
-	Nonce        int
-	Hash         string
-	Difficulty   int
+    BlockNumber       int
+    PreviousHash      string
+    Timestamp         int64
+    PatriciaRoot      string        // Root of the Patricia Trie
+    Transactions      *PatriciaTrie // Replace list with Patricia Trie
+    Nonce             int
+    Hash              string
+    Difficulty        int
+    CumulativeDifficulty int       // Sum of difficulties up to this block
 }
+
 
 // GenesisBlock creates the first block in the blockchain
 func GenesisBlock() Block {
@@ -38,6 +40,7 @@ func GenesisBlock() Block {
 		Transactions: nil,
 		Nonce:        0,
 		Difficulty:   1,
+		CumulativeDifficulty: 1,
 	}
 	genesis.Hash = calculateHash(genesis)
 	return genesis
@@ -111,14 +114,16 @@ func NewBlock(previousBlock Block, mempool *Mempool, utxoSet map[string]UTXO, di
 
 	// Create the new block
 	block := Block{
-		BlockNumber:  previousBlock.BlockNumber + 1,
-		PreviousHash: previousBlock.Hash,
-		Timestamp:    time.Now().Unix(),
-		PatriciaRoot: trie.GenerateRootHash(),
-		Transactions: trie,
-		Difficulty:   difficulty,
+		BlockNumber:       previousBlock.BlockNumber + 1,
+		PreviousHash:      previousBlock.Hash,
+		Timestamp:         time.Now().Unix(),
+		PatriciaRoot:      trie.GenerateRootHash(),
+		Transactions:      trie,
+		Difficulty:        difficulty,
+		CumulativeDifficulty: previousBlock.CumulativeDifficulty + difficulty,
 	}
 	block.Hash = calculateHash(block)
+	
 	log.Printf("[DEBUG] New Block Created: %+v", block)
 	return block
 }
