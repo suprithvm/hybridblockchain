@@ -3,7 +3,6 @@ package blockchain
 import (
 	"bytes"
 	"crypto/sha256"
-	"github.com/libp2p/go-libp2p/core/host"
 	"encoding/binary"
 	"encoding/gob"
 	"encoding/hex"
@@ -11,6 +10,8 @@ import (
 	"log"
 	"strconv"
 	"time"
+
+	"github.com/libp2p/go-libp2p/core/host"
 )
 
 const BlockReward = 50.0                  // Reward for mining a block
@@ -19,27 +20,26 @@ const MaxBlockSizeLimit = 1 * 1024 * 1024 // 1MB block size limit
 
 // Block represents a single block in the blockchain
 type Block struct {
-    BlockNumber       int
-    PreviousHash      string
-    Timestamp         int64
-    PatriciaRoot      string        // Root of the Patricia Trie
-    Transactions      *PatriciaTrie // Replace list with Patricia Trie
-    Nonce             int
-    Hash              string
-    Difficulty        int
-    CumulativeDifficulty int       // Sum of difficulties up to this block
+	BlockNumber          int
+	PreviousHash         string
+	Timestamp            int64
+	PatriciaRoot         string        // Root of the Patricia Trie
+	Transactions         *PatriciaTrie // Replace list with Patricia Trie
+	Nonce                int
+	Hash                 string
+	Difficulty           int
+	CumulativeDifficulty int // Sum of difficulties up to this block
 }
-
 
 // GenesisBlock creates the first block in the blockchain
 func GenesisBlock() Block {
 	genesis := Block{
-		BlockNumber:  0,
-		PreviousHash: "0x00000000000000000000000000000000",
-		Timestamp:    time.Now().Unix(),
-		Transactions: nil,
-		Nonce:        0,
-		Difficulty:   1,
+		BlockNumber:          0,
+		PreviousHash:         "0x00000000000000000000000000000000",
+		Timestamp:            time.Now().Unix(),
+		Transactions:         nil,
+		Nonce:                0,
+		Difficulty:           1,
 		CumulativeDifficulty: 1,
 	}
 	genesis.Hash = calculateHash(genesis)
@@ -114,16 +114,16 @@ func NewBlock(previousBlock Block, mempool *Mempool, utxoSet map[string]UTXO, di
 
 	// Create the new block
 	block := Block{
-		BlockNumber:       previousBlock.BlockNumber + 1,
-		PreviousHash:      previousBlock.Hash,
-		Timestamp:         time.Now().Unix(),
-		PatriciaRoot:      trie.GenerateRootHash(),
-		Transactions:      trie,
-		Difficulty:        difficulty,
+		BlockNumber:          previousBlock.BlockNumber + 1,
+		PreviousHash:         previousBlock.Hash,
+		Timestamp:            time.Now().Unix(),
+		PatriciaRoot:         trie.GenerateRootHash(),
+		Transactions:         trie,
+		Difficulty:           difficulty,
 		CumulativeDifficulty: previousBlock.CumulativeDifficulty + difficulty,
 	}
 	block.Hash = calculateHash(block)
-	
+
 	log.Printf("[DEBUG] New Block Created: %+v", block)
 	return block
 }
@@ -152,7 +152,6 @@ func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, targetTi
 	return nil
 }
 
-
 // isHashValid checks if a hash meets the difficulty target
 func isHashValid(hash string, difficulty int) bool {
 	prefix := ""
@@ -164,38 +163,36 @@ func isHashValid(hash string, difficulty int) bool {
 
 // SerializeBlock serializes a block
 func SerializeBlock(block Block) ([]byte, error) {
-    var buffer bytes.Buffer
-    encoder := gob.NewEncoder(&buffer)
-    err := encoder.Encode(block)
-    if err != nil {
-        return nil, err
-    }
-    lengthPrefix := make([]byte, 4)
-    binary.BigEndian.PutUint32(lengthPrefix, uint32(buffer.Len()))
-    return append(lengthPrefix, buffer.Bytes()...), nil
+	var buffer bytes.Buffer
+	encoder := gob.NewEncoder(&buffer)
+	err := encoder.Encode(block)
+	if err != nil {
+		return nil, err
+	}
+	lengthPrefix := make([]byte, 4)
+	binary.BigEndian.PutUint32(lengthPrefix, uint32(buffer.Len()))
+	return append(lengthPrefix, buffer.Bytes()...), nil
 }
-
 
 // DeserializeBlock deserializes a block
 func DeserializeBlock(data []byte) (Block, error) {
-    if len(data) < 4 {
-        return Block{}, fmt.Errorf("data too short to contain length prefix")
-    }
+	if len(data) < 4 {
+		return Block{}, fmt.Errorf("data too short to contain length prefix")
+	}
 
-    length := binary.BigEndian.Uint32(data[:4])
-    if int(length) != len(data[4:]) {
-        return Block{}, fmt.Errorf("data length mismatch: expected %d, got %d", length, len(data[4:]))
-    }
+	length := binary.BigEndian.Uint32(data[:4])
+	if int(length) != len(data[4:]) {
+		return Block{}, fmt.Errorf("data length mismatch: expected %d, got %d", length, len(data[4:]))
+	}
 
-    var block Block
-    decoder := gob.NewDecoder(bytes.NewReader(data[4:]))
-    err := decoder.Decode(&block)
-    if err != nil {
-        return Block{}, err
-    }
-    return block, nil
+	var block Block
+	decoder := gob.NewDecoder(bytes.NewReader(data[4:]))
+	err := decoder.Decode(&block)
+	if err != nil {
+		return Block{}, err
+	}
+	return block, nil
 }
-
 
 func AdjustDifficulty(previousBlock Block, targetTime int64) int {
 	actualTime := time.Now().Unix() - previousBlock.Timestamp
@@ -224,14 +221,14 @@ func AdjustDifficultyForTest() int {
 
 // CalculateDynamicBlockSize calculates the appropriate block size based on mempool size and network constraints
 func CalculateDynamicBlockSize(mempoolSize int) int {
-    const minBlockSize = 1
-    const maxBlockSize = MaxBlockSizeLimit / AvgTransactionSize
+	const minBlockSize = 1
+	const maxBlockSize = MaxBlockSizeLimit / AvgTransactionSize
 
-    if mempoolSize < minBlockSize {
-        return minBlockSize
-    }
-    if mempoolSize > maxBlockSize {
-        return maxBlockSize
-    }
-    return mempoolSize
+	if mempoolSize < minBlockSize {
+		return minBlockSize
+	}
+	if mempoolSize > maxBlockSize {
+		return maxBlockSize
+	}
+	return mempoolSize
 }

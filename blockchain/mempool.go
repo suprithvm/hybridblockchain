@@ -168,3 +168,14 @@ func (m *Mempool) ClearProcessedTransactions(processedTxs []string) {
 
 	fmt.Printf("DEBUG: Remaining transactions in mempool: %d\n", len(m.Transactions))
 }
+
+
+// BroadcastPendingTransactions broadcasts all transactions in the mempool.
+func (m *Mempool) BroadcastPendingTransactions(n *Node) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+
+    for _, tx := range m.Transactions {
+        n.BroadcastTransaction(tx)
+    }
+}
