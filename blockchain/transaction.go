@@ -56,7 +56,13 @@ func NewTransaction(sender, receiver string, amount, gasFee float64) *Transactio
 
 // GenerateTransactionID generates a unique ID for the transaction
 func (tx *Transaction) GenerateTransactionID() string {
-	data := fmt.Sprintf("%s%s%f%d", tx.Sender, tx.Receiver, tx.Amount, tx.Timestamp)
+	data := fmt.Sprintf("%s%s%f%f%d",
+		tx.Sender,
+		tx.Receiver,
+		tx.Amount,
+		tx.GasFee,
+		tx.Timestamp,
+	)
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:])
 }
@@ -67,7 +73,6 @@ func (tx *Transaction) Hash() string {
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:])
 }
-
 
 // SerializeTransaction serializes a transaction
 func SerializeTransaction(tx *Transaction) ([]byte, error) {
@@ -143,7 +148,6 @@ func (tx *Transaction) ValidateSignatures(wallet interface{}, publicKeyMap map[s
 	return false
 }
 
-
 // Hash computes the hash for a multi-signature transaction.
 func (tx *MultiSigTransaction) Hash() string {
 	return tx.Transaction.Hash()
@@ -167,4 +171,18 @@ func (tx *MultiSigTransaction) ValidateSignatures(wallet interface{}, publicKeyM
 		}
 	}
 	return validSigs >= multiSigWallet.RequiredSigs
+}
+
+// SignTransaction signs a transaction using the private key
+func SignTransaction(tx *Transaction, privateKey *ecdsa.PrivateKey) (string, error) {
+	// Get the transaction hash
+	txHash := tx.Hash()
+	
+	// Use the existing SignMessage function
+	signature, err := SignMessage(privateKey, txHash)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign transaction: %v", err)
+	}
+	
+	return signature, nil
 }

@@ -67,38 +67,54 @@ func (sp *StakePool) GetTotalStake() float64 {
 }
 
 
-// SelectValidator selects a validator based on stakes.
+// SelectValidator selects a validator based on stake weight
 func (sp *StakePool) SelectValidator(peerHost host.Host) (string, string, error) {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
+	if len(sp.Stakes) == 0 {
+		return "", "", errors.New("no validators available")
+	}
+
+	// For testing with a single validator, return it directly
+	if len(sp.Stakes) == 1 {
+		for walletAddr := range sp.Stakes {
+			hostID := sp.WalletToHost[walletAddr]
+			// Skip broadcasting during testing
+			if peerHost != nil {
+				if err := sp.BroadcastValidator(peerHost, walletAddr, hostID); err != nil {
+					return "", "", err
+				}
+			}
+			return walletAddr, hostID, nil
+		}
+	}
+
 	// Calculate total stake
-	totalStake := 0.0
+	var totalStake float64
 	for _, stake := range sp.Stakes {
 		totalStake += stake
 	}
 
-	if totalStake == 0 {
-		return "", "", errors.New("no stakes in the pool")
-	}
-
-	// Weighted random selection
-	randPoint := rand.Float64() * totalStake
-	accumulated := 0.0
-	var selectedWallet string
-	for wallet, stake := range sp.Stakes {
-		accumulated += stake
-		if randPoint <= accumulated {
-			selectedWallet = wallet
-			break
+	// Select validator based on weighted probability
+	r := rand.Float64() * totalStake
+	var cumulativeStake float64
+	
+	for walletAddr, stake := range sp.Stakes {
+		cumulativeStake += stake
+		if cumulativeStake >= r {
+			hostID := sp.WalletToHost[walletAddr]
+			// Skip broadcasting during testing (when peerHost is nil)
+			if peerHost != nil {
+				if err := sp.BroadcastValidator(peerHost, walletAddr, hostID); err != nil {
+					return "", "", err
+				}
+			}
+			return walletAddr, hostID, nil
 		}
 	}
 
-	selectedHostID := sp.WalletToHost[selectedWallet]
-	if err := sp.BroadcastValidator(peerHost, selectedWallet, selectedHostID); err != nil {
-		return "", "", err
-	}
-	return selectedWallet, selectedHostID, nil
+	return "", "", errors.New("failed to select validator")
 }
 
 
@@ -106,6 +122,11 @@ func (sp *StakePool) SelectValidator(peerHost host.Host) (string, string, error)
 
 // BroadcastValidator sends the selected validator's wallet address and host ID to all nodes.
 func (sp *StakePool) BroadcastValidator(peerHost host.Host, walletAddress, hostID string) error {
+	// Skip broadcasting if no peer host is provided (e.g. during testing)
+	if peerHost == nil {
+		return nil
+	}
+
 	data := walletAddress + "," + hostID // Serialize wallet address and host ID
 	for _, peer := range peerHost.Peerstore().Peers() {
 		if peer == peerHost.ID() {

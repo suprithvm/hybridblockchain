@@ -17,6 +17,8 @@ import (
 const BlockReward = 50.0                  // Reward for mining a block
 const AvgTransactionSize = 250            // Average transaction size in bytes
 const MaxBlockSizeLimit = 1 * 1024 * 1024 // 1MB block size limit
+const CheckpointInterval = 2 // Create checkpoint every 1000 blocks
+const MaxCheckpointAge = 10  // Maximum age of checkpoints to keep
 
 // Block represents a single block in the blockchain
 type Block struct {
@@ -29,6 +31,7 @@ type Block struct {
 	Hash                 string
 	Difficulty           int
 	CumulativeDifficulty int // Sum of difficulties up to this block
+	StateRoot            string
 }
 
 // GenesisBlock creates the first block in the blockchain
@@ -121,6 +124,7 @@ func NewBlock(previousBlock Block, mempool *Mempool, utxoSet map[string]UTXO, di
 		Transactions:         trie,
 		Difficulty:           difficulty,
 		CumulativeDifficulty: previousBlock.CumulativeDifficulty + difficulty,
+		StateRoot:            "",
 	}
 	block.Hash = calculateHash(block)
 
@@ -231,4 +235,20 @@ func CalculateDynamicBlockSize(mempoolSize int) int {
 		return maxBlockSize
 	}
 	return mempoolSize
+}
+
+// CalculateHash calculates the hash of the block
+func (b *Block) CalculateHash() string {
+	return calculateHash(*b)
+}
+
+func (b *Block) CreateCheckpoint() *Checkpoint {
+	return &Checkpoint{
+		Height:            uint64(b.BlockNumber),
+		Hash:              b.Hash,
+		StateRoot:         b.PatriciaRoot,
+		UTXORoot:          b.Transactions.GenerateRootHash(),
+		Timestamp:         b.Timestamp,
+		ValidatorSetHash:  "", // Will be populated if validator set exists
+	}
 }
