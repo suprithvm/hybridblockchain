@@ -110,6 +110,22 @@ type ChainStateVerification struct {
 	ConsensusReached bool
 }
 
+// PeerValidationStrategy defines how peers are validated
+type PeerValidationStrategy int
+
+const (
+    BasicValidation PeerValidationStrategy = iota
+    StrictValidation
+    CustomValidation
+)
+
+// PeerAdditionConfig defines parameters for manual peer addition
+type PeerAdditionConfig struct {
+    MaxTrustedPeers     int
+    ConnectionTimeout   time.Duration
+    ValidationStrategy  PeerValidationStrategy
+}
+
 // Create a serializable block structure
 type BlockMessage struct {
     BlockNumber          int
@@ -184,28 +200,37 @@ func (pm *PeerManager) UpdatePeerScore(id peer.ID, delta int) {
 	}
 }
 
-// blacklistPeer adds a peer to the blacklist
-func (pm *PeerManager) blacklistPeer(id peer.ID) {
-	pm.blacklist[id] = time.Now()
-	if peer, exists := pm.peers[id]; exists {
-		peer.Blacklisted = true
-	}
+// BlacklistPeer adds a peer to the blacklist
+func (pm *PeerManager) BlacklistPeer(peerID peer.ID, duration time.Duration) {
+    pm.mutex.Lock()
+    defer pm.mutex.Unlock()
+    
+    pm.blacklist[peerID] = time.Now().Add(duration)
+    log.Printf("Blacklisted peer %s for %v", peerID, duration)
+    
+    // Mark the peer as blacklisted in the peers map
+    if peerInfo, exists := pm.peers[peerID]; exists {
+        peerInfo.Blacklisted = true
+    }
 }
 
-// IsBlacklisted checks if a peer is blacklisted
-func (pm *PeerManager) IsBlacklisted(id peer.ID) bool {
-	pm.mutex.RLock()
-	defer pm.mutex.RUnlock()
-
-	if blacklistedTime, exists := pm.blacklist[id]; exists {
-		// Remove from blacklist after 24 hours
-		if time.Since(blacklistedTime) > 24*time.Hour {
-			delete(pm.blacklist, id)
-			return false
-		}
-		return true
-	}
-	return false
+// IsBlacklisted checks if a peer is currently blacklisted
+func (pm *PeerManager) IsBlacklisted(peerID peer.ID) bool {
+    pm.mutex.RLock()
+    defer pm.mutex.RUnlock()
+    
+    blacklistedUntil, exists := pm.blacklist[peerID]
+    if !exists {
+        return false
+    }
+    
+    if time.Now().After(blacklistedUntil) {
+        // Remove expired blacklist entry
+        delete(pm.blacklist, peerID)
+        return false
+    }
+    
+    return true
 }
 
 // GetBestPeers returns the top n peers by score
@@ -540,7 +565,7 @@ func (pm *PeerManager) RollbackToState(targetState string) error {
 			return fmt.Errorf("reached genesis block without finding target state")
 		}
 		
-		block := pm.blockchain.GetBlockByHeight(currentHeight - i)
+		block := pm.blockchain.GetBlockByHeight(int(currentHeight - i))
 		if block.StateRoot == targetState {
 			return pm.blockchain.RollbackToHeight(currentHeight - i)
 		}
@@ -737,4 +762,145 @@ func (pm *PeerManager) requestPeerStateVerification(peerID peer.ID, height uint6
 	}
 
 	return response.StateRoot, nil
+}
+
+// AddManualPeer adds a peer manually with configurable validation
+func (pm *PeerManager) AddManualPeer(peerInfo peer.AddrInfo, config *PeerAdditionConfig) error {
+    pm.mutex.Lock()
+    defer pm.mutex.Unlock()
+
+    // Default configuration
+    if config == nil {
+        config = &PeerAdditionConfig{
+            MaxTrustedPeers:    maxPeers,
+            ConnectionTimeout:  10 * time.Second,
+            ValidationStrategy: BasicValidation,
+        }
+    }
+
+    // Check peer limit
+    if len(pm.peers) >= config.MaxTrustedPeers {
+        return fmt.Errorf("maximum trusted peers limit (%d) reached", config.MaxTrustedPeers)
+    }
+
+    // Check if already blacklisted
+    if _, blacklisted := pm.blacklist[peerInfo.ID]; blacklisted {
+        return fmt.Errorf("peer %s is blacklisted", peerInfo.ID)
+    }
+
+    // Validate peer based on strategy
+    if err := pm.validatePeer(peerInfo, config.ValidationStrategy); err != nil {
+        return fmt.Errorf("peer validation failed: %w", err)
+    }
+
+    // Attempt connection with timeout
+    ctx, cancel := context.WithTimeout(context.Background(), config.ConnectionTimeout)
+    defer cancel()
+
+    // Attempt to connect to the peer
+    if err := pm.host.Connect(ctx, peerInfo); err != nil {
+        return fmt.Errorf("failed to connect to peer %s: %w", peerInfo.ID, err)
+    }
+
+    // Add or update peer information
+    pm.AddPeer(peerInfo.ID)
+    
+    // Log successful peer addition
+    log.Printf("Manually added trusted peer: %s", peerInfo.ID)
+    
+    return nil
+}
+
+// validatePeer performs peer validation based on strategy
+func (pm *PeerManager) validatePeer(peerInfo peer.AddrInfo, strategy PeerValidationStrategy) error {
+    switch strategy {
+    case BasicValidation:
+        return pm.basicPeerValidation(peerInfo)
+    case StrictValidation:
+        return pm.strictPeerValidation(peerInfo)
+    case CustomValidation:
+        return pm.customPeerValidation(peerInfo)
+    default:
+        return fmt.Errorf("unknown validation strategy: %v", strategy)
+    }
+}
+
+// basicPeerValidation performs minimal peer checks
+func (pm *PeerManager) basicPeerValidation(peerInfo peer.AddrInfo) error {
+    if len(peerInfo.Addrs) == 0 {
+        return fmt.Errorf("peer %s has no addresses", peerInfo.ID)
+    }
+    return nil
+}
+
+// strictPeerValidation performs comprehensive peer validation
+func (pm *PeerManager) strictPeerValidation(peerInfo peer.AddrInfo) error {
+    // Basic validation first
+    if err := pm.basicPeerValidation(peerInfo); err != nil {
+        return err
+    }
+    
+    // Additional strict validation checks
+    // Check if the peer exists in our peer list
+    existingPeerInfo, exists := pm.GetPeerInfo(peerInfo.ID)
+    if !exists {
+        // If the peer doesn't exist, we can't do advanced validation
+        return nil
+    }
+    
+    // Check protocol version compatibility
+    if !pm.NegotiateProtocolVersion(peerInfo.ID, existingPeerInfo.Version) {
+        return fmt.Errorf("incompatible protocol version")
+    }
+    
+    return nil
+}
+
+// customPeerValidation allows for advanced custom validation logic
+func (pm *PeerManager) customPeerValidation(peerInfo peer.AddrInfo) error {
+    // Placeholder for advanced custom validation
+    // Implement specific blockchain-related validation
+    return nil
+}
+
+// RemoveTrustedPeer removes a peer from the active peers
+func (pm *PeerManager) RemoveTrustedPeer(peerID peer.ID) {
+    pm.mutex.Lock()
+    defer pm.mutex.Unlock()
+    
+    delete(pm.peers, peerID)
+    log.Printf("Removed peer: %s", peerID)
+}
+
+// GetTrustedPeers returns a list of currently active peers
+func (pm *PeerManager) GetTrustedPeers() []peer.ID {
+    pm.mutex.RLock()
+    defer pm.mutex.RUnlock()
+    
+    trustedPeerList := make([]peer.ID, 0, len(pm.peers))
+    for peerID, peerInfo := range pm.peers {
+        if !peerInfo.Blacklisted {
+            trustedPeerList = append(trustedPeerList, peerID)
+        }
+    }
+    
+    return trustedPeerList
+}
+
+// CleanupBlacklistedPeers removes expired blacklist entries
+func (pm *PeerManager) CleanupBlacklistedPeers() {
+    pm.mutex.Lock()
+    defer pm.mutex.Unlock()
+    
+    now := time.Now()
+    for peerID, blacklistedTime := range pm.blacklist {
+        // Remove blacklist entry after 24 hours
+        if now.Sub(blacklistedTime) > 24*time.Hour {
+            delete(pm.blacklist, peerID)
+        }
+    }
+}
+
+func (pm *PeerManager) blacklistPeer(id peer.ID) {
+    pm.BlacklistPeer(id, 24*time.Hour)
 }

@@ -686,7 +686,7 @@ func (n *Node) broadcastNewChainState() {
 
 	// Broadcast to all peers except the one that sent us the fork
 	for _, peer := range n.Host.Network().Peers() {
-		s, err := n.Host.NewStream(n.ctx, peer, "/chain/state/1.0.0")
+		s, err := n.Host.NewStream(context.Background(), peer, "/chain/state/1.0.0")
 		if err != nil {
 			continue
 		}
@@ -985,8 +985,6 @@ func (n *Node) broadcastStateVerification() {
 	}
 }
 
-// Add these methods to the Node struct
-
 // handleBlockSync processes block sync requests
 func (n *Node) handleBlockSync(s network.Stream) {
 	var req BlockSyncRequest
@@ -1081,3 +1079,6 @@ func (n *Node) verifyBlockHeaders(headers []BlockHeader) error {
 
 	return nil
 }
+
+// Remove duplicated PeerManager-related code and types
+// All PeerManager-related code is now in peer_manager.go

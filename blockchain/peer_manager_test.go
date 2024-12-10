@@ -9,7 +9,6 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
-	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"context"
@@ -21,14 +20,7 @@ type StateVerificationResponse struct {
 	StateRoot string `json:"state_root"`
 }
 
-func createTestHost(t *testing.T) host.Host {
-	h, err := libp2p.New(
-		libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"),
-		libp2p.NoSecurity,
-	)
-	assert.NoError(t, err)
-	return h
-}
+
 
 func TestPeerReputation(t *testing.T) {
 	testHost := createTestHost(t)

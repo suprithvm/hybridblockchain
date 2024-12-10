@@ -1,0 +1,72 @@
+
+=== RUN   BOOTSTRAP_NODE_INTEGRATION
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:428: Starting Bootstrap Node Integration Tests
+
+=== RUN   TEMP_LOG
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:150: Temporary log file created: C:\Users\supri\AppData\Local\Temp\blockchain-test-log-2625764320.txt
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:497: Bootstrap Node Integration Tests Completed Successfully!
+
+=== RUN   BOOTSTRAP_NODE_INTEGRATION
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:429: 🚀 Starting Bootstrap Node Integration Tests 🌐
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:440: 🌐 External IP Detected: 49.204.110.41
+
+=== RUN   TEMP_LOG
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:151: Temporary log file created: C:\Users\supri\AppData\Local\Temp\blockchain-test-log-3304385382.txt
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:463: 🏗️  Created Bootstrap Node 0
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:463: 🏗️  Created Bootstrap Node 1
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:463: 🏗️  Created Bootstrap Node 2
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:480: 🚦 Starting Bootstrap Nodes...
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:484: 🟢 Started Bootstrap Node 0
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:484: 🟢 Started Bootstrap Node 1
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:484: 🟢 Started Bootstrap Node 2
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:486: 🏁 All Bootstrap Nodes Started Successfully!
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:491: 🕵️ Verifying Peer Information...
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:498: 🔍 Node 0 Peer Details:
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:499:    🆔 Peer ID: 12D3KooWQhSLhqsoE9vCARiAUxEejRjLMLGs6n6auYwQ6AmgpHsT
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:500:    📡 Peer Addresses: [/ip4/127.0.0.1/tcp/50500 /ip4/192.168.0.106/tcp/50500]
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:498: 🔍 Node 1 Peer Details:
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:499:    🆔 Peer ID: 12D3KooWQhSLhqsoE9vCARiAUxEejRjLMLGs6n6auYwQ6AmgpHsT
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:500:    📡 Peer Addresses: [/ip4/127.0.0.1/tcp/50501 /ip4/192.168.0.106/tcp/50501]
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:498: 🔍 Node 2 Peer Details:
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:499:    🆔 Peer ID: 12D3KooWQhSLhqsoE9vCARiAUxEejRjLMLGs6n6auYwQ6AmgpHsT
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:500:    📡 Peer Addresses: [/ip4/127.0.0.1/tcp/50502 /ip4/192.168.0.106/tcp/50502]
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:502: ✅ Peer Information Verified Successfully!
+    c:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:505: 🎉 Bootstrap Node Integration Tests Completed Successfully! 🚀
+
+=== RUN   BOOTSTRAP_NODE_CREATION
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:182: Starting Bootstrap Node Creation Tests
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:187: Discovered External IP: 49.204.110.41
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:243: Starting Test Case: Default Configuration
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:243: Starting Test Case: Custom External IP
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:267: Bootstrap Node Creation Tests Completed Successfully!
+
+=== RUN   BOOTSTRAP_NODE_START
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:275: Starting Bootstrap Node Start Tests
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:280: External IP Discovered: 49.204.110.41
+
+=== RUN   TEMP_LOG
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:151: Temporary log file created: C:\Users\supri\AppData\Local\Temp\blockchain-test-log-2537194674.txt
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:331: Bootstrap Node Start Tests Completed Successfully!
+
+=== RUN   BOOTSTRAP_NODE_INTEGRATION
+
+=== RUN   BOOTSTRAP_NODE_CREATION
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:182: Starting Bootstrap Node Creation Tests
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:187: Discovered External IP: 49.204.110.41
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:243: Starting Test Case: Default Configuration
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:243: Starting Test Case: Custom External IP
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:267: Bootstrap Node Creation Tests Completed Successfully!
+
+=== RUN   BOOTSTRAP_NODE_START
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:275: Starting Bootstrap Node Start Tests
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:280: External IP Discovered: 49.204.110.41
+
+=== RUN   TEMP_LOG
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:151: Temporary log file created: C:\Users\supri\AppData\Local\Temp\blockchain-test-log-213955463.txt
+    C:/Users/supri/Desktop/blockchain/blockchain-core/blockchain/bootnode_test.go:331: Bootstrap Node Start Tests Completed Successfully!
+
+=== RUN   BOOTSTRAP_NODE_CREATION
+
+=== RUN   BOOTSTRAP_NODE_CREATION
+
+=== RUN   BOOTSTRAP_NODE_CREATION

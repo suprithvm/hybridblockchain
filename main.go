@@ -2,55 +2,43 @@ package main
 
 import (
 	"context"
-	"flag"
 	"log"
 	"os"
-	"os/signal"
-	"syscall"
-	"strings"
+	"path/filepath"
+	"time"
 
 	"blockchain-core/blockchain"
 )
 
+// GetOutboundIP gets the preferred outbound IP of this machine
+func GetOutboundIP() string {
+	return "49.204.110.41" // Set to the provided public IP
+}
+
 func main() {
-	// Parse command line flags
-	listenHost := flag.String("host", "0.0.0.0", "Host to listen on")
-	listenPort := flag.Int("port", 9000, "Port to listen on")
-	bootstrapNodes := flag.String("bootstrap", "", "Comma-separated list of bootstrap nodes")
-	flag.Parse()
-
-	// Create network configuration
-	config := &blockchain.NetworkConfig{
-		ListenHost:     *listenHost,
-		ListenPort:     *listenPort,
-		BootstrapNodes: strings.Split(*bootstrapNodes, ","),
-		DHTServerMode:  true,
+	keyFilePath := filepath.Join(filepath.Dir(os.Args[0]), "bootnode.key") // Key file will be in the same directory as main.go
+	config := blockchain.BootstrapNodeConfig{
+		ListenPort: 50505, // Fixed port for the bootnode
+		PublicIP:   GetOutboundIP(),
+		KeyFile:    keyFilePath,
+		EnablePeerExchange: true,
+		EnableNAT: true,
 	}
 
-	// Create and start node
-	node, err := blockchain.NewNode(config)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	node, err := blockchain.NewBootstrapNode(ctx, &config) // Added context argument
 	if err != nil {
-		log.Fatalf("Failed to create node: %v", err)
-	}
-	defer node.Host.Close()
-
-	// Connect to bootstrap nodes
-	ctx := context.Background()
-	if err := node.ConnectToBootstrapNodes(ctx); err != nil {
-		log.Printf("Warning: Failed to connect to some bootstrap nodes: %v", err)
+		log.Fatalf("Failed to create bootnode: %v", err)
 	}
 
-	// Start peer discovery
-	go node.DiscoverPeers()
-
-	// Print node addresses
-	log.Printf("Node started with ID: %s", node.Host.ID())
-	for _, addr := range node.Host.Addrs() {
-		log.Printf("Listening on: %s/p2p/%s", addr, node.Host.ID())
+	// Start the bootnode
+	if err := node.Start(); err != nil {
+		log.Fatalf("Failed to start bootnode: %v", err)
 	}
+	log.Println("Bootnode is running...")
 
-	// Wait for interrupt signal
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+	// Keep the application running
+	select {}
 }
