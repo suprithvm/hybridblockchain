@@ -1,6 +1,8 @@
 package blockchain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"sync"
@@ -38,9 +40,8 @@ func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet m
 		return
 	}
 
-	// Create the new block with correct cumulative difficulty
-	newBlock := NewBlock(previousBlock, mempool, utxoSet, previousBlock.Difficulty, validatorWallet)
-	newBlock.CumulativeDifficulty = previousBlock.CumulativeDifficulty + newBlock.Difficulty
+	// Create the new block
+	newBlock := NewBlock(previousBlock, mempool, utxoSet, previousBlock.Header.Difficulty, validatorWallet)
 
 	// Mine and validate the block
 	err = MineBlock(&newBlock, previousBlock, stakePool, 10, peerHost)
@@ -52,15 +53,15 @@ func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet m
 	// Validate and add the block to the chain
 	if ValidateBlock(newBlock, previousBlock, validatorWallet, stakePool) {
 		bc.Chain = append(bc.Chain, newBlock)
-		log.Printf("Block %d added by validator Wallet=%s HostID=%s.\n", newBlock.BlockNumber, validatorWallet, validatorHost)
+		log.Printf("Block %d added by validator Wallet=%s HostID=%s.\n",
+			newBlock.Header.BlockNumber, validatorWallet, validatorHost)
 
 		// Remove transactions from mempool
-		blockTxs := newBlock.Transactions.GetAllTransactions()
-		for _, tx := range blockTxs {
+		for _, tx := range newBlock.Body.Transactions.GetAllTransactions() {
 			mempool.RemoveTransaction(tx.TransactionID)
 		}
 	} else {
-		log.Printf("Block %d validation failed.\n", newBlock.BlockNumber)
+		log.Printf("Block %d validation failed.\n", newBlock.Header.BlockNumber)
 	}
 }
 
@@ -70,11 +71,11 @@ func (bc *Blockchain) GetLatestBlock() Block {
 }
 
 func ValidateBlock(newBlock Block, previousBlock Block, validator string, stakePool *StakePool) bool {
-	if newBlock.PreviousHash != previousBlock.Hash {
+	if newBlock.Header.PreviousHash != previousBlock.Hash() {
 		log.Println("Validation failed: Previous hash mismatch. Checking fork resolution...")
 
-		// Compare chain lengths or cumulative difficulty
-		if newBlock.Difficulty > previousBlock.Difficulty || previousBlock.Transactions.Len() > 0 {
+		if newBlock.Header.Difficulty > previousBlock.Header.Difficulty ||
+			newBlock.Body.Transactions.Len() > 0 {
 			log.Println("Switching to the longer or higher difficulty chain.")
 			return true
 		}
@@ -82,19 +83,21 @@ func ValidateBlock(newBlock Block, previousBlock Block, validator string, stakeP
 	}
 
 	// Check block number
-	if newBlock.BlockNumber != previousBlock.BlockNumber+1 {
+	if newBlock.Header.BlockNumber != previousBlock.Header.BlockNumber+1 {
 		log.Println("Validation failed: Block number is incorrect.")
 		return false
 	}
 
 	// Check hash validity
-	if newBlock.Hash != calculateHash(newBlock) {
+	storedHash := newBlock.hash               // Get the stored hash
+	calculatedHash := calculateHash(newBlock) // Calculate fresh hash
+	if storedHash != calculatedHash {
 		log.Println("Validation failed: Hash mismatch.")
 		return false
 	}
 
 	// Check PoW difficulty
-	if !isHashValid(newBlock.Hash, newBlock.Difficulty) {
+	if !isHashValid(newBlock.Hash(), newBlock.Header.Difficulty) {
 		log.Println("Validation failed: Hash does not meet difficulty.")
 		return false
 	}
@@ -106,7 +109,7 @@ func ValidateBlock(newBlock Block, previousBlock Block, validator string, stakeP
 	}
 
 	// Validate cumulative difficulty
-	expectedCumulativeDifficulty := previousBlock.CumulativeDifficulty + newBlock.Difficulty
+	expectedCumulativeDifficulty := previousBlock.CumulativeDifficulty + uint64(newBlock.Header.Difficulty)
 	if newBlock.CumulativeDifficulty != expectedCumulativeDifficulty {
 		log.Printf("Invalid cumulative difficulty. Expected: %d, Got: %d",
 			expectedCumulativeDifficulty, newBlock.CumulativeDifficulty)
@@ -118,7 +121,15 @@ func ValidateBlock(newBlock Block, previousBlock Block, validator string, stakeP
 
 // ValidateGenesisBlock ensures all nodes use the same genesis block
 func ValidateGenesisBlock(bc *Blockchain, genesis Block) bool {
-	return bc.Chain[0].Hash == genesis.Hash
+	storedChainHash := bc.Chain[0].hash
+	storedGenesisHash := genesis.hash
+	if storedChainHash == "" || storedGenesisHash == "" {
+		// If either hash is not stored, calculate them
+		calculatedChainHash := calculateHash(bc.Chain[0])
+		calculatedGenesisHash := calculateHash(genesis)
+		return calculatedChainHash == calculatedGenesisHash
+	}
+	return storedChainHash == storedGenesisHash
 }
 
 func (bc *Blockchain) ExecuteMultiSigTransaction(tx *MultiSigTransaction, wallet *MultiSigwWallet, utxoSet map[string]UTXO) error {
@@ -183,7 +194,7 @@ func (bc *Blockchain) findCommonAncestor(candidateChain []Block) int {
 	for i := len(candidateChain) - 1; i >= 0; i-- {
 		candidateBlock := candidateChain[i]
 		for j := len(bc.Chain) - 1; j >= 0; j-- {
-			if bc.Chain[j].Hash == candidateBlock.Hash {
+			if bc.Chain[j].Hash() == candidateBlock.Hash() {
 				return j
 			}
 		}
@@ -195,17 +206,17 @@ func (bc *Blockchain) findCommonAncestor(candidateChain []Block) int {
 func (bc *Blockchain) validateChainSegment(segment []Block) bool {
 	for i := 1; i < len(segment); i++ {
 		// Validate block links
-		if segment[i].PreviousHash != segment[i-1].Hash {
+		if segment[i].Header.PreviousHash != segment[i-1].Hash() {
 			return false
 		}
 
 		// Validate block numbers
-		if segment[i].BlockNumber != segment[i-1].BlockNumber+1 {
+		if segment[i].Header.BlockNumber != segment[i-1].Header.BlockNumber+1 {
 			return false
 		}
 
 		// Validate cumulative difficulty
-		expectedDifficulty := segment[i-1].CumulativeDifficulty + segment[i].Difficulty
+		expectedDifficulty := segment[i-1].CumulativeDifficulty + uint64(segment[i].Header.Difficulty)
 		if segment[i].CumulativeDifficulty != expectedDifficulty {
 			return false
 		}
@@ -241,9 +252,9 @@ func (bc *Blockchain) ValidateCandidateChain(candidateChain []Block) bool {
 	}
 
 	// Validate genesis block if it's included
-	if candidateChain[0].BlockNumber == 0 {
-		if candidateChain[0].PreviousHash != "0x00000000000000000000000000000000" ||
-			candidateChain[0].CumulativeDifficulty != candidateChain[0].Difficulty {
+	if candidateChain[0].Header.BlockNumber == 0 {
+		if candidateChain[0].Header.PreviousHash != "0x00000000000000000000000000000000" ||
+			candidateChain[0].CumulativeDifficulty != uint64(candidateChain[0].Header.Difficulty) {
 			return false
 		}
 	}
@@ -254,16 +265,16 @@ func (bc *Blockchain) ValidateCandidateChain(candidateChain []Block) bool {
 		previousBlock := candidateChain[i-1]
 
 		// Basic block validation
-		if currentBlock.BlockNumber != previousBlock.BlockNumber+1 ||
-			currentBlock.PreviousHash != previousBlock.Hash {
+		if currentBlock.Header.BlockNumber != previousBlock.Header.BlockNumber+1 ||
+			currentBlock.Header.PreviousHash != previousBlock.Hash() {
 			return false
 		}
 
 		// Validate cumulative difficulty
-		expectedCumulative := previousBlock.CumulativeDifficulty + currentBlock.Difficulty
+		expectedCumulative := previousBlock.CumulativeDifficulty + uint64(currentBlock.Header.Difficulty)
 		if currentBlock.CumulativeDifficulty != expectedCumulative {
 			log.Printf("[Validation] Block %d has incorrect cumulative difficulty. Expected %d, got %d",
-				currentBlock.BlockNumber, expectedCumulative, currentBlock.CumulativeDifficulty)
+				currentBlock.Header.BlockNumber, expectedCumulative, currentBlock.CumulativeDifficulty)
 			return false
 		}
 	}
@@ -300,17 +311,18 @@ func (bc *Blockchain) ResolveChainConflict(receivedChain []Block) bool {
 // ValidateBlock validates a block before adding it to the chain
 func (bc *Blockchain) ValidateBlock(block *Block) error {
 	// Verify block number
-	if block.BlockNumber != bc.GetLatestBlock().BlockNumber+1 {
+	if block.Header.BlockNumber != bc.GetLatestBlock().Header.BlockNumber+1 {
 		return fmt.Errorf("invalid block number")
 	}
 
 	// Verify previous hash
-	if block.PreviousHash != bc.GetLatestBlock().Hash {
+	if block.Header.PreviousHash != bc.GetLatestBlock().hash {
 		return fmt.Errorf("invalid previous hash")
 	}
 
 	// Verify block hash
-	if block.Hash != block.CalculateHash() {
+	expectedHash := block.Hash()
+	if !isHashValid(expectedHash, block.Header.Difficulty) {
 		return fmt.Errorf("invalid block hash")
 	}
 
@@ -358,14 +370,20 @@ func (bc *Blockchain) GetHeadersSinceCheckpoint(checkpointHeight, endHeight uint
 	for height := checkpointHeight + 1; height <= endHeight; height++ {
 		if block := bc.GetBlockByHeight(int(height)); block != nil {
 			header := BlockHeader{
-				Hash:              block.Hash,
-				PreviousHash:      block.PreviousHash,
-				Height:            uint64(block.BlockNumber),
-				Timestamp:         block.Timestamp,
-				MerkleRoot:        block.Transactions.GenerateRootHash(),
-				StateRoot:         block.PatriciaRoot,
-				Difficulty:        uint64(block.Difficulty),
-				TotalTransactions: uint32(block.Transactions.Len()),
+				Version:      block.Header.Version,
+				BlockNumber:  block.Header.BlockNumber,
+				PreviousHash: block.Header.PreviousHash,
+				Timestamp:    block.Header.Timestamp,
+				MerkleRoot:   block.Header.MerkleRoot,
+				StateRoot:    block.Header.StateRoot,
+				ReceiptsRoot: block.Header.ReceiptsRoot,
+				Difficulty:   block.Header.Difficulty,
+				Nonce:        block.Header.Nonce,
+				GasLimit:     block.Header.GasLimit,
+				GasUsed:      block.Header.GasUsed,
+				MinedBy:      block.Header.MinedBy,
+				ValidatedBy:  block.Header.ValidatedBy,
+				ExtraData:    block.Header.ExtraData,
 			}
 			headers = append(headers, header)
 		}
@@ -385,11 +403,17 @@ func (bc *Blockchain) FastForwardToCheckpoint(cp *Checkpoint) error {
 
 	// Create genesis-like block from checkpoint
 	checkpointBlock := Block{
-		BlockNumber:          int(cp.Height),
-		Hash:                 cp.Hash,
-		PatriciaRoot:         cp.StateRoot,
-		Timestamp:            cp.Timestamp,
-		CumulativeDifficulty: 0, // Will be updated when syncing remaining blocks
+		Header: &BlockHeader{
+			Version:      1,
+			BlockNumber:  uint64(cp.Height),
+			PreviousHash: "0x00000000000000000000000000000000",
+			Timestamp:    cp.Timestamp,
+			Difficulty:   0, // Will be updated when syncing remaining blocks
+		},
+		Body: &BlockBody{
+			Transactions: NewPatriciaTrie(),
+		},
+		CumulativeDifficulty: 0,
 	}
 
 	// Reset chain to checkpoint
@@ -423,7 +447,7 @@ func (bc *Blockchain) verifyCheckpoint(cp *Checkpoint) error {
 func (bc *Blockchain) GetBlockByHeight(height interface{}) *Block {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	
+
 	var h int
 	switch v := height.(type) {
 	case int:
@@ -433,7 +457,7 @@ func (bc *Blockchain) GetBlockByHeight(height interface{}) *Block {
 	default:
 		return nil
 	}
-	
+
 	if h < 0 || h >= len(bc.Chain) {
 		return nil
 	}
@@ -450,11 +474,29 @@ func (bc *Blockchain) GetHeight() uint64 {
 func (bc *Blockchain) RollbackToHeight(height uint64) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
-	
+
 	if height >= uint64(len(bc.Chain)) {
 		return fmt.Errorf("invalid rollback height")
 	}
-	
+
 	bc.Chain = bc.Chain[:height+1]
 	return nil
+}
+
+// Add this function
+func calculateHash(block Block) string {
+	header := block.Header
+	data := fmt.Sprintf("%d%d%s%d%s%s%s%d%d",
+		header.Version,
+		header.BlockNumber,
+		header.PreviousHash,
+		header.Timestamp,
+		header.MerkleRoot,
+		header.StateRoot,
+		header.ReceiptsRoot,
+		header.Nonce,
+		header.GasUsed,
+	)
+	hash := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(hash[:])
 }

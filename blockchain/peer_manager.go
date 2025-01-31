@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 const (
@@ -81,10 +81,10 @@ type LatencyStats struct {
 }
 
 type PeerManager struct {
-	mutex     sync.RWMutex
-	peers     map[peer.ID]*PeerInfo
-	maxPeers  int
-	blacklist map[peer.ID]time.Time
+	mutex      sync.RWMutex
+	peers      map[peer.ID]*PeerInfo
+	maxPeers   int
+	blacklist  map[peer.ID]time.Time
 	blockchain *Blockchain
 	host       host.Host
 }
@@ -102,11 +102,11 @@ type VotingResult struct {
 }
 
 type ChainStateVerification struct {
-	Height          uint64
-	StateRoot       string
-	ConsensusRoot   string
-	Responses       map[peer.ID]string
-	HasConsensus    bool
+	Height           uint64
+	StateRoot        string
+	ConsensusRoot    string
+	Responses        map[peer.ID]string
+	HasConsensus     bool
 	ConsensusReached bool
 }
 
@@ -114,30 +114,30 @@ type ChainStateVerification struct {
 type PeerValidationStrategy int
 
 const (
-    BasicValidation PeerValidationStrategy = iota
-    StrictValidation
-    CustomValidation
+	BasicValidation PeerValidationStrategy = iota
+	StrictValidation
+	CustomValidation
 )
 
 // PeerAdditionConfig defines parameters for manual peer addition
 type PeerAdditionConfig struct {
-    MaxTrustedPeers     int
-    ConnectionTimeout   time.Duration
-    ValidationStrategy  PeerValidationStrategy
+	MaxTrustedPeers    int
+	ConnectionTimeout  time.Duration
+	ValidationStrategy PeerValidationStrategy
 }
 
 // Create a serializable block structure
 type BlockMessage struct {
-    BlockNumber          int
-    PreviousHash         string
-    Timestamp           int64
-    PatriciaRoot        string
-    TransactionsRoot    string  // Instead of full trie, just send root
-    Nonce               int
-    Hash                string
-    Difficulty          int
-    CumulativeDifficulty int
-    StateRoot           string
+	BlockNumber          uint64
+	PreviousHash         string
+	Timestamp            int64
+	PatriciaRoot         string
+	TransactionsRoot     string // Instead of full trie, just send root
+	Nonce                uint64
+	Hash                 string
+	Difficulty           uint32
+	CumulativeDifficulty uint64
+	StateRoot            string
 }
 
 func NewPeerManager(h host.Host) *PeerManager {
@@ -202,35 +202,35 @@ func (pm *PeerManager) UpdatePeerScore(id peer.ID, delta int) {
 
 // BlacklistPeer adds a peer to the blacklist
 func (pm *PeerManager) BlacklistPeer(peerID peer.ID, duration time.Duration) {
-    pm.mutex.Lock()
-    defer pm.mutex.Unlock()
-    
-    pm.blacklist[peerID] = time.Now().Add(duration)
-    log.Printf("Blacklisted peer %s for %v", peerID, duration)
-    
-    // Mark the peer as blacklisted in the peers map
-    if peerInfo, exists := pm.peers[peerID]; exists {
-        peerInfo.Blacklisted = true
-    }
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	pm.blacklist[peerID] = time.Now().Add(duration)
+	log.Printf("Blacklisted peer %s for %v", peerID, duration)
+
+	// Mark the peer as blacklisted in the peers map
+	if peerInfo, exists := pm.peers[peerID]; exists {
+		peerInfo.Blacklisted = true
+	}
 }
 
 // IsBlacklisted checks if a peer is currently blacklisted
 func (pm *PeerManager) IsBlacklisted(peerID peer.ID) bool {
-    pm.mutex.RLock()
-    defer pm.mutex.RUnlock()
-    
-    blacklistedUntil, exists := pm.blacklist[peerID]
-    if !exists {
-        return false
-    }
-    
-    if time.Now().After(blacklistedUntil) {
-        // Remove expired blacklist entry
-        delete(pm.blacklist, peerID)
-        return false
-    }
-    
-    return true
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+
+	blacklistedUntil, exists := pm.blacklist[peerID]
+	if !exists {
+		return false
+	}
+
+	if time.Now().After(blacklistedUntil) {
+		// Remove expired blacklist entry
+		delete(pm.blacklist, peerID)
+		return false
+	}
+
+	return true
 }
 
 // GetBestPeers returns the top n peers by score
@@ -534,7 +534,7 @@ func (pm *PeerManager) InitiateStateVoting(proposedState string) (*VotingResult,
 		if !peer.Connected {
 			continue
 		}
-		
+
 		if peer.LastVote != "" {
 			result.VoteCount[peer.LastVote]++
 			totalVotes++
@@ -564,9 +564,9 @@ func (pm *PeerManager) RollbackToState(targetState string) error {
 		if currentHeight-i == 0 {
 			return fmt.Errorf("reached genesis block without finding target state")
 		}
-		
+
 		block := pm.blockchain.GetBlockByHeight(int(currentHeight - i))
-		if block.StateRoot == targetState {
+		if block.Header.StateRoot == targetState {
 			return pm.blockchain.RollbackToHeight(currentHeight - i)
 		}
 	}
@@ -578,7 +578,7 @@ func (pm *PeerManager) requestPeerStateVote(peerID peer.ID, stateRoot string) (s
 	if !exists || !info.Connected {
 		return "", fmt.Errorf("peer not available")
 	}
-	
+
 	// For now, return the peer's last vote or the proposed state
 	if info.LastVote != "" {
 		return info.LastVote, nil
@@ -589,16 +589,16 @@ func (pm *PeerManager) requestPeerStateVote(peerID peer.ID, stateRoot string) (s
 func (pm *PeerManager) PropagateBlock(block *Block) error {
 	// Convert Block to BlockMessage
 	blockMsg := BlockMessage{
-		BlockNumber:          block.BlockNumber,
-		PreviousHash:         block.PreviousHash,
-		Timestamp:           block.Timestamp,
-		PatriciaRoot:        block.PatriciaRoot,
-		TransactionsRoot:    block.Transactions.GenerateRootHash(),
-		Nonce:               block.Nonce,
-		Hash:                block.Hash,
-		Difficulty:          block.Difficulty,
+		BlockNumber:          block.Header.BlockNumber,
+		PreviousHash:         block.Header.PreviousHash,
+		Timestamp:            block.Header.Timestamp,
+		PatriciaRoot:         block.Header.StateRoot,
+		TransactionsRoot:     block.Header.MerkleRoot,
+		Nonce:                block.Header.Nonce,
+		Hash:                 block.hash,
+		Difficulty:           block.Header.Difficulty,
 		CumulativeDifficulty: block.CumulativeDifficulty,
-		StateRoot:           block.StateRoot,
+		StateRoot:            block.Header.StateRoot,
 	}
 
 	// Serialize the BlockMessage
@@ -654,7 +654,7 @@ func (pm *PeerManager) VerifyChainState(height uint64) (*ChainStateVerification,
 
 	verification := &ChainStateVerification{
 		Height:    height,
-		StateRoot: localBlock.StateRoot,
+		StateRoot: localBlock.Header.StateRoot,
 		Responses: make(map[peer.ID]string),
 	}
 
@@ -688,7 +688,7 @@ func (pm *PeerManager) VerifyChainState(height uint64) (*ChainStateVerification,
 	}
 
 	verification.HasConsensus = maxCount > len(pm.peers)/2
-	verification.ConsensusReached = verification.ConsensusRoot == localBlock.StateRoot
+	verification.ConsensusReached = verification.ConsensusRoot == localBlock.Header.StateRoot
 
 	return verification, nil
 }
@@ -766,141 +766,141 @@ func (pm *PeerManager) requestPeerStateVerification(peerID peer.ID, height uint6
 
 // AddManualPeer adds a peer manually with configurable validation
 func (pm *PeerManager) AddManualPeer(peerInfo peer.AddrInfo, config *PeerAdditionConfig) error {
-    pm.mutex.Lock()
-    defer pm.mutex.Unlock()
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
 
-    // Default configuration
-    if config == nil {
-        config = &PeerAdditionConfig{
-            MaxTrustedPeers:    maxPeers,
-            ConnectionTimeout:  10 * time.Second,
-            ValidationStrategy: BasicValidation,
-        }
-    }
+	// Default configuration
+	if config == nil {
+		config = &PeerAdditionConfig{
+			MaxTrustedPeers:    maxPeers,
+			ConnectionTimeout:  10 * time.Second,
+			ValidationStrategy: BasicValidation,
+		}
+	}
 
-    // Check peer limit
-    if len(pm.peers) >= config.MaxTrustedPeers {
-        return fmt.Errorf("maximum trusted peers limit (%d) reached", config.MaxTrustedPeers)
-    }
+	// Check peer limit
+	if len(pm.peers) >= config.MaxTrustedPeers {
+		return fmt.Errorf("maximum trusted peers limit (%d) reached", config.MaxTrustedPeers)
+	}
 
-    // Check if already blacklisted
-    if _, blacklisted := pm.blacklist[peerInfo.ID]; blacklisted {
-        return fmt.Errorf("peer %s is blacklisted", peerInfo.ID)
-    }
+	// Check if already blacklisted
+	if _, blacklisted := pm.blacklist[peerInfo.ID]; blacklisted {
+		return fmt.Errorf("peer %s is blacklisted", peerInfo.ID)
+	}
 
-    // Validate peer based on strategy
-    if err := pm.validatePeer(peerInfo, config.ValidationStrategy); err != nil {
-        return fmt.Errorf("peer validation failed: %w", err)
-    }
+	// Validate peer based on strategy
+	if err := pm.validatePeer(peerInfo, config.ValidationStrategy); err != nil {
+		return fmt.Errorf("peer validation failed: %w", err)
+	}
 
-    // Attempt connection with timeout
-    ctx, cancel := context.WithTimeout(context.Background(), config.ConnectionTimeout)
-    defer cancel()
+	// Attempt connection with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), config.ConnectionTimeout)
+	defer cancel()
 
-    // Attempt to connect to the peer
-    if err := pm.host.Connect(ctx, peerInfo); err != nil {
-        return fmt.Errorf("failed to connect to peer %s: %w", peerInfo.ID, err)
-    }
+	// Attempt to connect to the peer
+	if err := pm.host.Connect(ctx, peerInfo); err != nil {
+		return fmt.Errorf("failed to connect to peer %s: %w", peerInfo.ID, err)
+	}
 
-    // Add or update peer information
-    pm.AddPeer(peerInfo.ID)
-    
-    // Log successful peer addition
-    log.Printf("Manually added trusted peer: %s", peerInfo.ID)
-    
-    return nil
+	// Add or update peer information
+	pm.AddPeer(peerInfo.ID)
+
+	// Log successful peer addition
+	log.Printf("Manually added trusted peer: %s", peerInfo.ID)
+
+	return nil
 }
 
 // validatePeer performs peer validation based on strategy
 func (pm *PeerManager) validatePeer(peerInfo peer.AddrInfo, strategy PeerValidationStrategy) error {
-    switch strategy {
-    case BasicValidation:
-        return pm.basicPeerValidation(peerInfo)
-    case StrictValidation:
-        return pm.strictPeerValidation(peerInfo)
-    case CustomValidation:
-        return pm.customPeerValidation(peerInfo)
-    default:
-        return fmt.Errorf("unknown validation strategy: %v", strategy)
-    }
+	switch strategy {
+	case BasicValidation:
+		return pm.basicPeerValidation(peerInfo)
+	case StrictValidation:
+		return pm.strictPeerValidation(peerInfo)
+	case CustomValidation:
+		return pm.customPeerValidation(peerInfo)
+	default:
+		return fmt.Errorf("unknown validation strategy: %v", strategy)
+	}
 }
 
 // basicPeerValidation performs minimal peer checks
 func (pm *PeerManager) basicPeerValidation(peerInfo peer.AddrInfo) error {
-    if len(peerInfo.Addrs) == 0 {
-        return fmt.Errorf("peer %s has no addresses", peerInfo.ID)
-    }
-    return nil
+	if len(peerInfo.Addrs) == 0 {
+		return fmt.Errorf("peer %s has no addresses", peerInfo.ID)
+	}
+	return nil
 }
 
 // strictPeerValidation performs comprehensive peer validation
 func (pm *PeerManager) strictPeerValidation(peerInfo peer.AddrInfo) error {
-    // Basic validation first
-    if err := pm.basicPeerValidation(peerInfo); err != nil {
-        return err
-    }
-    
-    // Additional strict validation checks
-    // Check if the peer exists in our peer list
-    existingPeerInfo, exists := pm.GetPeerInfo(peerInfo.ID)
-    if !exists {
-        // If the peer doesn't exist, we can't do advanced validation
-        return nil
-    }
-    
-    // Check protocol version compatibility
-    if !pm.NegotiateProtocolVersion(peerInfo.ID, existingPeerInfo.Version) {
-        return fmt.Errorf("incompatible protocol version")
-    }
-    
-    return nil
+	// Basic validation first
+	if err := pm.basicPeerValidation(peerInfo); err != nil {
+		return err
+	}
+
+	// Additional strict validation checks
+	// Check if the peer exists in our peer list
+	existingPeerInfo, exists := pm.GetPeerInfo(peerInfo.ID)
+	if !exists {
+		// If the peer doesn't exist, we can't do advanced validation
+		return nil
+	}
+
+	// Check protocol version compatibility
+	if !pm.NegotiateProtocolVersion(peerInfo.ID, existingPeerInfo.Version) {
+		return fmt.Errorf("incompatible protocol version")
+	}
+
+	return nil
 }
 
 // customPeerValidation allows for advanced custom validation logic
 func (pm *PeerManager) customPeerValidation(peerInfo peer.AddrInfo) error {
-    // Placeholder for advanced custom validation
-    // Implement specific blockchain-related validation
-    return nil
+	// Placeholder for advanced custom validation
+	// Implement specific blockchain-related validation
+	return nil
 }
 
 // RemoveTrustedPeer removes a peer from the active peers
 func (pm *PeerManager) RemoveTrustedPeer(peerID peer.ID) {
-    pm.mutex.Lock()
-    defer pm.mutex.Unlock()
-    
-    delete(pm.peers, peerID)
-    log.Printf("Removed peer: %s", peerID)
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	delete(pm.peers, peerID)
+	log.Printf("Removed peer: %s", peerID)
 }
 
 // GetTrustedPeers returns a list of currently active peers
 func (pm *PeerManager) GetTrustedPeers() []peer.ID {
-    pm.mutex.RLock()
-    defer pm.mutex.RUnlock()
-    
-    trustedPeerList := make([]peer.ID, 0, len(pm.peers))
-    for peerID, peerInfo := range pm.peers {
-        if !peerInfo.Blacklisted {
-            trustedPeerList = append(trustedPeerList, peerID)
-        }
-    }
-    
-    return trustedPeerList
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+
+	trustedPeerList := make([]peer.ID, 0, len(pm.peers))
+	for peerID, peerInfo := range pm.peers {
+		if !peerInfo.Blacklisted {
+			trustedPeerList = append(trustedPeerList, peerID)
+		}
+	}
+
+	return trustedPeerList
 }
 
 // CleanupBlacklistedPeers removes expired blacklist entries
 func (pm *PeerManager) CleanupBlacklistedPeers() {
-    pm.mutex.Lock()
-    defer pm.mutex.Unlock()
-    
-    now := time.Now()
-    for peerID, blacklistedTime := range pm.blacklist {
-        // Remove blacklist entry after 24 hours
-        if now.Sub(blacklistedTime) > 24*time.Hour {
-            delete(pm.blacklist, peerID)
-        }
-    }
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	now := time.Now()
+	for peerID, blacklistedTime := range pm.blacklist {
+		// Remove blacklist entry after 24 hours
+		if now.Sub(blacklistedTime) > 24*time.Hour {
+			delete(pm.blacklist, peerID)
+		}
+	}
 }
 
 func (pm *PeerManager) blacklistPeer(id peer.ID) {
-    pm.BlacklistPeer(id, 24*time.Hour)
+	pm.BlacklistPeer(id, 24*time.Hour)
 }

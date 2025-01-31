@@ -147,18 +147,18 @@ func TestStateConflictResolution(t *testing.T) {
 		
 		for i := 0; i < 10; i++ {
 			block := NewBlock(lastBlock, NewMempool(), make(map[string]UTXO), 1, "test-validator")
-			block.StateRoot = fmt.Sprintf("state-%d", i) // Set known state
+			block.Header.StateRoot = fmt.Sprintf("state-%d", i) // Set known state
 			bc.AddBlockWithoutValidation(&block)
 			
 			lastBlock = block
 		}
 		
 		// Test rollback
-		targetState := bc.GetBlockByHeight(5).StateRoot
+		targetState := bc.GetBlockByHeight(5).Header.StateRoot
 		err := pm.RollbackToState(targetState)
 		assert.NoError(t, err)
 		assert.Equal(t, uint64(5), bc.GetHeight())
-		assert.Equal(t, targetState, bc.GetLatestBlock().StateRoot)
+		assert.Equal(t, targetState, bc.GetLatestBlock().Header.StateRoot)
 	})
 }
 
@@ -227,7 +227,7 @@ func TestBlockPropagation(t *testing.T) {
 			peer.SetStreamHandler("/state/verify/1.0.0", func(s network.Stream) {
 				response := StateVerificationResponse{
 					Success:   true,
-					StateRoot: bc.GetLatestBlock().StateRoot,
+					StateRoot: bc.GetLatestBlock().Header.StateRoot,
 				}
 				json.NewEncoder(s).Encode(response)
 				s.Close()

@@ -70,11 +70,11 @@ type VerificationResponse struct {
 
 // Add after existing types
 type DeltaUpdate struct {
-	LastSyncTime    int64             `json:"last_sync_time"`
-	UTXOUpdates     map[string]UTXO   `json:"utxo_updates"`
-	UTXODeletions   []string          `json:"utxo_deletions"`
-	StateRoot       string            `json:"state_root"`
-	UpdateTimestamp int64             `json:"update_timestamp"`
+	LastSyncTime    int64           `json:"last_sync_time"`
+	UTXOUpdates     map[string]UTXO `json:"utxo_updates"`
+	UTXODeletions   []string        `json:"utxo_deletions"`
+	StateRoot       string          `json:"state_root"`
+	UpdateTimestamp int64           `json:"update_timestamp"`
 }
 
 // BlockSyncRequest represents a request for block synchronization
@@ -86,29 +86,34 @@ type BlockSyncRequest struct {
 
 // BlockHeaderResponse represents block headers for sync
 type BlockHeaderResponse struct {
-	Headers     []BlockHeader `json:"headers"`
-	StartHeight uint64       `json:"start_height"`
-	EndHeight   uint64       `json:"end_height"`
+	Headers     []SyncBlockHeader `json:"headers"`
+	StartHeight uint64            `json:"start_height"`
+	EndHeight   uint64            `json:"end_height"`
 }
 
-// BlockHeader represents lightweight block information for sync
-type BlockHeader struct {
-	Hash               string    `json:"hash"`
-	PreviousHash      string    `json:"previous_hash"`
-	Height            uint64    `json:"height"`
-	Timestamp         int64     `json:"timestamp"`
-	MerkleRoot        string    `json:"merkle_root"`
-	StateRoot         string    `json:"state_root"`
-	Difficulty        uint64    `json:"difficulty"`
-	TotalTransactions uint32    `json:"total_transactions"`
+// SyncBlockHeader represents lightweight block information for sync
+type SyncBlockHeader struct {
+	Hash              string `json:"hash"`
+	PreviousHash      string `json:"previous_hash"`
+	Height            uint64 `json:"height"`
+	Timestamp         int64  `json:"timestamp"`
+	MerkleRoot        string `json:"merkle_root"`
+	StateRoot         string `json:"state_root"`
+	Difficulty        uint64 `json:"difficulty"`
+	TotalTransactions uint32 `json:"total_transactions"`
+	GasLimit          uint64 `json:"gas_limit"`
+	GasUsed           uint64 `json:"gas_used"`
+	MinedBy           string `json:"mined_by"`
+	ValidatedBy       string `json:"validated_by"`
+	ExtraData         []byte `json:"extra_data"`
 }
 
 // Checkpoint represents a verified blockchain state at a specific height
 type Checkpoint struct {
-	Height            uint64    `json:"height"`
-	Hash              string    `json:"hash"`
-	StateRoot         string    `json:"state_root"`
-	UTXORoot          string    `json:"utxo_root"`
-	Timestamp         int64     `json:"timestamp"`
-	ValidatorSetHash  string    `json:"validator_set_hash"`
+	Height           uint64 `json:"height"`
+	Hash             string `json:"hash"`
+	StateRoot        string `json:"state_root"`
+	UTXORoot         string `json:"utxo_root"`
+	Timestamp        int64  `json:"timestamp"`
+	ValidatorSetHash string `json:"validator_set_hash"`
 }

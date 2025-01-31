@@ -1,254 +1,346 @@
 package blockchain
 
 import (
-	"bytes"
+	"blockchain-core/blockchain/gas"
 	"crypto/sha256"
-	"encoding/binary"
-	"encoding/gob"
 	"encoding/hex"
 	"fmt"
-	"log"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
 )
 
-const BlockReward = 50.0                  // Reward for mining a block
-const AvgTransactionSize = 250            // Average transaction size in bytes
-const MaxBlockSizeLimit = 1 * 1024 * 1024 // 1MB block size limit
-const CheckpointInterval = 2 // Create checkpoint every 1000 blocks
-const MaxCheckpointAge = 10  // Maximum age of checkpoints to keep
+const (
+	BlockReward        = 50.0
+	AvgTransactionSize = 250
+	MaxBlockSizeLimit  = 1 * 1024 * 1024
+	CheckpointInterval = 2
+	MaxCheckpointAge   = 10
+	EmptyBlockSize     = 10 * 1024       // 10KB for empty block
+	MaxBlockSize       = 1 * 1024 * 1024 // 1MB max block size
 
-// Block represents a single block in the blockchain
+	// Gas constants
+	BaseGasLimit   = 15_000_000
+	MinGasPrice    = 1_000
+	TargetGasUsage = 0.8 // Target 80% gas usage
+)
+
+// BlockHeader contains block metadata
+type BlockHeader struct {
+	Version      uint32 // Block version
+	BlockNumber  uint64 // Height of the block
+	PreviousHash string // Hash of previous block
+	Timestamp    int64  // Block creation time
+	MerkleRoot   string // Merkle root of transactions
+	StateRoot    string // State root after transactions
+	ReceiptsRoot string // Root hash of transaction receipts
+	Difficulty   uint32 // Mining difficulty
+	Nonce        uint64 // PoW nonce
+	GasLimit     uint64 // Maximum gas allowed
+	GasUsed      uint64 // Actual gas used
+	MinedBy      string // Address of miner
+	ValidatedBy  string // Address of PoS validator
+	ExtraData    []byte // Additional data (limited size)
+}
+
+// BlockBody contains the actual block data
+type BlockBody struct {
+	Transactions *PatriciaTrie
+	Receipts     []*TxReceipt
+}
+
+// Block represents a complete block
 type Block struct {
-	BlockNumber          int
-	PreviousHash         string
-	Timestamp            int64
-	PatriciaRoot         string        // Root of the Patricia Trie
-	Transactions         *PatriciaTrie // Replace list with Patricia Trie
-	Nonce                int
-	Hash                 string
-	Difficulty           int
-	CumulativeDifficulty int // Sum of difficulties up to this block
-	StateRoot            string
+	Header               *BlockHeader
+	Body                 *BlockBody
+	hash                 string // Cached block hash
+	size                 uint64 // Cached block size
+	numTx                uint32 // Cached transaction count
+	CumulativeDifficulty uint64 // Add this field
 }
 
-// GenesisBlock creates the first block in the blockchain
-func GenesisBlock() Block {
-	genesis := Block{
-		BlockNumber:          0,
-		PreviousHash:         "0x00000000000000000000000000000000",
-		Timestamp:            time.Now().Unix(),
-		Transactions:         nil,
-		Nonce:                0,
-		Difficulty:           1,
-		CumulativeDifficulty: 1,
-	}
-	genesis.Hash = calculateHash(genesis)
-	return genesis
+// TxReceipt stores transaction execution results
+type TxReceipt struct {
+	TxHash        string
+	BlockHash     string
+	BlockNumber   uint64
+	GasUsed       uint64
+	Status        uint64 // 1 success, 0 failure
+	CumulativeGas uint64 // Total gas used up to this tx
 }
 
-// function to calculate the hash of a block
-func calculateHash(block Block) string {
-	data := strconv.Itoa(block.BlockNumber) + block.PreviousHash + strconv.FormatInt(block.Timestamp, 10) + strconv.Itoa(block.Nonce)
-
-	hash := sha256.Sum256([]byte(data))
-
-	return hex.EncodeToString(hash[:])
-}
-
-// NewBlock creates a new block with validated transactions
-func NewBlock(previousBlock Block, mempool *Mempool, utxoSet map[string]UTXO, difficulty int, validator string) Block {
-	// Calculate the dynamic block size
-	mempoolSize := len(mempool.GetTransactions())
-	dynamicSize := CalculateDynamicBlockSize(mempoolSize)
-
-	// Get prioritized transactions
-	transactions := mempool.GetPrioritizedTransactions(dynamicSize)
-
-	validTransactions := []Transaction{}
-	totalGasFees := 0.0
-
-	log.Printf("[DEBUG] Dynamic Block Size: %d", dynamicSize)
-
-	// Validate transactions and update UTXO set
-	for _, tx := range transactions {
-		if mempool.ValidateTransaction(tx, utxoSet) {
-			validTransactions = append(validTransactions, tx)
-			totalGasFees += tx.GasFee
-			UpdateUTXOSet(tx, utxoSet)
-			log.Printf("[DEBUG] Valid Transaction: %+v", tx)
-		} else {
-			log.Printf("[DEBUG] Invalid Transaction Skipped: %+v", tx)
-		}
+// NewBlock creates a new block
+func NewBlock(previousBlock Block, mempool *Mempool, utxoSet map[string]UTXO, difficulty uint32, validator string) Block {
+	header := &BlockHeader{
+		Version:      1,
+		BlockNumber:  previousBlock.Header.BlockNumber + 1,
+		PreviousHash: previousBlock.Hash(),
+		Timestamp:    time.Now().Unix(),
+		Difficulty:   difficulty,
+		GasLimit:     BaseGasLimit,
+		ValidatedBy:  validator,
 	}
 
-	// Add block reward transaction
-	rewardAmount := BlockReward + totalGasFees
-	rewardTxID := fmt.Sprintf("reward-%d", previousBlock.BlockNumber+1)
-	rewardUTXO := UTXO{
-		TransactionID: rewardTxID,
-		OutputIndex:   0,
-		Amount:        rewardAmount,
-		Receiver:      validator,
+	body := &BlockBody{
+		Transactions: NewPatriciaTrie(),
+		Receipts:     make([]*TxReceipt, 0),
 	}
 
-	rewardTransaction := Transaction{
-		TransactionID: rewardTxID,
-		Sender:        "BLOCKCHAIN",
-		Receiver:      validator,
-		Amount:        rewardAmount,
-		GasFee:        0,
-		Timestamp:     time.Now().Unix(),
-		Outputs:       []UTXO{rewardUTXO},
-	}
-	utxoSet[fmt.Sprintf("%s-0", rewardTxID)] = rewardUTXO
-	validTransactions = append(validTransactions, rewardTransaction)
+	// Process transactions
+	txs := mempool.GetPrioritizedTransactions(calculateDynamicBlockSize(len(mempool.GetTransactions())))
+	cumulativeGas := uint64(0)
 
-	// Construct the Patricia Trie for transactions
-	trie := NewPatriciaTrie()
-	for _, tx := range validTransactions {
-		trie.Insert(tx)
-		log.Printf("[DEBUG] Transaction Added to Trie: %+v", tx)
-	}
-
-	log.Printf("[DEBUG] Patricia Trie Root Hash: %s", trie.GenerateRootHash())
-
-	// Create the new block
-	block := Block{
-		BlockNumber:          previousBlock.BlockNumber + 1,
-		PreviousHash:         previousBlock.Hash,
-		Timestamp:            time.Now().Unix(),
-		PatriciaRoot:         trie.GenerateRootHash(),
-		Transactions:         trie,
-		Difficulty:           difficulty,
-		CumulativeDifficulty: previousBlock.CumulativeDifficulty + difficulty,
-		StateRoot:            "",
-	}
-	block.Hash = calculateHash(block)
-
-	log.Printf("[DEBUG] New Block Created: %+v", block)
-	return block
-}
-
-// MineBlock performs mining with validator selection.
-func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, targetTime int64, peerHost host.Host) error {
-	// Select validator based on stake pool.
-	validatorWallet, validatorHost, err := stakePool.SelectValidator(peerHost)
-	if err != nil {
-		return err
-	}
-	log.Printf("Selected Validator: Wallet=%s, HostID=%s\n", validatorWallet, validatorHost)
-
-	// Adjust difficulty based on the target time.
-	block.Difficulty = AdjustDifficulty(previousBlock, targetTime)
-
-	// Perform Proof of Work.
-	for {
-		block.Hash = calculateHash(*block)
-		if isHashValid(block.Hash, block.Difficulty) {
+	for _, tx := range txs {
+		gasNeeded := calculateGas(tx)
+		if cumulativeGas+gasNeeded > header.GasLimit {
 			break
 		}
-		block.Nonce++
+
+		if mempool.ValidateTransaction(tx, utxoSet) {
+			body.Transactions.Insert(tx)
+
+			receipt := &TxReceipt{
+				TxHash:        tx.Hash(),
+				BlockNumber:   header.BlockNumber,
+				GasUsed:       gasNeeded,
+				Status:        1,
+				CumulativeGas: cumulativeGas + gasNeeded,
+			}
+
+			body.Receipts = append(body.Receipts, receipt)
+			cumulativeGas += gasNeeded
+			UpdateUTXOSet(tx, utxoSet)
+		}
 	}
 
-	return nil
+	header.GasUsed = cumulativeGas
+	header.MerkleRoot = body.Transactions.GenerateRootHash()
+	header.StateRoot = calculateStateRoot(utxoSet)
+	header.ReceiptsRoot = calculateReceiptsRoot(body.Receipts)
+
+	return Block{
+		Header:               header,
+		Body:                 body,
+		CumulativeDifficulty: previousBlock.CumulativeDifficulty + uint64(difficulty),
+	}
 }
 
-// isHashValid checks if a hash meets the difficulty target
-func isHashValid(hash string, difficulty int) bool {
-	prefix := ""
-	for i := 0; i < difficulty; i++ {
-		prefix += "0"
+// Helper methods for API and utilities
+func (b *Block) Hash() string {
+	if b.hash != "" {
+		return b.hash
 	}
-	return hash[:difficulty] == prefix
+
+	header := b.Header
+	data := fmt.Sprintf("%d%d%s%d%s%s%s%d%d",
+		header.Version,
+		header.BlockNumber,
+		header.PreviousHash,
+		header.Timestamp,
+		header.MerkleRoot,
+		header.StateRoot,
+		header.ReceiptsRoot,
+		header.Nonce,
+		header.GasUsed,
+	)
+
+	hash := sha256.Sum256([]byte(data))
+	b.hash = hex.EncodeToString(hash[:])
+	return b.hash
 }
 
-// SerializeBlock serializes a block
-func SerializeBlock(block Block) ([]byte, error) {
-	var buffer bytes.Buffer
-	encoder := gob.NewEncoder(&buffer)
-	err := encoder.Encode(block)
-	if err != nil {
-		return nil, err
-	}
-	lengthPrefix := make([]byte, 4)
-	binary.BigEndian.PutUint32(lengthPrefix, uint32(buffer.Len()))
-	return append(lengthPrefix, buffer.Bytes()...), nil
+// API helper methods
+func (b *Block) Number() uint64 {
+	return b.Header.BlockNumber
 }
 
-// DeserializeBlock deserializes a block
-func DeserializeBlock(data []byte) (Block, error) {
-	if len(data) < 4 {
-		return Block{}, fmt.Errorf("data too short to contain length prefix")
-	}
-
-	length := binary.BigEndian.Uint32(data[:4])
-	if int(length) != len(data[4:]) {
-		return Block{}, fmt.Errorf("data length mismatch: expected %d, got %d", length, len(data[4:]))
-	}
-
-	var block Block
-	decoder := gob.NewDecoder(bytes.NewReader(data[4:]))
-	err := decoder.Decode(&block)
-	if err != nil {
-		return Block{}, err
-	}
-	return block, nil
+func (b *Block) Time() time.Time {
+	return time.Unix(b.Header.Timestamp, 0)
 }
 
-func AdjustDifficulty(previousBlock Block, targetTime int64) int {
-	actualTime := time.Now().Unix() - previousBlock.Timestamp
-	if actualTime < targetTime/2 {
-		return previousBlock.Difficulty + 1 // Increase difficulty
-	} else if actualTime > targetTime*2 {
-		return previousBlock.Difficulty - 1 // Decrease difficulty
+func (b *Block) GasInfo() (uint64, uint64) {
+	return b.Header.GasUsed, b.Header.GasLimit
+}
+
+func (b *Block) Size() uint64 {
+	if b.size == 0 {
+		b.size = calculateBlockSize(b)
 	}
-	return previousBlock.Difficulty
+	return b.size
 }
 
-// Dynamic difficulty adjustment considering network latency and node power
-func AdjustDifficultyDynamic(previousBlock Block, networkLatency int64, nodeProcessingPower float64) int {
-	// Scale difficulty based on latency and processing power
-	if networkLatency > 100 && nodeProcessingPower < 0.5 {
-		return previousBlock.Difficulty - 1 // Lower difficulty for slower nodes
-	} else if networkLatency < 50 && nodeProcessingPower > 1.0 {
-		return previousBlock.Difficulty + 1 // Increase difficulty for faster nodes
+func (b *Block) TransactionCount() uint32 {
+	if b.numTx == 0 {
+		b.numTx = uint32(b.Body.Transactions.Len())
 	}
-	return previousBlock.Difficulty
+	return b.numTx
 }
 
-func AdjustDifficultyForTest() int {
-	return 1 // Minimum difficulty for faster tests
-}
-
-// CalculateDynamicBlockSize calculates the appropriate block size based on mempool size and network constraints
-func CalculateDynamicBlockSize(mempoolSize int) int {
-	const minBlockSize = 1
-	const maxBlockSize = MaxBlockSizeLimit / AvgTransactionSize
-
-	if mempoolSize < minBlockSize {
-		return minBlockSize
+// Create an immutable copy of the block header
+func (h *BlockHeader) Copy() *BlockHeader {
+	cpy := *h
+	if len(h.ExtraData) > 0 {
+		cpy.ExtraData = make([]byte, len(h.ExtraData))
+		copy(cpy.ExtraData, h.ExtraData)
 	}
-	if mempoolSize > maxBlockSize {
-		return maxBlockSize
+	return &cpy
+}
+
+func calculateDynamicGasLimit(previousBlock *Block) uint64 {
+	calculator := gas.NewBlockGasCalculator(BaseGasLimit)
+
+	if previousBlock == nil {
+		return BaseGasLimit
 	}
-	return mempoolSize
+
+	return calculator.CalculateDynamicGasLimit(
+		previousBlock.Header.GasUsed,
+		previousBlock.Header.GasLimit,
+	)
 }
 
-// CalculateHash calculates the hash of the block
-func (b *Block) CalculateHash() string {
-	return calculateHash(*b)
+func calculateDynamicBlockSize(txCount int) int {
+	calculator := gas.NewBlockGasCalculator(BaseGasLimit)
+	return int(calculator.CalculateBlockSize(txCount))
 }
 
+func calculateGas(tx Transaction) uint64 {
+	// Base cost for any transaction
+	gasUsed := uint64(21000)
+
+	// Add gas for data
+	data := tx.GetData()
+	if len(data) > 0 {
+		gasUsed += uint64(len(data)) * 16 // 16 gas per byte of data
+	}
+
+	// Add gas for signature verification
+	gasUsed += 2000
+
+	return gasUsed
+}
+
+func calculateStateRoot(utxoSet map[string]UTXO) string {
+	if len(utxoSet) == 0 {
+		return "0x0000000000000000000000000000000000000000000000000000000000000000"
+	}
+
+	// Create merkle tree from UTXO states
+	utxoHashes := make([]string, 0, len(utxoSet))
+	for _, utxo := range utxoSet {
+		hash := sha256.Sum256([]byte(fmt.Sprintf("%v", utxo)))
+		utxoHashes = append(utxoHashes, hex.EncodeToString(hash[:]))
+	}
+
+	return calculateMerkleRoot(utxoHashes)
+}
+
+func calculateReceiptsRoot(receipts []*TxReceipt) string {
+	if len(receipts) == 0 {
+		return "0x0000000000000000000000000000000000000000000000000000000000000000"
+	}
+
+	// Create merkle tree from receipt hashes
+	receiptHashes := make([]string, 0, len(receipts))
+	for _, receipt := range receipts {
+		hash := sha256.Sum256([]byte(fmt.Sprintf("%v", receipt)))
+		receiptHashes = append(receiptHashes, hex.EncodeToString(hash[:]))
+	}
+
+	return calculateMerkleRoot(receiptHashes)
+}
+
+// Helper function to calculate merkle root
+func calculateMerkleRoot(hashes []string) string {
+	if len(hashes) == 0 {
+		return "0x0000000000000000000000000000000000000000000000000000000000000000"
+	}
+
+	for len(hashes) > 1 {
+		if len(hashes)%2 != 0 {
+			hashes = append(hashes, hashes[len(hashes)-1])
+		}
+
+		var temp []string
+		for i := 0; i < len(hashes); i += 2 {
+			combined := hashes[i] + hashes[i+1]
+			hash := sha256.Sum256([]byte(combined))
+			temp = append(temp, hex.EncodeToString(hash[:]))
+		}
+		hashes = temp
+	}
+
+	return "0x" + hashes[0]
+}
+
+// Add this function
+func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, maxAttempts int, peerHost host.Host) error {
+	// Start with nonce 0
+	block.Header.Nonce = 0
+
+	// Try up to maxAttempts times
+	for i := 0; i < maxAttempts; i++ {
+		// Calculate hash with current nonce
+		hash := block.Hash()
+
+		// Check if hash meets difficulty requirement
+		if isHashValid(hash, block.Header.Difficulty) {
+			block.hash = hash
+			return nil
+		}
+
+		block.Header.Nonce++
+	}
+
+	return fmt.Errorf("failed to mine block after %d attempts", maxAttempts)
+}
+
+// Add helper function
+func isHashValid(hash string, difficulty uint32) bool {
+	prefix := strings.Repeat("0", int(difficulty))
+	return strings.HasPrefix(hash, prefix)
+}
+
+// Add this function
+func GenesisBlock() Block {
+	header := &BlockHeader{
+		Version:      1,
+		BlockNumber:  0,
+		PreviousHash: "0x00000000000000000000000000000000",
+		Timestamp:    time.Now().Unix(),
+		Difficulty:   1,
+		GasLimit:     BaseGasLimit,
+	}
+
+	body := &BlockBody{
+		Transactions: NewPatriciaTrie(),
+		Receipts:     make([]*TxReceipt, 0),
+	}
+
+	return Block{
+		Header: header,
+		Body:   body,
+	}
+}
+
+// Add this method
 func (b *Block) CreateCheckpoint() *Checkpoint {
 	return &Checkpoint{
-		Height:            uint64(b.BlockNumber),
-		Hash:              b.Hash,
-		StateRoot:         b.PatriciaRoot,
-		UTXORoot:          b.Transactions.GenerateRootHash(),
-		Timestamp:         b.Timestamp,
-		ValidatorSetHash:  "", // Will be populated if validator set exists
+		Height:    uint64(b.Header.BlockNumber),
+		Hash:      b.Hash(),
+		StateRoot: b.Header.StateRoot,
+		UTXORoot:  b.Header.StateRoot, // Using StateRoot as UTXORoot for now
+		Timestamp: b.Header.Timestamp,
 	}
+}
+
+// calculateBlockSize returns the approximate size of the block in bytes
+func calculateBlockSize(b *Block) uint64 {
+	size := uint64(0)
+	// Add header size
+	size += uint64(len(b.Header.PreviousHash) + len(b.Hash()) + 16) // 16 for timestamp and nonce
+	// Add base block size
+	size += EmptyBlockSize
+	return size
 }

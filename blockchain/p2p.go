@@ -660,7 +660,7 @@ func (n *Node) handleForkResolution(s network.Stream) {
 	}{
 		Accepted: resolved,
 		Height:   len(n.Blockchain.Chain),
-		Hash:     n.Blockchain.GetLatestBlock().Hash,
+		Hash:     n.Blockchain.GetLatestBlock().hash,
 	}
 
 	if err := json.NewEncoder(s).Encode(response); err != nil {
@@ -677,11 +677,11 @@ func (n *Node) handleForkResolution(s network.Stream) {
 func (n *Node) broadcastNewChainState() {
 	// Create chain state message
 	chainState := struct {
-		Height int
+		Height uint64
 		Hash   string
 	}{
-		Height: len(n.Blockchain.Chain),
-		Hash:   n.Blockchain.GetLatestBlock().Hash,
+		Height: n.Blockchain.GetLatestBlock().Header.BlockNumber,
+		Hash:   n.Blockchain.GetLatestBlock().hash,
 	}
 
 	// Broadcast to all peers except the one that sent us the fork
@@ -757,18 +757,17 @@ func validateBlockStructure(block *Block) error {
 		return fmt.Errorf("nil block")
 	}
 
-	// Validate block hash
-	if len(block.Hash) == 0 {
+	if len(block.Hash()) == 0 {
 		return fmt.Errorf("empty block hash")
 	}
 
 	// Validate previous hash (except for genesis block)
-	if block.BlockNumber > 0 && len(block.PreviousHash) == 0 {
+	if block.Header.BlockNumber > 0 && len(block.Header.PreviousHash) == 0 {
 		return fmt.Errorf("empty previous hash for non-genesis block")
 	}
 
 	// Validate timestamp
-	if block.Timestamp <= 0 {
+	if block.Header.Timestamp <= 0 {
 		return fmt.Errorf("invalid block timestamp")
 	}
 
@@ -876,7 +875,7 @@ func (n *Node) handleChainValidation(s network.Stream) {
 	// Validate the chain
 	valid := true
 	for i := 1; i < len(chain); i++ {
-		if err := validateBlockStructure(&chain[i]); err != nil || chain[i].PreviousHash != chain[i-1].Hash {
+		if err := validateBlockStructure(&chain[i]); err != nil || chain[i].Header.PreviousHash != chain[i-1].hash {
 			valid = false
 			break
 		}
@@ -952,7 +951,7 @@ func (n *Node) handleStateVerification(s network.Stream) {
 // Fix for state hash calculation
 func (bc *Blockchain) CalculateStateHash() string {
 	// Combine latest block hash and UTXOPool state
-	state := bc.GetLatestBlock().Hash
+	state := bc.GetLatestBlock().hash
 
 	// Get UTXOs from Node's UTXOPool
 	utxos := bc.GetUTXOSet()
@@ -1002,8 +1001,23 @@ func (n *Node) handleBlockSync(s network.Stream) {
 	switch req.RequestType {
 	case "headers":
 		headers := n.getBlockHeaders(req.StartHeight, req.EndHeight)
+		// Convert BlockHeader to SyncBlockHeader
+		syncHeaders := make([]SyncBlockHeader, len(headers))
+		for i, h := range headers {
+			block := n.Blockchain.Chain[h.BlockNumber] // Get corresponding block
+			syncHeaders[i] = SyncBlockHeader{
+				Hash:              block.Hash(), // Get hash from block
+				PreviousHash:      h.PreviousHash,
+				Height:            h.BlockNumber,
+				Timestamp:         h.Timestamp,
+				MerkleRoot:        h.MerkleRoot,
+				StateRoot:         h.StateRoot,
+				Difficulty:        uint64(h.Difficulty),
+				TotalTransactions: block.numTx, // Get transaction count from block
+			}
+		}
 		json.NewEncoder(s).Encode(BlockHeaderResponse{
-			Headers:     headers,
+			Headers:     syncHeaders,
 			StartHeight: req.StartHeight,
 			EndHeight:   req.EndHeight,
 		})
@@ -1018,25 +1032,25 @@ func (n *Node) getBlockHeaders(start, end uint64) []BlockHeader {
 	headers := make([]BlockHeader, 0, end-start+1)
 	for i := start; i <= end; i++ {
 		block := n.Blockchain.Chain[i]
-
+		
 		// Calculate merkle root from transactions
 		txHashes := make([]string, 0)
-		transactions := block.Transactions.GetAllTransactions()
-		for _, tx := range transactions {
+		for _, tx := range block.Body.Transactions.GetAllTransactions() {
 			txHashes = append(txHashes, tx.Hash())
 		}
+		
 		merkleRoot := CalculateMerkleRoot(txHashes)
-
-		headers = append(headers, BlockHeader{
-			Hash:              block.Hash,
-			PreviousHash:      block.PreviousHash,
-			Height:            uint64(block.BlockNumber),
-			Timestamp:         block.Timestamp,
+		
+		header := BlockHeader{
+			PreviousHash:       block.Header.PreviousHash,
+			BlockNumber:        block.Header.BlockNumber,
+			Timestamp:         block.Header.Timestamp,
 			MerkleRoot:        merkleRoot,
-			StateRoot:         n.UTXOPool.GetStateRoot(),
-			Difficulty:        uint64(block.Difficulty),
-			TotalTransactions: uint32(len(transactions)),
-		})
+			StateRoot:         block.Header.StateRoot,
+			Difficulty:        block.Header.Difficulty,
+		}
+		
+		headers = append(headers, header)
 	}
 	return headers
 }
@@ -1072,8 +1086,9 @@ func (n *Node) verifyBlockHeaders(headers []BlockHeader) error {
 
 	// Verify header chain
 	for i := 1; i < len(headers); i++ {
-		if headers[i].PreviousHash != headers[i-1].Hash {
-			return fmt.Errorf("invalid header chain at height %d", headers[i].Height)
+		block := n.Blockchain.Chain[i-1] 
+		if headers[i].PreviousHash != block.hash {
+			return fmt.Errorf("invalid header chain at height %d", headers[i].BlockNumber)
 		}
 	}
 

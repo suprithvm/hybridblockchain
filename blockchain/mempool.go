@@ -31,17 +31,22 @@ func (m *Mempool) AddTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	log.Printf("\n💫 Processing New Transaction")
+	log.Printf("   ID: %s", tx.TransactionID)
+	log.Printf("   From: %s", tx.Sender)
+	log.Printf("   Gas Price: %d", tx.GasPrice)
+
 	// Check for duplicate transaction
 	for _, existingTx := range m.Transactions {
 		if existingTx.TransactionID == tx.TransactionID {
-			log.Printf("[DEBUG] Duplicate transaction rejected: %s", tx.TransactionID)
+			log.Printf("❌ Duplicate transaction rejected: %s", tx.TransactionID)
 			return false
 		}
 	}
 
 	// Validate transaction
 	if !m.ValidateTransaction(tx, utxoSet) {
-		log.Printf("[DEBUG] Transaction validation failed: %s", tx.TransactionID)
+		log.Printf("❌ Transaction validation failed: %s", tx.TransactionID)
 		return false
 	}
 
@@ -63,60 +68,56 @@ func (m *Mempool) AddTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
 	}
 
 	m.Transactions = append(m.Transactions, tx)
-	
+
 	// Sort after adding new transaction
 	sort.SliceStable(m.Transactions, func(i, j int) bool {
 		return m.Transactions[i].GasFee > m.Transactions[j].GasFee
 	})
-	
-	log.Printf("[DEBUG] Transaction added to mempool: %s", tx.TransactionID)
+
+	log.Printf("��� Transaction successfully added to mempool")
+	log.Printf("   • Mempool size: %d/%d", len(m.Transactions), m.maxSize)
 	return true
 }
 
 // ValidateTransaction verifies a transaction against the UTXO set.
 func (m *Mempool) ValidateTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
-	// Allow transactions with no inputs (genesis-like or mining rewards)
-	if len(tx.Inputs) == 0 {
-		return true
-	}
+	log.Printf("\n🔍 Validating Transaction: %s", tx.TransactionID)
 
-	// Basic validation
-	if tx.Amount <= 0 {
-		log.Printf("[DEBUG] Invalid transaction: Amount <= 0")
+	// Validate gas parameters
+	if err := tx.ValidateGas(); err != nil {
+		log.Printf("❌ Gas validation failed: %v", err)
 		return false
 	}
 
-	// Calculate total input
+	// Calculate total input value needed (amount + max gas fee)
+	maxGasFee := tx.GasLimit * tx.MaxFeePerGas
+	totalRequired := tx.Amount + float64(maxGasFee)
+
+	// Validate inputs can cover amount + max gas fee
 	var totalInput float64
 	for _, input := range tx.Inputs {
 		utxo, exists := utxoSet[fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)]
 		if !exists {
-			log.Printf("[DEBUG] Invalid transaction: UTXO not found")
-			return false // UTXO not found
+			log.Printf("❌ UTXO not found")
+			return false
 		}
 		if utxo.Receiver != tx.Sender {
-			log.Printf("[DEBUG] Invalid transaction: UTXO doesn't belong to sender")
-			return false // UTXO doesn't belong to sender
+			log.Printf("❌ UTXO doesn't belong to sender")
+			return false
 		}
 		totalInput += utxo.Amount
 	}
 
-	// Calculate total output
-	var totalOutput float64
-	for _, output := range tx.Outputs {
-		if output.Amount <= 0 {
-			log.Printf("[DEBUG] Invalid transaction: Output amount <= 0")
-			return false
-		}
-		totalOutput += output.Amount
-	}
-
-	// Verify that input covers output plus gas fee
-	if totalInput < (totalOutput + tx.GasFee) {
-		log.Printf("[DEBUG] Invalid transaction: Insufficient funds. Input: %f, Output + Gas: %f",
-			totalInput, totalOutput+tx.GasFee)
+	if totalInput < totalRequired {
+		log.Printf("❌ Insufficient funds for amount + gas: have %.8f, need %.8f",
+			totalInput, totalRequired)
 		return false
 	}
+
+	log.Printf("✅ Transaction validation successful")
+	log.Printf("   • Gas Limit: %d", tx.GasLimit)
+	log.Printf("   • Gas Price: %d", tx.GasPrice)
+	log.Printf("   • Max Gas Fee: %d", maxGasFee)
 
 	return true
 }
@@ -268,9 +269,9 @@ func (m *Mempool) evictOldTransactions() {
 // MempoolSync represents the sync state of mempool
 type MempoolSync struct {
 	Transactions []Transaction `json:"transactions"`
-	StateRoot    string       `json:"state_root"`
-	Timestamp    int64        `json:"timestamp"`
-	LastSyncTime int64       `json:"last_sync_time"`
+	StateRoot    string        `json:"state_root"`
+	Timestamp    int64         `json:"timestamp"`
+	LastSyncTime int64         `json:"last_sync_time"`
 }
 
 // GetMempoolSync creates a sync snapshot of the mempool
@@ -287,7 +288,7 @@ func (mp *Mempool) GetMempoolSync() *MempoolSync {
 	// Create a copy of transactions directly instead of calling GetPrioritizedTransactions
 	txCopy := make([]Transaction, len(mp.Transactions))
 	copy(txCopy, mp.Transactions)
-	
+
 	// Sort transactions outside of lock
 	mp.mu.RUnlock()
 	sort.SliceStable(txCopy, func(i, j int) bool {
@@ -335,13 +336,13 @@ func (mp *Mempool) calculateStateRoot() string {
 	if len(mp.Transactions) == 0 {
 		return ""
 	}
-	
+
 	// Create hash from sorted transactions
 	var combined string
 	for _, tx := range mp.Transactions {
 		combined += tx.Hash()
 	}
-	
+
 	hash := sha256.Sum256([]byte(combined))
 	return hex.EncodeToString(hash[:])
 }
@@ -403,4 +404,14 @@ func (mp *Mempool) removeExpiredTransactions(lastSyncTime int64) {
 		}
 	}
 	mp.Transactions = current
+}
+
+// Add new method for gas-based sorting
+func (m *Mempool) SortByGasPrice() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sort.SliceStable(m.Transactions, func(i, j int) bool {
+		return m.Transactions[i].GasPrice > m.Transactions[j].GasPrice
+	})
 }

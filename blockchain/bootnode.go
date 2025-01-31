@@ -39,6 +39,7 @@ type BootstrapNodeConfig struct {
 	ListenPort         int
 	PublicIP           string
 	KeyFile            string
+	PeerStoreFile      string
 	EnableRelay        bool
 	EnableNAT          bool
 	EnablePeerExchange bool
@@ -118,11 +119,25 @@ func (n *Notifier) ListenClose(net network.Network, ma multiaddr.Multiaddr) {
 	log.Printf("Network stopped listening on: %s", ma.String())
 }
 
-// NewBootstrapNode creates a comprehensive bootstrap node
+// NewBootstrapNode creates a new bootstrap node
 func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*BootstrapNode, error) {
-	log.Printf("Initializing bootnode with config: %+v\n", config)
+	log.Printf("\n🚀 Initializing Bootstrap Node")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("📋 Configuration:")
+	log.Printf("   • Listen Port: %d", config.ListenPort)
+	log.Printf("   • Public IP: %s", config.PublicIP)
+	log.Printf("   • NAT Enabled: %v", config.EnableNAT)
+	log.Printf("   • Peer Exchange: %v", config.EnablePeerExchange)
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 	ctx, cancel := context.WithCancel(ctx)
+
+	// Create node data directory if it doesn't exist
+	nodeDir := filepath.Dir(config.KeyFile)
+	if err := os.MkdirAll(nodeDir, 0755); err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create node directory: %w", err)
+	}
 
 	privKey, err := loadOrCreatePrivateKey(config)
 	if err != nil {
@@ -164,20 +179,61 @@ func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*Bootst
 	}
 
 	// Print node addresses
-	log.Printf("Bootstrap node started with ID: %s", peerID.String())
-	log.Printf("Local addresses: %v", host.Addrs())
+	log.Printf("✅ Node Identity:")
+	log.Printf("   • Peer ID: %s", peerID.String())
+	log.Printf("   • Listening on: %v", host.Addrs())
 	if config.PublicIP != "" {
-		log.Printf("Public address: %s", config.GetMultiaddr(peerID))
+		log.Printf("   • Public Address: %s", config.GetMultiaddr(peerID))
 	}
 
+	// Create peerStore with the configured file path instead of temp directory
+	peerStore := NewPersistentPeerStore(config.PeerStoreFile)
+
+	// Create DHT with custom logging
 	kdht, err := dht.New(ctx, host, dht.Mode(dht.ModeServer))
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create DHT: %w", err)
 	}
 
-	peerStoreFile := filepath.Join(os.TempDir(), "blockchain_bootnode_peers.json")
-	peerStore := NewPersistentPeerStore(peerStoreFile)
+	// Pretty print DHT info
+	log.Printf("\n📊 DHT Configuration")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━")
+	log.Printf("   • Mode: Server")
+	
+	// Get routing table info
+	rt := kdht.RoutingTable()
+	peers := rt.ListPeers()
+	log.Printf("   • Routing Table Peers: %d", len(peers))
+	
+	// Get network info
+	netPeers := kdht.Host().Network().Peers()
+	log.Printf("   • Network Peers: %d", len(netPeers))
+	
+	// Get connection info
+	conns := kdht.Host().Network().Conns()
+	log.Printf("   • Active Connections: %d", len(conns))
+	
+	// Get address info
+	addrs := kdht.Host().Addrs()
+	log.Printf("   • Listening Addresses: %d", len(addrs))
+	for _, addr := range addrs {
+		log.Printf("     ‣ %s", addr.String())
+	}
+	
+	// Get peer info
+	if len(peers) > 0 {
+		log.Printf("   • Connected Peers:")
+		for i, p := range peers {
+			if i >= 5 { // Show only first 5 peers
+				log.Printf("     ‣ ... and %d more", len(peers)-5)
+				break
+			}
+			log.Printf("     ‣ %s", p.String())
+		}
+	}
+	
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━\n")
 
 	bn := &BootstrapNode{
 		host:       host,
@@ -232,6 +288,7 @@ func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*Bootst
 
 	log.Println(" Network is active and listening...")
 
+	log.Printf("✨ Bootstrap node initialization complete\n")
 	return bn, nil
 }
 
@@ -394,17 +451,21 @@ func (bn *BootstrapNode) handleTransaction(stream network.Stream) {
 func (bn *BootstrapNode) handlePeerDiscovery(stream network.Stream) {
 	defer stream.Close()
 
-	// Enforce rate limits
-	if err := bn.enforceRateLimits(stream.Conn().RemotePeer(), "discovery"); err != nil {
-		log.Printf("Rate limit exceeded: %v", err)
+	remotePeer := stream.Conn().RemotePeer()
+	log.Printf("\n👥 Peer Discovery Request from: %s", remotePeer.String())
+
+	if err := bn.enforceRateLimits(remotePeer, "discovery"); err != nil {
+		log.Printf("⚠️  Rate limit exceeded for peer %s: %v", remotePeer, err)
 		return
 	}
 
-	// Share known peers
 	peers := bn.peerStore.GetPeers()
 	if err := json.NewEncoder(stream).Encode(peers); err != nil {
-		log.Printf("Failed to send peer list: %v", err)
+		log.Printf("❌ Failed to send peer list to %s: %v", remotePeer, err)
+		return
 	}
+	
+	log.Printf("✅ Shared %d peers with %s", len(peers), remotePeer.String())
 }
 
 // collectMetrics periodically collects network metrics
@@ -418,16 +479,25 @@ func (bn *BootstrapNode) collectMetrics() {
 			return
 		case <-ticker.C:
 			bn.mu.Lock()
-			// Update connection metrics
-			for _, peer := range bn.host.Network().Peers() {
+			
+			log.Printf("\n📊 Network Metrics Update")
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			
+			activePeers := bn.host.Network().Peers()
+			log.Printf("• Active Peers: %d", len(activePeers))
+			
+			var connectedPeers int
+			for _, peer := range activePeers {
 				conns := bn.host.Network().ConnsToPeer(peer)
 				if len(conns) > 0 {
-					// If we have an active connection, consider it a successful connection
+					connectedPeers++
 					bn.metrics.ConnectionSuccess[peer] = 1.0
-				} else {
-					bn.metrics.ConnectionSuccess[peer] = 0.0
 				}
 			}
+			log.Printf("• Connected Peers: %d", connectedPeers)
+			log.Printf("• Uptime: %s", time.Since(bn.metrics.StartTime).Round(time.Second))
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+			
 			bn.mu.Unlock()
 		}
 	}
@@ -442,19 +512,29 @@ func (bn *BootstrapNode) Start() error {
 		return fmt.Errorf("bootstrap node already started")
 	}
 
+	log.Printf("\n🌟 Starting Bootstrap Node Services")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 	if err := bn.dht.Bootstrap(bn.ctx); err != nil {
 		return fmt.Errorf("failed to bootstrap DHT: %w", err)
 	}
+	log.Printf("✅ DHT Bootstrap complete")
 
 	go bn.startPeriodicTasks()
+	log.Printf("✅ Periodic maintenance tasks started")
+	
 	go bn.collectMetrics()
+	log.Printf("✅ Metrics collection initialized")
 
 	bn.started = true
-	log.Printf("Bootstrap node started. ID: %s", bn.host.ID())
+	
+	log.Printf("\n📡 Network Interfaces:")
 	for _, addr := range bn.host.Addrs() {
-		log.Printf("Listening on: %s/p2p/%s", addr, bn.host.ID())
+		log.Printf("   • %s/p2p/%s", addr, bn.host.ID())
 	}
-
+	
+	log.Printf("\n🎉 Bootstrap node is fully operational")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 	return nil
 }
 
@@ -533,22 +613,19 @@ type PersistentPeerStore struct {
 
 // NewPersistentPeerStore creates a new persistent peer store
 func NewPersistentPeerStore(filename string) *PersistentPeerStore {
-	// If filename is not an absolute path, make it relative to current directory
-	if !filepath.IsAbs(filename) {
-		currentDir, err := os.Getwd()
-		if err != nil {
-			currentDir = "."
-		}
-		filename = filepath.Join(currentDir, filename)
+	// Create directory if it doesn't exist
+	dir := filepath.Dir(filename)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("❌ Failed to create peer store directory: %v", err)
 	}
 
 	store := &PersistentPeerStore{
 		filename: filename,
 		peers:    make(map[peer.ID]peer.AddrInfo),
-		logger:   log.New(os.Stdout, "PersistentPeerStore: ", log.Ldate|log.Ltime|log.Lshortfile),
+		logger:   log.New(os.Stdout, "📡 PeerStore: ", log.Ltime),
 	}
 
-	store.logger.Printf("Initializing peer store with file: %s", filename)
+	store.logger.Printf("Initializing peer store at: %s", filename)
 
 	// Load peers with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -562,9 +639,9 @@ func NewPersistentPeerStore(filename string) *PersistentPeerStore {
 
 	select {
 	case <-loadDone:
-		store.logger.Printf("Peer store load completed")
+		store.logger.Printf("✅ Peer store loaded successfully")
 	case <-ctx.Done():
-		store.logger.Printf("Peer store load timed out")
+		store.logger.Printf("⚠️  Peer store load timed out")
 	}
 
 	return store
@@ -575,30 +652,30 @@ func (ps *PersistentPeerStore) load() {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
-	ps.logger.Printf("Attempting to load peers from %s", ps.filename)
+	ps.logger.Printf("Loading peers from: %s", ps.filename)
 
 	// Check if file exists before attempting to read
 	_, err := os.Stat(ps.filename)
 	if os.IsNotExist(err) {
-		ps.logger.Printf("Peer store file %s does not exist. Creating new store.", ps.filename)
+		ps.logger.Printf("📝 Creating new peer store")
 		return
 	}
 
 	data, err := os.ReadFile(ps.filename)
 	if err != nil {
-		ps.logger.Printf("Error reading peer store %s: %v", ps.filename, err)
+		ps.logger.Printf("❌ Error reading peer store: %v", err)
 		return
 	}
 
 	// Handle empty file case
 	if len(data) == 0 {
-		ps.logger.Printf("Peer store file %s is empty", ps.filename)
+		ps.logger.Printf("ℹ️  Peer store file is empty")
 		return
 	}
 
 	var loadedPeers map[string]peer.AddrInfo
 	if err := json.Unmarshal(data, &loadedPeers); err != nil {
-		ps.logger.Printf("Error unmarshaling peer store %s: %v", ps.filename, err)
+		ps.logger.Printf("❌ Error parsing peer data: %v", err)
 		return
 	}
 
@@ -606,7 +683,7 @@ func (ps *PersistentPeerStore) load() {
 		ps.peers[addrInfo.ID] = addrInfo
 	}
 
-	ps.logger.Printf("Loaded %d peers from %s", len(ps.peers), ps.filename)
+	ps.logger.Printf("✅ Loaded %d peers", len(ps.peers))
 }
 
 // save writes peer information to persistent storage

@@ -3,9 +3,11 @@ module blockchain-core
 go 1.23.3
 
 require (
+	github.com/gorilla/mux v1.8.1
 	github.com/libp2p/go-libp2p v0.37.2
 	github.com/libp2p/go-libp2p-kad-dht v0.28.1
 	github.com/multiformats/go-multiaddr v0.14.0
+	github.com/spf13/cobra v1.8.1
 )
 
 require (
@@ -14,16 +16,15 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/hashicorp/golang-lru v1.0.2 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/ipfs/boxo v0.24.3 // indirect
 	github.com/ipfs/go-datastore v0.6.0 // indirect
-	github.com/ipfs/go-log v1.0.5 // indirect
 	github.com/ipld/go-ipld-prime v0.21.0 // indirect
 	github.com/jbenet/goprocess v0.1.4 // indirect
 	github.com/libp2p/go-cidranger v1.1.0 // indirect
 	github.com/libp2p/go-libp2p-kbucket v0.6.4 // indirect
 	github.com/libp2p/go-libp2p-record v0.2.0 // indirect
 	github.com/libp2p/go-libp2p-routing-helpers v0.7.4 // indirect
-	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/pion/datachannel v1.5.9 // indirect
 	github.com/pion/ice/v2 v2.3.36 // indirect
 	github.com/pion/interceptor v0.1.37 // indirect
@@ -35,6 +36,7 @@ require (
 	github.com/pion/srtp/v2 v2.0.20 // indirect
 	github.com/pion/webrtc/v3 v3.3.4 // indirect
 	github.com/polydawn/refmt v0.89.0 // indirect
+	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/whyrusleeping/go-keyspace v0.0.0-20160322163242-5b898ac5add1 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/otel v1.31.0 // indirect
@@ -126,7 +128,7 @@ require (
 	golang.org/x/crypto v0.29.0
 	golang.org/x/exp v0.0.0-20241108190413-2d47ceb2692f // indirect
 	golang.org/x/mod v0.22.0 // indirect
-	golang.org/x/net v0.31.0
+	golang.org/x/net v0.31.0 // indirect
 	golang.org/x/sync v0.9.0 // indirect
 	golang.org/x/sys v0.27.0 // indirect
 	golang.org/x/text v0.20.0 // indirect
