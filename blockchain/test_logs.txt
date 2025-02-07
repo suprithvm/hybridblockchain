@@ -70,3 +70,17 @@
 === RUN   BOOTSTRAP_NODE_CREATION
 
 === RUN   BOOTSTRAP_NODE_CREATION
+
+=== RUN   blockchain_store_test
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:31: === Starting Blockchain Tests ===
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:32: Test database path: C:\Users\supri\AppData\Local\Temp\blockchain-test
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:123: === Running Block Storage Tests ===
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:383: Creating test store for: TestBlockStorage
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:198: === Running Transaction Storage Tests ===
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:383: Creating test store for: TestTransactionStorage
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:243: === Running UTXO Tests ===
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:383: Creating test store for: TestUTXOOperations
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:300: === Running Stress Tests ===
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:383: Creating test store for: TestStressOperations
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:38: Cleaning up test database...
+    C:/Users/supri/Desktop/blockchain-core/blockchain/store_test.go:40: === Test Suite Completed ===

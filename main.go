@@ -1,22 +1,25 @@
 package main
 
 import (
-	"context"
 	"log"
 	"os"
 	"path/filepath"
-	"time"
 
 	"blockchain-core/blockchain"
+	"blockchain-core/blockchain/db"
+	"blockchain-core/blockchain/sync"
 )
 
-// GetOutboundIP gets the preferred outbound IP of this machine
-func GetOutboundIP() string {
-	return "49.204.110.41" // Set to the provided public IP
+type logWrapper struct {
+    *log.Logger
+}
+
+func (l *logWrapper) Debug(v ...interface{}) {
+    l.Println(v...)
 }
 
 func main() {
-	log.Printf("\n🔑 Node Identity Configuration")
+	log.Printf("\n🔗 Blockchain Node Initialization")
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	// Get the current working directory
@@ -25,42 +28,55 @@ func main() {
 		log.Fatalf("❌ Failed to get current directory: %v", err)
 	}
 
-	// Create a persistent directory for node data if it doesn't exist
+	// Create data directories
 	nodeDataDir := filepath.Join(currentDir, "node_data")
 	if err := os.MkdirAll(nodeDataDir, 0755); err != nil {
 		log.Fatalf("❌ Failed to create node data directory: %v", err)
 	}
 
-	// Store key file in the node_data directory
-	keyFilePath := filepath.Join(nodeDataDir, "bootnode.key")
-	peerStorePath := filepath.Join(nodeDataDir, "peers.json")
+	log.Printf("📂 Data Directory: %s", nodeDataDir)
 
-	log.Printf("📂 Node Data Directory: %s", nodeDataDir)
-	log.Printf("🔐 Key File Location: %s", keyFilePath)
-	log.Printf("👥 Peer Store Location: %s", peerStorePath)
-
-	config := blockchain.BootstrapNodeConfig{
-		ListenPort:         50505,
-		PublicIP:           GetOutboundIP(),
-		KeyFile:            keyFilePath,
-		PeerStoreFile:      peerStorePath,
-		EnablePeerExchange: true,
-		EnableNAT:         true,
+	// Initialize database
+	dbConfig := &db.Config{
+		Type:         db.LevelDB,
+		Path:         filepath.Join(nodeDataDir, "blockchain"),
+		CacheSize:    512,
+		MaxOpenFiles: 64,
+		Compression:  true,
+		Logger:      &logWrapper{log.Default()},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	node, err := blockchain.NewBootstrapNode(ctx, &config)
+	// Create blockchain store
+	store, err := blockchain.NewStore(dbConfig)
 	if err != nil {
-		log.Fatalf("❌ Failed to create bootnode: %v", err)
+		log.Fatalf("❌ Failed to create blockchain store: %v", err)
+	}
+	defer store.Close()
+
+	log.Printf("📦 Blockchain store initialized")
+
+	// Initialize blockchain
+	bc := blockchain.InitialiseBlockchain()
+	if bc == nil {
+		log.Fatalf("❌ Failed to initialize blockchain")
 	}
 
-	// Start the bootnode
-	if err := node.Start(); err != nil {
-		log.Fatalf("❌ Failed to start bootnode: %v", err)
+	log.Printf("⛓️ Blockchain initialized")
+
+	// Initialize sync service
+	syncConfig := sync.DefaultSyncConfig()
+	syncService, err := sync.NewSyncService(syncConfig, bc, store)
+	if err != nil {
+		log.Fatalf("❌ Failed to create sync service: %v", err)
 	}
-	log.Println("✅ Bootnode is running...")
+
+	// Start sync service
+	if err := syncService.Start(":50505"); err != nil {
+		log.Fatalf("❌ Failed to start sync service: %v", err)
+	}
+
+	log.Printf("🔄 Sync Service: Running on port 50505")
+	log.Printf("✅ Blockchain node is running")
 
 	// Keep the application running
 	select {}

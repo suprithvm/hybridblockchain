@@ -1,0 +1,139 @@
+syntax = "proto3";
+
+package sync;
+
+option go_package = "blockchain-core/blockchain/sync/proto";
+
+import "google/protobuf/timestamp.proto";
+
+// ChainSync service handles blockchain synchronization
+service ChainSync {
+    // GetChainInfo returns current blockchain information
+    rpc GetChainInfo(ChainInfoRequest) returns (ChainInfoResponse) {}
+    
+    // StreamBlocks streams blocks from start to end height
+    rpc StreamBlocks(BlockRequest) returns (stream BlockResponse) {}
+    
+    // SyncUTXOSet synchronizes UTXO set in chunks
+    rpc SyncUTXOSet(UTXORequest) returns (stream UTXOResponse) {}
+    
+    // VerifyState verifies state consistency
+    rpc VerifyState(VerifyStateRequest) returns (VerifyStateResponse) {}
+}
+
+// NetworkSync service handles network-related operations
+service NetworkSync {
+    // DiscoverPeers discovers new peers
+    rpc DiscoverPeers(DiscoverRequest) returns (stream PeerInfo) {}
+    
+    // StreamStatus streams network status updates
+    rpc StreamStatus(StatusRequest) returns (stream NetworkStatus) {}
+    
+    // PropagateTransaction broadcasts a transaction
+    rpc PropagateTransaction(Transaction) returns (PropagateResponse) {}
+}
+
+// ChainInfoRequest requests chain information
+message ChainInfoRequest {
+    uint64 current_height = 1;
+    string current_hash = 2;
+}
+
+// ChainInfoResponse contains chain information
+message ChainInfoResponse {
+    uint64 height = 1;
+    string last_block_hash = 2;
+    string state_root = 3;
+    string utxo_root = 4;
+    uint32 network_version = 5;
+    uint32 protocol_version = 6;
+    uint32 min_peer_version = 7;
+    google.protobuf.Timestamp timestamp = 8;
+}
+
+// BlockRequest requests blocks in a range
+message BlockRequest {
+    uint64 start_height = 1;
+    uint64 end_height = 2;
+    bool include_transactions = 3;
+}
+
+// BlockResponse contains block data
+message BlockResponse {
+    uint64 height = 1;
+    bytes block_data = 2;
+    repeated bytes transaction_data = 3;
+    string merkle_root = 4;
+    string state_root = 5;
+    google.protobuf.Timestamp timestamp = 6;
+}
+
+// UTXORequest requests UTXO set data
+message UTXORequest {
+    uint32 chunk_size = 1;
+    string current_hash = 2;
+}
+
+// UTXOResponse contains UTXO chunk data
+message UTXOResponse {
+    uint32 chunk_number = 1;
+    bytes utxo_data = 2;
+    string merkle_proof = 3;
+    uint32 total_chunks = 4;
+}
+
+// VerifyStateRequest requests state verification
+message VerifyStateRequest {
+    string state_root = 1;
+    string utxo_root = 2;
+}
+
+// VerifyStateResponse contains verification result
+message VerifyStateResponse {
+    bool valid = 1;
+    string error_message = 2;
+}
+
+// DiscoverRequest requests peer discovery
+message DiscoverRequest {
+    uint32 max_peers = 1;
+    repeated string excluded_peers = 2;
+}
+
+// PeerInfo contains peer information
+message PeerInfo {
+    string id = 1;
+    string address = 2;
+    uint32 port = 3;
+    float score = 4;
+    google.protobuf.Timestamp last_seen = 5;
+}
+
+// StatusRequest requests network status
+message StatusRequest {
+    bool include_peer_stats = 1;
+}
+
+// NetworkStatus contains network status information
+message NetworkStatus {
+    uint32 connected_peers = 1;
+    uint32 inbound_peers = 2;
+    uint32 outbound_peers = 3;
+    uint64 bandwidth_usage = 4;
+    map<string, float> peer_scores = 5;
+    google.protobuf.Timestamp timestamp = 6;
+}
+
+// Transaction represents a transaction to propagate
+message Transaction {
+    bytes transaction_data = 1;
+    string transaction_hash = 2;
+    google.protobuf.Timestamp timestamp = 3;
+}
+
+// PropagateResponse contains transaction propagation result
+message PropagateResponse {
+    bool success = 1;
+    string error_message = 2;
+    uint32 propagated_to = 3;
+} 

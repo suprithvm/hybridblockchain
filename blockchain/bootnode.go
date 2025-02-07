@@ -32,7 +32,16 @@ const (
 	MaxPeerConnections    = 50
 	PeerDiscoveryInterval = 5 * time.Minute
 	DHTProviderInterval   = 10 * time.Minute
+
+	DefaultBootstrapAddress = "/ip4/49.204.110.41/tcp/50505/p2p/12D3KooWEsHAvZyn3biKjPHaz8MBDiGmQnFuxtsTnjVgkUe6wPtQ"
+	DefaultListenPort       = 50505
 )
+
+// Store known bootstrap nodes
+var KnownBootstrapPeers = []string{
+	DefaultBootstrapAddress,
+	// Add more bootstrap nodes here
+}
 
 // BootstrapNodeConfig represents the configuration for a bootstrap node
 type BootstrapNodeConfig struct {
@@ -62,6 +71,9 @@ type BootstrapNode struct {
 	metrics     *NetworkMetrics
 	rateLimiter *RateLimiter
 	protocols   map[string]network.StreamHandler
+	peers       map[peer.ID]peer.AddrInfo
+	peersMutex  sync.RWMutex
+	dataDir     string
 }
 
 // PeerScore represents the scoring metrics for a peer
@@ -200,27 +212,27 @@ func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*Bootst
 	log.Printf("\n📊 DHT Configuration")
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━")
 	log.Printf("   • Mode: Server")
-	
+
 	// Get routing table info
 	rt := kdht.RoutingTable()
 	peers := rt.ListPeers()
 	log.Printf("   • Routing Table Peers: %d", len(peers))
-	
+
 	// Get network info
 	netPeers := kdht.Host().Network().Peers()
 	log.Printf("   • Network Peers: %d", len(netPeers))
-	
+
 	// Get connection info
 	conns := kdht.Host().Network().Conns()
 	log.Printf("   • Active Connections: %d", len(conns))
-	
+
 	// Get address info
 	addrs := kdht.Host().Addrs()
 	log.Printf("   • Listening Addresses: %d", len(addrs))
 	for _, addr := range addrs {
 		log.Printf("     ‣ %s", addr.String())
 	}
-	
+
 	// Get peer info
 	if len(peers) > 0 {
 		log.Printf("   • Connected Peers:")
@@ -232,7 +244,7 @@ func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*Bootst
 			log.Printf("     ‣ %s", p.String())
 		}
 	}
-	
+
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━\n")
 
 	bn := &BootstrapNode{
@@ -464,7 +476,7 @@ func (bn *BootstrapNode) handlePeerDiscovery(stream network.Stream) {
 		log.Printf("❌ Failed to send peer list to %s: %v", remotePeer, err)
 		return
 	}
-	
+
 	log.Printf("✅ Shared %d peers with %s", len(peers), remotePeer.String())
 }
 
@@ -479,13 +491,13 @@ func (bn *BootstrapNode) collectMetrics() {
 			return
 		case <-ticker.C:
 			bn.mu.Lock()
-			
+
 			log.Printf("\n📊 Network Metrics Update")
 			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			
+
 			activePeers := bn.host.Network().Peers()
 			log.Printf("• Active Peers: %d", len(activePeers))
-			
+
 			var connectedPeers int
 			for _, peer := range activePeers {
 				conns := bn.host.Network().ConnsToPeer(peer)
@@ -497,7 +509,7 @@ func (bn *BootstrapNode) collectMetrics() {
 			log.Printf("• Connected Peers: %d", connectedPeers)
 			log.Printf("• Uptime: %s", time.Since(bn.metrics.StartTime).Round(time.Second))
 			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-			
+
 			bn.mu.Unlock()
 		}
 	}
@@ -522,17 +534,17 @@ func (bn *BootstrapNode) Start() error {
 
 	go bn.startPeriodicTasks()
 	log.Printf("✅ Periodic maintenance tasks started")
-	
+
 	go bn.collectMetrics()
 	log.Printf("✅ Metrics collection initialized")
 
 	bn.started = true
-	
+
 	log.Printf("\n📡 Network Interfaces:")
 	for _, addr := range bn.host.Addrs() {
 		log.Printf("   • %s/p2p/%s", addr, bn.host.ID())
 	}
-	
+
 	log.Printf("\n🎉 Bootstrap node is fully operational")
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 	return nil

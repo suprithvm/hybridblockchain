@@ -34,6 +34,7 @@ func NewTestLogger(testName string) (*TestLogger, error) {
 	}, nil
 }
 
+// Log writes a log message with file and line information
 func (l *TestLogger) Log(format string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -51,6 +52,7 @@ func (l *TestLogger) Log(format string, args ...interface{}) {
 	}
 }
 
+// LogError logs an error with test context
 func (l *TestLogger) LogError(err error, testName string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -68,6 +70,7 @@ func (l *TestLogger) LogError(err error, testName string) {
 	}
 }
 
+// LogTestResult logs the test result and duration
 func (l *TestLogger) LogTestResult(testName string, passed bool, duration time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -84,6 +87,7 @@ func (l *TestLogger) LogTestResult(testName string, passed bool, duration time.D
 	}
 }
 
+// LogAssert logs assertion failures
 func (l *TestLogger) LogAssert(t *testing.T, assertion bool, msg string) {
 	if !assertion {
 		_, file, line, _ := runtime.Caller(1)
@@ -91,6 +95,33 @@ func (l *TestLogger) LogAssert(t *testing.T, assertion bool, msg string) {
 	}
 }
 
+// Close closes the log file
 func (l *TestLogger) Close() error {
 	return l.file.Close()
+}
+
+// Debug implements db.Logger interface
+func (l *TestLogger) Debug(args ...interface{}) {
+	l.Log("[DEBUG] %s", fmt.Sprint(args...))
+}
+
+// Info implements db.Logger interface
+func (l *TestLogger) Info(args ...interface{}) {
+	l.Log("[INFO] %s", fmt.Sprint(args...))
+}
+
+// Warn implements db.Logger interface
+func (l *TestLogger) Warn(args ...interface{}) {
+	l.Log("[WARN] %s", fmt.Sprint(args...))
+}
+
+// Error implements db.Logger interface
+func (l *TestLogger) Error(args ...interface{}) {
+	l.Log("[ERROR] %s", fmt.Sprint(args...))
+}
+
+// Fatal implements db.Logger interface
+func (l *TestLogger) Fatal(args ...interface{}) {
+	l.Log("[FATAL] %s", fmt.Sprint(args...))
+	os.Exit(1)
 }

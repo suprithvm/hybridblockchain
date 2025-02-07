@@ -6,6 +6,37 @@ import (
 	"strings"
 )
 
+// NodeConfig holds configuration for a blockchain node
+type NodeConfig struct {
+	ListenPort         int
+	DataDir            string
+	IsBootstrap        bool
+	PublicIP           string
+	EnableNAT          bool
+	EnablePeerExchange bool
+}
+
+// DefaultNodeConfig returns default configuration
+func DefaultNodeConfig() *NodeConfig {
+	return &NodeConfig{
+		ListenPort:         50505,
+		DataDir:            "./node_data",
+		IsBootstrap:        false,
+		EnableNAT:          true,
+		EnablePeerExchange: true,
+	}
+}
+
+// BootstrapConfig holds configuration specific to bootstrap nodes
+type BootstrapConfig struct {
+	ListenPort         int
+	PublicIP           string
+	DataDir            string
+	EnableNAT          bool
+	EnablePeerExchange bool
+}
+
+// NetworkConfig holds network-wide configuration
 type NetworkConfig struct {
 	// Listen address (e.g., "0.0.0.0" for all interfaces)
 	ListenHost string
@@ -27,12 +58,20 @@ type NetworkConfig struct {
 	TURNServers []TURNConfig
 	// Blockchain components
 	Blockchain *Blockchain
-	// Stake pool	
-	StakePool  *StakePool
+	// Stake pool
+	StakePool *StakePool
 	// Mempool
-	Mempool    *Mempool
+	Mempool *Mempool
 	// UTXO pool
-	UTXOPool   *UTXOPool
+	UTXOPool *UTXOPool
+	// Network ID
+	NetworkID string
+	// Chain ID
+	ChainID uint64
+	// Max peers
+	MaxPeers int
+	// Dial ratio
+	DialRatio int
 }
 
 // TURNConfig holds TURN server configuration
