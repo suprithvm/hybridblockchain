@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  bootnode:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootnode
+    ports:
+      - "50505:50505/tcp"
+      - "50505:50505/udp"
+    volumes:
+      - bootnode_data:/root/bootnode_data
+      - bootnode_keys:/root/keys
+      - bootnode_peerstore:/root/peerstore
+    environment:
+      - ENABLE_NAT=true
+      - ENABLE_METRICS=true
+      - ENABLE_PEER_EXCHANGE=true
+    restart: unless-stopped
+    networks:
+      blockchain_net:
+        aliases:
+          - bootnode
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:50505/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  bootnode_data:
+  bootnode_keys:
+  bootnode_peerstore:
+
+networks:
+  blockchain_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16 

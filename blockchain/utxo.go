@@ -3,44 +3,54 @@ package blockchain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sort"
 	"sync"
 	"time"
+
+	"blockchain-core/blockchain/db"
 )
 
 // UTXO represents an unspent transaction output
 type UTXO struct {
-	TransactionID string
-	OutputIndex   int
-	Receiver      string
-	Amount        float64
-	Owner         string
+	TransactionID string  `json:"txid"`
+	OutputIndex   int     `json:"vout"`
+	Amount        float64 `json:"amount"`
+	Owner         string  `json:"owner"` // This is the receiver/address
+	Spent         bool    `json:"spent"`
+	BlockHeight   uint64  `json:"block_height"`
+	Timestamp     int64   `json:"timestamp"`
 }
 
 // StateSnapshot represents a point-in-time snapshot of the UTXO pool state
 type StateSnapshot struct {
-	UTXOs      map[string]UTXO
-	MerkleRoot string
+	Height     uint64
+	UTXOStates map[string]UTXO
+	BlockHash  string
 	Timestamp  int64
 }
 
 // UTXOPool manages all UTXOs with Merkle tree support
 type UTXOPool struct {
-	utxos            map[string]UTXO
-	mu               sync.Mutex
-	merkleRoot       string
+	utxos             map[string]UTXO
+	mu                sync.RWMutex
+	merkleRoot        string
 	lastVerifiedState string
-	lastUpdateTime   int64
-	updates          map[string]UTXO    // Track updates since last sync
-	deletions        []string           // Track deletions since last sync
+	lastUpdateTime    int64
+	updates           map[string]UTXO // Track updates since last sync
+	deletions         []string        // Track deletions since last sync
+	db                db.Database
+	snapshots         []StateSnapshot
+	node              *Node
 }
 
 // NewUTXOPool initializes a new UTXO pool
-func NewUTXOPool() *UTXOPool {
+func NewUTXOPool(database db.Database) *UTXOPool {
 	return &UTXOPool{
 		utxos: make(map[string]UTXO),
+		db:    database,
 	}
 }
 
@@ -65,7 +75,7 @@ func (pool *UTXOPool) CalculateMerkleRoot() string {
 		data := fmt.Sprintf("%s-%d-%s-%.8f",
 			utxo.TransactionID,
 			utxo.OutputIndex,
-			utxo.Receiver,
+			utxo.Owner,
 			utxo.Amount,
 		)
 		hash := sha256.Sum256([]byte(data))
@@ -104,27 +114,55 @@ func (pool *UTXOPool) GetMerkleRoot() string {
 }
 
 // AddUTXO adds a new UTXO to the pool
-func (pool *UTXOPool) AddUTXO(txID string, outputIndex int, amount float64, owner string) {
+func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
-	utxo := UTXO{
-		TransactionID: txID,
-		OutputIndex:   outputIndex,
-		Amount:        amount,
-		Owner:         owner,
+	// Add new UTXOs from transaction outputs
+	for i, output := range tx.Outputs {
+		utxoKey := fmt.Sprintf("%s-%d", tx.Hash(), i)
+		utxo := UTXO{
+			TransactionID: tx.Hash(),
+			OutputIndex:   i,
+			Amount:        output.Amount,
+			Owner:         tx.Receiver, // Use Receiver instead of Address
+			BlockHeight:   blockHeight,
+			Timestamp:     tx.Timestamp,
+		}
+		pool.utxos[utxoKey] = utxo
 	}
-	key := fmt.Sprintf("%s:%d", txID, outputIndex)
-	pool.utxos[key] = utxo
-	
+
+	// Mark spent inputs
+	for _, input := range tx.Inputs {
+		inputKey := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
+		if utxo, exists := pool.utxos[inputKey]; exists {
+			utxo.Spent = true
+			pool.utxos[inputKey] = utxo
+		}
+	}
+
 	// Track update
 	if pool.updates == nil {
 		pool.updates = make(map[string]UTXO)
 	}
-	pool.updates[key] = utxo
+	for k, v := range pool.utxos {
+		pool.updates[k] = v
+	}
 	pool.lastUpdateTime = time.Now().Unix()
 
 	pool.merkleRoot = pool.CalculateMerkleRoot()
+
+	// Persist changes
+	pool.saveState()
+
+	// Update account states
+	accountStates := make(map[string]*AccountState)
+	for _, output := range tx.Outputs {
+		state, _ := pool.node.accountManager.GetAccountState(tx.Receiver)
+		state.Balance += output.Amount
+		accountStates[tx.Receiver] = state
+	}
+	pool.node.accountManager.BatchUpdateAccounts(accountStates)
 }
 
 // RemoveUTXO removes a spent UTXO
@@ -134,7 +172,7 @@ func (pool *UTXOPool) RemoveUTXO(txID string, outputIndex int) {
 
 	key := fmt.Sprintf("%s:%d", txID, outputIndex)
 	delete(pool.utxos, key)
-	
+
 	// Track deletion
 	if pool.deletions == nil {
 		pool.deletions = make([]string, 0)
@@ -143,6 +181,9 @@ func (pool *UTXOPool) RemoveUTXO(txID string, outputIndex int) {
 	pool.lastUpdateTime = time.Now().Unix()
 
 	pool.merkleRoot = pool.CalculateMerkleRoot()
+
+	// Persist changes
+	pool.saveState()
 }
 
 // ValidateTransaction checks if the sender has enough balance
@@ -167,36 +208,42 @@ func UpdateUTXOSet(tx Transaction, utxoSet map[string]UTXO) {
 	for _, input := range tx.Inputs {
 		key := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
 		delete(utxoSet, key)
-		log.Printf("[DEBUG] Removed UTXO: %s", key)
 	}
 
 	// Add new UTXOs
-	for index, output := range tx.Outputs {
+	for index := range tx.Outputs {
 		key := fmt.Sprintf("%s-%d", tx.TransactionID, index)
 		utxoSet[key] = UTXO{
 			TransactionID: tx.TransactionID,
 			OutputIndex:   index,
-			Receiver:      output.Receiver,
-			Amount:        output.Amount,
+			Owner:         tx.Receiver, // Use tx.Receiver directly
+			Amount:        tx.Amount,   // Use tx.Amount directly
 		}
-		log.Printf("[DEBUG] Added UTXO: %s", key)
 	}
 }
 
 // CreateSnapshot creates a point-in-time snapshot of the UTXO pool state
-func (pool *UTXOPool) CreateSnapshot() *StateSnapshot {
+func (pool *UTXOPool) CreateSnapshot(height uint64, blockHash string) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
-	utxoCopy := make(map[string]UTXO)
-	for k, v := range pool.utxos {
-		utxoCopy[k] = v
+	snapshot := StateSnapshot{
+		Height:     height,
+		UTXOStates: make(map[string]UTXO),
+		BlockHash:  blockHash,
+		Timestamp:  time.Now().Unix(),
 	}
 
-	return &StateSnapshot{
-		UTXOs:      utxoCopy,
-		MerkleRoot: pool.merkleRoot,
-		Timestamp:  time.Now().Unix(),
+	// Deep copy current state
+	for k, v := range pool.utxos {
+		snapshot.UTXOStates[k] = v
+	}
+
+	pool.snapshots = append(pool.snapshots, snapshot)
+
+	// Keep only last 100 snapshots
+	if len(pool.snapshots) > 100 {
+		pool.snapshots = pool.snapshots[1:]
 	}
 }
 
@@ -210,18 +257,18 @@ func (pool *UTXOPool) RestoreSnapshot(snapshot *StateSnapshot) error {
 	defer pool.mu.Unlock()
 
 	// Verify snapshot integrity
-	tempPool := &UTXOPool{utxos: snapshot.UTXOs}
+	tempPool := &UTXOPool{utxos: snapshot.UTXOStates}
 	calculatedRoot := tempPool.CalculateMerkleRoot()
-	if calculatedRoot != snapshot.MerkleRoot {
+	if calculatedRoot != snapshot.BlockHash {
 		return fmt.Errorf("snapshot integrity check failed: merkle root mismatch")
 	}
 
 	// Restore state
 	pool.utxos = make(map[string]UTXO)
-	for k, v := range snapshot.UTXOs {
+	for k, v := range snapshot.UTXOStates {
 		pool.utxos[k] = v
 	}
-	pool.merkleRoot = snapshot.MerkleRoot
+	pool.merkleRoot = snapshot.BlockHash
 
 	log.Printf("[INFO] Restored UTXO pool state from snapshot at timestamp %d", snapshot.Timestamp)
 	return nil
@@ -266,7 +313,7 @@ func (pool *UTXOPool) GetStateChunks(chunkSize int) []StateChunk {
 	for i := 0; i < len(keys); i += chunkSize {
 		end := min(i+chunkSize, len(keys))
 		chunkKeys := keys[i:end]
-		
+
 		// Create chunk UTXOs map
 		chunkUTXOs := make(map[string]UTXO)
 		for _, key := range chunkKeys {
@@ -296,7 +343,7 @@ func (pool *UTXOPool) generateMerkleProofForChunk(chunkKeys, allKeys []string) [
 		data := fmt.Sprintf("%s-%d-%s-%.8f",
 			utxo.TransactionID,
 			utxo.OutputIndex,
-			utxo.Receiver,
+			utxo.Owner,
 			utxo.Amount,
 		)
 		hash := sha256.Sum256([]byte(data))
@@ -382,7 +429,7 @@ func (pool *UTXOPool) VerifyStateChunk(chunk StateChunk) error {
 			nextLevel[i/2] = hashPair(left, right)
 		}
 		currentLevel = nextLevel
-		
+
 		// If we have an odd number at this level and more proof elements,
 		// use the next proof element
 		if len(currentLevel) > 1 && proofIndex < len(chunk.MerkleProof) {
@@ -500,14 +547,13 @@ func (pool *UTXOPool) verifyMerkleProof(chunk StateChunk, stateRoot string) bool
 
 	nodes := chunkHashes
 
-
 	// Rebuild tree using proof
 	for len(nodes) > 1 || len(nodes) == 1 && nodes[0] != stateRoot {
 		nextLevel := make([]string, (len(nodes)+1)/2)
-		
+
 		for i := 0; i < len(nodes); i += 2 {
 			var left, right string
-			
+
 			if i+1 < len(nodes) {
 				// Two nodes available
 				left = nodes[i]
@@ -552,7 +598,7 @@ func (pool *UTXOPool) VerifyDeltaUpdate(delta *DeltaUpdate) error {
 	defer pool.mu.Unlock()
 
 	// Create temporary pool to verify delta
-	tempPool := NewUTXOPool()
+	tempPool := NewUTXOPool(pool.db)
 	for k, v := range pool.utxos {
 		tempPool.utxos[k] = v
 	}
@@ -627,18 +673,118 @@ func (pool *UTXOPool) ApplyDeltaUpdate(delta *DeltaUpdate) error {
 	// Update state
 	pool.lastUpdateTime = delta.UpdateTimestamp
 	pool.merkleRoot = pool.CalculateMerkleRoot()
-	
+
+	// Persist changes
+	pool.saveState()
+
 	return nil
 }
 
 // Add this method to the UTXO struct
 func (u UTXO) Hash() string {
-	data := fmt.Sprintf("%s-%d-%s-%.8f", 
-		u.TransactionID, 
-		u.OutputIndex, 
-		u.Receiver, 
+	data := fmt.Sprintf("%s-%d-%s-%.8f",
+		u.TransactionID,
+		u.OutputIndex,
+		u.Owner,
 		u.Amount,
 	)
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:])
+}
+
+// Add these methods to UTXOPool
+func (u *UTXOPool) GetUTXOsForAddress(address string) []UTXO {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+
+	var addressUTXOs []UTXO
+	for _, utxo := range u.utxos {
+		if utxo.Owner == address {
+			addressUTXOs = append(addressUTXOs, utxo)
+		}
+	}
+	return addressUTXOs
+}
+
+func (u *UTXOPool) GetUTXOs() map[string]UTXO {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.utxos
+}
+
+// Account state management
+func (u *UTXOPool) GetBalance(address string) float64 {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+
+	balance := 0.0
+	for _, utxo := range u.utxos {
+		if utxo.Owner == address && !utxo.Spent {
+			balance += utxo.Amount
+		}
+	}
+	return balance
+}
+
+// Handle chain reorganization
+func (u *UTXOPool) HandleReorg(oldChain, newChain []*Block) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	// Restore state from last common block
+	commonHeight := u.findLastCommonBlock(oldChain, newChain)
+	if err := u.restoreSnapshot(commonHeight); err != nil {
+		return err
+	}
+
+	// Apply new chain's transactions
+	for _, block := range newChain[commonHeight+1:] {
+		for _, tx := range block.Body.Transactions.GetAllTransactions() {
+			u.AddUTXO(&tx, block.Header.BlockNumber)
+		}
+	}
+
+	return nil
+}
+
+// State persistence
+func (u *UTXOPool) saveState() error {
+	data, err := json.Marshal(u.utxos)
+	if err != nil {
+		return err
+	}
+	return u.db.Put([]byte("utxo_state"), data)
+}
+
+func (u *UTXOPool) loadState() error {
+	data, err := u.db.Get([]byte("utxo_state"))
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, &u.utxos)
+}
+
+// Helper functions
+func (u *UTXOPool) findLastCommonBlock(oldChain, newChain []*Block) uint64 {
+	minLen := len(oldChain)
+	if len(newChain) < minLen {
+		minLen = len(newChain)
+	}
+
+	for i := minLen - 1; i >= 0; i-- {
+		if oldChain[i].Hash() == newChain[i].Hash() {
+			return uint64(i)
+		}
+	}
+	return 0
+}
+
+func (u *UTXOPool) restoreSnapshot(height uint64) error {
+	for i := len(u.snapshots) - 1; i >= 0; i-- {
+		if u.snapshots[i].Height <= height {
+			u.utxos = u.snapshots[i].UTXOStates
+			return nil
+		}
+	}
+	return fmt.Errorf("no snapshot found for height %d", height)
 }

@@ -51,6 +51,10 @@ type SyncConfig struct {
 	RecvTimeout    time.Duration
 	WriteTimeout   time.Duration
 	ReadTimeout    time.Duration
+	ListenAddr     string
+	BootstrapNodes []string
+	NetworkID      string
+	EnableMetrics  bool
 }
 
 // DefaultSyncConfig returns default configuration values
@@ -58,10 +62,14 @@ func DefaultSyncConfig() *SyncConfig {
 	return &SyncConfig{
 		SendBufferSize: 1024,
 		RecvBufferSize: 1024,
-		SendTimeout:    time.Second * 10,
-		RecvTimeout:    time.Second * 10,
-		WriteTimeout:   time.Second * 5,
-		ReadTimeout:    time.Second * 5,
+		SendTimeout:    30 * time.Second,
+		RecvTimeout:    30 * time.Second,
+		WriteTimeout:   30 * time.Second,
+		ReadTimeout:    30 * time.Second,
+		ListenAddr:     ":50505",
+		BootstrapNodes: []string{},
+		NetworkID:      "mainnet",
+		EnableMetrics:  false,
 	}
 }
 
@@ -315,66 +323,4 @@ func (s *SyncState) PropagateTransaction(txData []byte, txHash string) (int, err
 		return 0, fmt.Errorf("network state not initialized")
 	}
 	return s.NetworkState.PropagateTransaction(txData, txHash)
-}
-
-// Start starts the sync service
-func (s *SyncService) Start() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.state == nil {
-		return fmt.Errorf("sync state not initialized")
-	}
-
-	// Initialize states if not already done
-	if s.state.ChainState == nil {
-		s.state.ChainState = &ChainState{}
-	}
-	if s.state.UTXOState == nil {
-		s.state.UTXOState = &UTXOState{}
-	}
-	if s.state.NetworkState == nil {
-		s.state.NetworkState = &NetworkState{
-			Peers: make(map[string]*PeerState),
-			Stats: NetworkStats{
-				PeerScores: make(map[string]float32),
-			},
-		}
-	}
-
-	// Start gRPC server
-	lis, err := net.Listen("tcp", ":50505")
-	if err != nil {
-		return fmt.Errorf("failed to listen: %v", err)
-	}
-
-	s.server = grpc.NewServer()
-	pb.RegisterChainSyncServer(s.server, s)
-	pb.RegisterNetworkSyncServer(s.server, s)
-	s.listener = lis
-
-	go func() {
-		if err := s.server.Serve(lis); err != nil {
-			fmt.Printf("failed to serve: %v\n", err)
-		}
-	}()
-
-	return nil
-}
-
-// Stop stops the sync service
-func (s *SyncService) Stop() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.server != nil {
-		s.server.GracefulStop()
-		s.server = nil
-	}
-	if s.listener != nil {
-		s.listener.Close()
-		s.listener = nil
-	}
-
-	return nil
 }

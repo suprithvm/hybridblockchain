@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sync"
 
 	"blockchain-core/blockchain"
 	"blockchain-core/blockchain/db"
@@ -18,38 +17,6 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
-
-// SyncService implements the ChainSync and NetworkSync services
-type SyncService struct {
-	pb.UnimplementedChainSyncServer
-	pb.UnimplementedNetworkSyncServer
-	config     *SyncConfig
-	blockchain *blockchain.Blockchain
-	store      *blockchain.Store
-	mu         sync.RWMutex
-	server     *grpc.Server
-}
-
-// NewSyncService creates a new sync service instance
-func NewSyncService(config *SyncConfig, bc *blockchain.Blockchain, store *blockchain.Store) (*SyncService, error) {
-	if config == nil {
-		config = DefaultSyncConfig()
-	}
-
-	if bc == nil {
-		return nil, fmt.Errorf("blockchain instance required")
-	}
-
-	if store == nil {
-		return nil, fmt.Errorf("store instance required")
-	}
-
-	return &SyncService{
-		config:     config,
-		blockchain: bc,
-		store:      store,
-	}, nil
-}
 
 // Start starts the sync service
 func (s *SyncService) Start(listenAddr string) error {

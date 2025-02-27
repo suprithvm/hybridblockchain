@@ -7,22 +7,23 @@ import (
 
 const (
 	// Base gas costs
-	BaseTxGas       = 21000  // Base cost for any transaction
-	TxDataByteGas   = 16     // Cost per byte of transaction data
-	TxSigGas        = 2000   // Cost for signature verification
-	
+	BaseTxGas     = 21000   // Base cost for any transaction
+	TxDataByteGas = 16      // Cost per byte of transaction data
+	TxSigGas      = 2000    // Cost for signature verification
+	BaseGasLimit  = 1000000 // Base gas limit for blocks
+
 	// Priority levels
-	PriorityLow     = 0
-	PriorityNormal  = 1
-	PriorityHigh    = 2
-	
+	PriorityLow    = 0
+	PriorityNormal = 1
+	PriorityHigh   = 2
+
 	// Gas price adjustments
-	MinGasPrice     = 1000    // Minimum gas price in smallest unit
-	MaxGasPrice     = 100000  // Maximum gas price to prevent spam
-	TargetBlockGas  = 0.8     // Target gas usage per block (80%)
-	
+	MinGasPrice    = 1000   // Minimum gas price in smallest unit
+	MaxGasPrice    = 100000 // Maximum gas price to prevent spam
+	TargetBlockGas = 0.8    // Target gas usage per block (80%)
+
 	// Adjustment factors
-	GasPriceAdjustmentFactor = 0.2  // 20% adjustment up/down for more noticeable changes
+	GasPriceAdjustmentFactor = 0.2 // 20% adjustment up/down for more noticeable changes
 )
 
 // GasModel manages gas pricing and calculations
@@ -62,10 +63,10 @@ func (g *GasModel) CalculatePriorityFee(priority int) uint64 {
 func (g *GasModel) UpdateGasPrice() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	
+
 	// Calculate block utilization
 	utilization := float64(g.blockGasUsed) / float64(g.blockGasLimit)
-	
+
 	// Adjust gas price based on utilization
 	if utilization > TargetBlockGas {
 		// Increase gas price if block is too full
@@ -83,4 +84,4 @@ func (g *GasModel) GetCurrentGasPrice() uint64 {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.currentGasPrice
-} 
+}
