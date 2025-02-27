@@ -281,3 +281,17 @@ func (it *levelDBIterator) Release() {
 func (it *levelDBIterator) Seek(key []byte) bool {
 	return it.iter.Seek(key)
 }
+
+// NewDatabase creates a new database instance based on the given configuration
+func NewDatabase(config *Config) (Database, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+
+	switch config.Type {
+	case LevelDB:
+		return NewLevelDB(config)
+	default:
+		return nil, fmt.Errorf("unsupported database type: %s", config.Type)
+	}
+}

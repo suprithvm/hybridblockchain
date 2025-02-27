@@ -1,0 +1,77 @@
+|-- .gitignore
+|-- api
+    |-- gas_handlers.go
+    |-- router.go
+|-- blockchain
+    |-- account_state.go
+    |-- bip39_wordlist.txt
+    |-- block.go
+    |-- blockchain.go
+    |-- bootnode.go
+    |-- config.go
+    |-- crypto.go
+    |-- db
+        |-- interface.go
+        |-- leveldb.go
+    |-- encryption_utils.go
+    |-- file_utils.go
+    |-- gas
+        |-- block_gas.go
+        |-- calculator.go
+        |-- estimator.go
+        |-- fee_preview.go
+        |-- fee_preview_test.go
+        |-- gas_test.go
+        |-- model.go
+        |-- tracker.go
+    |-- hd_wallet.go
+    |-- mempool.go
+    |-- multi_sig_utils.go
+    |-- multi_sig_wallet.go
+    |-- nat_traversal.go
+    |-- p2p.go
+    |-- p2p_test.go
+    |-- patricia_trie.go
+    |-- peer_manager.go
+    |-- peer_manager_test.go
+    |-- rpc.go
+    |-- stake_pool.go
+    |-- state.go
+    |-- store.go
+    |-- store_test.go
+    |-- sync
+        |-- client.go
+        |-- converters.go
+        |-- proto
+            |-- sync.pb.go
+            |-- sync.proto
+            |-- sync_grpc.pb.go
+        |-- raw_socket.go
+        |-- service.go
+        |-- types.go
+    |-- test_logs.txt
+    |-- test_utils.go
+    |-- transaction.go
+    |-- transaction_interface.go
+    |-- types.go
+    |-- utxo.go
+    |-- validator.go
+    |-- wallet.go
+    |-- wallet_utils.go
+|-- cmd
+    |-- gas_cli.go
+|-- docker-compose.yml
+|-- Dockerfile.bootnode
+|-- go.md
+|-- go.mod
+|-- go.sum
+|-- main.go
+|-- my_wallet.json
+|-- node_data
+    |-- bootnode.key
+|-- notes.rtf
+|-- README.md
+|-- roadmap.txt
+|-- save.txt
+|-- wallet
+    |-- test_wallet.json

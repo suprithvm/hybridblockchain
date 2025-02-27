@@ -16,15 +16,13 @@ type Store struct {
 }
 
 // NewStore creates a new blockchain store
-func NewStore(config *db.Config) (*Store, error) {
-	database, err := db.NewLevelDB(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create database: %w", err)
+func NewStore(database db.Database) (*Store, error) {
+	if database == nil {
+		return nil, fmt.Errorf("database cannot be nil")
 	}
 
 	return &Store{
-		db:     database,
-		logger: config.Logger,
+		db: database,
 	}, nil
 }
 

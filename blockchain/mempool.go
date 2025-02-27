@@ -16,14 +16,16 @@ type Mempool struct {
 	mu           sync.RWMutex
 	maxSize      int
 	timeouts     map[string]time.Time
+	node         *Node
 }
 
 // NewMempool creates a new mempool instance with configuration
-func NewMempool() *Mempool {
+func NewMempool(node *Node) *Mempool {
 	return &Mempool{
 		Transactions: make([]Transaction, 0),
-		maxSize:      1000, // Default size
+		maxSize:      1000,
 		timeouts:     make(map[string]time.Time),
+		node:         node,
 	}
 }
 
@@ -79,9 +81,15 @@ func (m *Mempool) AddTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
 	return true
 }
 
-// ValidateTransaction verifies a transaction against the UTXO set.
-func (m *Mempool) ValidateTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
+// ValidateTransaction checks if transaction inputs are valid
+func (m *Mempool) ValidateTransaction(tx Transaction, utxos map[string]UTXO) bool {
 	log.Printf("\n🔍 Validating Transaction: %s", tx.TransactionID)
+
+	// Add nonce validation
+	if !m.node.accountManager.ValidateNonce(tx.Sender, tx.Nonce) {
+		log.Printf("❌ Invalid nonce")
+		return false
+	}
 
 	// Validate gas parameters
 	if err := tx.ValidateGas(); err != nil {
@@ -89,28 +97,33 @@ func (m *Mempool) ValidateTransaction(tx Transaction, utxoSet map[string]UTXO) b
 		return false
 	}
 
-	// Calculate total input value needed (amount + max gas fee)
-	maxGasFee := tx.GasLimit * tx.MaxFeePerGas
-	totalRequired := tx.Amount + float64(maxGasFee)
-
-	// Validate inputs can cover amount + max gas fee
-	var totalInput float64
+	// Validate inputs
+	inputSum := 0.0
 	for _, input := range tx.Inputs {
-		utxo, exists := utxoSet[fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)]
+		utxoKey := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
+		utxo, exists := utxos[utxoKey]
 		if !exists {
 			log.Printf("❌ UTXO not found")
 			return false
 		}
-		if utxo.Receiver != tx.Sender {
+		if utxo.Owner != tx.Sender {
 			log.Printf("❌ UTXO doesn't belong to sender")
 			return false
 		}
-		totalInput += utxo.Amount
+		if utxo.Spent {
+			log.Printf("❌ UTXO already spent")
+			return false
+		}
+		inputSum += utxo.Amount
 	}
 
-	if totalInput < totalRequired {
+	// Calculate total input value needed (amount + max gas fee)
+	maxGasFee := tx.GasLimit * tx.MaxFeePerGas
+	totalRequired := tx.Amount + float64(maxGasFee)
+
+	if inputSum < totalRequired {
 		log.Printf("❌ Insufficient funds for amount + gas: have %.8f, need %.8f",
-			totalInput, totalRequired)
+			inputSum, totalRequired)
 		return false
 	}
 

@@ -72,6 +72,10 @@ type NetworkConfig struct {
 	MaxPeers int
 	// Dial ratio
 	DialRatio int
+	// The actual fields from your blockchain package
+	P2PPort     int
+	RPCPort     int
+	NetworkPath string
 }
 
 // TURNConfig holds TURN server configuration

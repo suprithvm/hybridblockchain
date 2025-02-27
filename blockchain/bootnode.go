@@ -20,6 +20,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/routing"
+
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -33,7 +34,7 @@ const (
 	PeerDiscoveryInterval = 5 * time.Minute
 	DHTProviderInterval   = 10 * time.Minute
 
-	DefaultBootstrapAddress = "/ip4/49.204.110.41/tcp/50505/p2p/12D3KooWEsHAvZyn3biKjPHaz8MBDiGmQnFuxtsTnjVgkUe6wPtQ"
+	DefaultBootstrapAddress = "/ip4/<YOUR_IP>/tcp/50505/p2p/<YOUR_PEER_ID>"
 	DefaultListenPort       = 50505
 )
 
@@ -49,10 +50,14 @@ type BootstrapNodeConfig struct {
 	PublicIP           string
 	KeyFile            string
 	PeerStoreFile      string
+	DataDir            string
 	EnableRelay        bool
 	EnableNAT          bool
 	EnablePeerExchange bool
 	SeedNodes          []peer.AddrInfo
+	StoragePath        string
+	NetworkID          string
+	EnableMetrics      bool
 }
 
 // BootstrapNode represents a dedicated bootstrap node for the blockchain network
@@ -74,6 +79,8 @@ type BootstrapNode struct {
 	peers       map[peer.ID]peer.AddrInfo
 	peersMutex  sync.RWMutex
 	dataDir     string
+	identity    crypto.PrivKey
+	startTime   time.Time
 }
 
 // PeerScore represents the scoring metrics for a peer
@@ -93,6 +100,8 @@ type NetworkMetrics struct {
 	ConnectionSuccess  map[peer.ID]float64
 	MessagePropagation map[peer.ID]time.Duration
 	StartTime          time.Time
+	PeerCount          int
+	mu                 sync.RWMutex
 }
 
 // RateLimiter manages connection and message rate limits
@@ -171,17 +180,23 @@ func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*Bootst
 		return nil, fmt.Errorf("failed to create listen multiaddr: %w", err)
 	}
 
-	// Create libp2p host with options
+	// In NewBootstrapNode() function, modify the host options:
 	hostOpts := []libp2p.Option{
 		libp2p.ListenAddrs(listenAddr),
 		libp2p.Identity(privKey),
 		libp2p.EnableRelay(),
-		libp2p.EnableHolePunching(),
 	}
 
-	// Add NAT traversal if enabled
 	if config.EnableNAT {
-		hostOpts = append(hostOpts, libp2p.NATPortMap())
+		hostOpts = append(hostOpts,
+			libp2p.NATPortMap(),
+			libp2p.EnableNATService(),
+			libp2p.EnableHolePunching(), // Keep this INSIDE the NAT block
+		)
+	} else {
+		hostOpts = append(hostOpts,
+			libp2p.EnableHolePunching(), // Only if you want hole punching without NAT
+		)
 	}
 
 	host, err := libp2p.New(hostOpts...)
@@ -199,7 +214,11 @@ func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*Bootst
 	}
 
 	// Create peerStore with the configured file path instead of temp directory
-	peerStore := NewPersistentPeerStore(config.PeerStoreFile)
+	peerStore, err := NewPersistentPeerStore(config.PeerStoreFile)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create peer store: %w", err)
+	}
 
 	// Create DHT with custom logging
 	kdht, err := dht.New(ctx, host, dht.Mode(dht.ModeServer))
@@ -275,6 +294,8 @@ func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*Bootst
 			}),
 		},
 		protocols: make(map[string]network.StreamHandler),
+		identity:  privKey,
+		startTime: time.Now(),
 	}
 
 	// Initialize protocol handlers
@@ -369,6 +390,9 @@ func (bn *BootstrapNode) initializeProtocols() {
 	bn.protocols["/blockchain/discovery/1.0.0"] = func(stream network.Stream) {
 		bn.handlePeerDiscovery(stream)
 	}
+	// In initializeProtocols()
+	bn.protocols["/blockchain/relay/1.0.0"] = bn.handleRelay
+	bn.protocols["/blockchain/status/1.0.0"] = bn.handleStatus
 
 	// Register all protocols
 	for proto, handler := range bn.protocols {
@@ -441,8 +465,26 @@ func (bn *BootstrapNode) handleBlockAnnouncement(stream network.Stream) {
 		return
 	}
 
-	// Process the block announcement
-	// Implementation depends on your blockchain's block structure
+	// Read the block announcement
+	var block Block
+	if err := json.NewDecoder(stream).Decode(&block); err != nil {
+		log.Printf("Failed to decode block: %v", err)
+		return
+	}
+
+	// Validate timestamp
+	if time.Since(time.Unix(block.Header.Timestamp, 0)) > time.Hour {
+		log.Printf("Block announcement too old")
+		return
+	}
+
+	// Update metrics
+	bn.metrics.mu.Lock()
+	bn.metrics.MessagePropagation[stream.Conn().RemotePeer()] = time.Since(time.Unix(block.Header.Timestamp, 0))
+	bn.metrics.mu.Unlock()
+
+	// Broadcast to other peers
+	bn.broadcastToOtherPeers(stream.Conn().RemotePeer(), "block", block)
 }
 
 // handleTransaction processes incoming transactions
@@ -455,29 +497,66 @@ func (bn *BootstrapNode) handleTransaction(stream network.Stream) {
 		return
 	}
 
-	// Process the transaction
-	// Implementation depends on your blockchain's transaction structure
+	// Read the transaction
+	var tx Transaction
+	if err := json.NewDecoder(stream).Decode(&tx); err != nil {
+		log.Printf("Failed to decode transaction: %v", err)
+		return
+	}
+
+	// Basic validation
+	if tx.Amount <= 0 {
+		log.Printf("Invalid transaction amount")
+		return
+	}
+
+	// Update metrics
+	bn.metrics.mu.Lock()
+	bn.metrics.MessagePropagation[stream.Conn().RemotePeer()] = time.Since(time.Unix(tx.Timestamp, 0))
+	bn.metrics.mu.Unlock()
+
+	// Broadcast to other peers
+	bn.broadcastToOtherPeers(stream.Conn().RemotePeer(), "tx", tx)
 }
 
 // handlePeerDiscovery processes peer discovery requests
 func (bn *BootstrapNode) handlePeerDiscovery(stream network.Stream) {
 	defer stream.Close()
 
-	remotePeer := stream.Conn().RemotePeer()
-	log.Printf("\n👥 Peer Discovery Request from: %s", remotePeer.String())
-
-	if err := bn.enforceRateLimits(remotePeer, "discovery"); err != nil {
-		log.Printf("⚠️  Rate limit exceeded for peer %s: %v", remotePeer, err)
+	// Read peer request
+	var req PeerDiscoveryRequest
+	if err := json.NewDecoder(stream).Decode(&req); err != nil {
+		log.Printf("⚠️ Failed to decode peer discovery request: %v", err)
 		return
 	}
 
+	// Get peers excluding the requester and excluded peers
 	peers := bn.peerStore.GetPeers()
-	if err := json.NewEncoder(stream).Encode(peers); err != nil {
-		log.Printf("❌ Failed to send peer list to %s: %v", remotePeer, err)
-		return
+	response := PeerDiscoveryResponse{
+		Success: true,
+		Peers:   make([]peer.AddrInfo, 0, len(peers)),
 	}
 
-	log.Printf("✅ Shared %d peers with %s", len(peers), remotePeer.String())
+	excluded := make(map[string]bool)
+	for _, p := range req.ExcludedPeers {
+		excluded[p] = true
+	}
+
+	count := 0
+	for _, p := range peers {
+		if count >= req.MaxPeers {
+			break
+		}
+		if p.ID != stream.Conn().RemotePeer() && !excluded[p.ID.String()] {
+			response.Peers = append(response.Peers, p)
+			count++
+		}
+	}
+
+	// Send response
+	if err := json.NewEncoder(stream).Encode(response); err != nil {
+		log.Printf("⚠️ Failed to send peer discovery response: %v", err)
+	}
 }
 
 // collectMetrics periodically collects network metrics
@@ -515,7 +594,7 @@ func (bn *BootstrapNode) collectMetrics() {
 	}
 }
 
-// Start starts the bootstrap node and its DHT
+// Start starts the bootstrap node
 func (bn *BootstrapNode) Start() error {
 	bn.mu.Lock()
 	defer bn.mu.Unlock()
@@ -524,31 +603,145 @@ func (bn *BootstrapNode) Start() error {
 		return fmt.Errorf("bootstrap node already started")
 	}
 
-	log.Printf("\n🌟 Starting Bootstrap Node Services")
-	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-	if err := bn.dht.Bootstrap(bn.ctx); err != nil {
-		return fmt.Errorf("failed to bootstrap DHT: %w", err)
+	// Generate identity if not exists
+	var err error
+	bn.identity, err = loadOrCreateIdentity(bn.config.DataDir)
+	if err != nil {
+		return fmt.Errorf("failed to create identity: %v", err)
 	}
-	log.Printf("✅ DHT Bootstrap complete")
 
-	go bn.startPeriodicTasks()
-	log.Printf("✅ Periodic maintenance tasks started")
+	// Create libp2p host
+	// In NewBootstrapNode function:
 
-	go bn.collectMetrics()
-	log.Printf("✅ Metrics collection initialized")
+	// Initialize peer store
+	bn.peerStore, err = NewPersistentPeerStore(filepath.Join(bn.dataDir, "peerstore.json"))
+	if err != nil {
+		return fmt.Errorf("failed to create peer store: %v", err)
+	}
+
+	// Set stream handlers
+	bn.host.SetStreamHandler(protocol.ID(BlockchainNamespace+"/discovery"), bn.handlePeerDiscovery)
+	bn.host.SetStreamHandler(protocol.ID(BlockchainNamespace+"/relay"), bn.handleRelay)
+	bn.host.SetStreamHandler(protocol.ID(BlockchainNamespace+"/status"), bn.handleStatus)
 
 	bn.started = true
-
-	log.Printf("\n📡 Network Interfaces:")
-	for _, addr := range bn.host.Addrs() {
-		log.Printf("   • %s/p2p/%s", addr, bn.host.ID())
-	}
-
-	log.Printf("\n🎉 Bootstrap node is fully operational")
-	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 	return nil
 }
+
+// Helper function to load or create node identity
+func loadOrCreateIdentity(dataDir string) (crypto.PrivKey, error) {
+	keyFile := filepath.Join(dataDir, "node.key")
+
+	// Try to load existing key
+	if data, err := os.ReadFile(keyFile); err == nil {
+		return crypto.UnmarshalPrivateKey(data)
+	}
+
+	// Generate new key
+	priv, _, err := crypto.GenerateKeyPair(crypto.Ed25519, -1)
+	if err != nil {
+		return nil, err
+	}
+
+	// Save key
+	keyBytes, err := crypto.MarshalPrivateKey(priv)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := os.WriteFile(keyFile, keyBytes, 0600); err != nil {
+		return nil, err
+	}
+
+	return priv, nil
+}
+
+func (bn *BootstrapNode) startNetworkServices() error {
+	// Set stream handlers
+	bn.host.SetStreamHandler(protocol.ID(BlockchainNamespace+"/discovery"), bn.handlePeerDiscovery)
+	bn.host.SetStreamHandler(protocol.ID(BlockchainNamespace+"/relay"), bn.handleRelay)
+	bn.host.SetStreamHandler(protocol.ID(BlockchainNamespace+"/status"), bn.handleStatus)
+
+	// Bootstrap DHT
+	if err := bn.dht.Bootstrap(bn.ctx); err != nil {
+		return fmt.Errorf("failed to bootstrap DHT: %v", err)
+	}
+
+	// Start NAT traversal if enabled
+	if bn.config.EnableNAT {
+		if err := bn.setupNAT(); err != nil {
+			log.Printf("⚠️ NAT setup failed: %v", err)
+		}
+	}
+
+	return nil
+}
+
+func (bn *BootstrapNode) startPeriodicTasks() {
+	// Start peer discovery
+	go bn.runPeerDiscovery()
+
+	// Start metrics collection if enabled
+	if bn.metrics != nil {
+		go bn.collectMetrics()
+	}
+
+	// Start peer score updates
+	go bn.updatePeerScores()
+}
+
+func (bn *BootstrapNode) runPeerDiscovery() {
+	ticker := time.NewTicker(PeerDiscoveryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-bn.ctx.Done():
+			return
+		case <-ticker.C:
+			bn.discoverPeers()
+		}
+	}
+}
+
+func (bn *BootstrapNode) discoverPeers() {
+	// Find peers in the network
+	peerChan := bn.dht.FindProvidersAsync(bn.ctx, cid.NewCidV1(cid.Raw, []byte("blockchain")), 20)
+	var peers []peer.AddrInfo
+	for p := range peerChan {
+		peers = append(peers, p)
+	}
+
+	// Process discovered peers
+	for _, p := range peers {
+		if err := bn.handleNewPeer(p); err != nil {
+			log.Printf("⚠️ Failed to handle peer %s: %v", p.ID, err)
+		}
+	}
+}
+
+func (bn *BootstrapNode) handleNewPeer(p peer.AddrInfo) error {
+	// Skip if we already know this peer
+	if bn.peerStore.HasPeer(p.ID) {
+		return nil
+	}
+
+	// Connect to the peer
+	if err := bn.host.Connect(bn.ctx, p); err != nil {
+		return fmt.Errorf("failed to connect to peer: %v", err)
+	}
+
+	// Add to peer store
+	bn.peerStore.AddPeer(p)
+
+	// Update metrics
+	bn.metrics.IncrementPeerCount()
+
+	log.Printf("✅ New peer connected: %s", p.ID.String())
+	return nil
+}
+
+// Add more methods for handling relay, status, and other functionality...
 
 // FindPeer finds a peer in the network using the DHT
 func (bn *BootstrapNode) FindPeer(id peer.ID) (peer.AddrInfo, error) {
@@ -567,23 +760,6 @@ func (bn *BootstrapNode) FindProviders(key string) (<-chan peer.AddrInfo, error)
 	keyBytes := []byte(key)
 	c := cid.NewCidV1(cid.Raw, keyBytes)
 	return bn.dht.FindProvidersAsync(bn.ctx, c, 20), nil
-}
-
-// startPeriodicTasks starts periodic maintenance tasks
-func (bn *BootstrapNode) startPeriodicTasks() {
-	ticker := time.NewTicker(1 * time.Hour)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-bn.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := bn.dht.Bootstrap(bn.ctx); err != nil {
-				log.Printf("Error refreshing DHT: %v", err)
-			}
-		}
-	}
 }
 
 // Stop stops the bootstrap node
@@ -624,43 +800,23 @@ type PersistentPeerStore struct {
 }
 
 // NewPersistentPeerStore creates a new persistent peer store
-func NewPersistentPeerStore(filename string) *PersistentPeerStore {
-	// Create directory if it doesn't exist
-	dir := filepath.Dir(filename)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		log.Printf("❌ Failed to create peer store directory: %v", err)
-	}
-
+func NewPersistentPeerStore(filename string) (*PersistentPeerStore, error) {
 	store := &PersistentPeerStore{
 		filename: filename,
 		peers:    make(map[peer.ID]peer.AddrInfo),
 		logger:   log.New(os.Stdout, "📡 PeerStore: ", log.Ltime),
 	}
 
-	store.logger.Printf("Initializing peer store at: %s", filename)
-
-	// Load peers with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	loadDone := make(chan struct{})
-	go func() {
-		store.load()
-		close(loadDone)
-	}()
-
-	select {
-	case <-loadDone:
-		store.logger.Printf("✅ Peer store loaded successfully")
-	case <-ctx.Done():
-		store.logger.Printf("⚠️  Peer store load timed out")
+	// Load existing peers from file
+	if err := store.load(); err != nil {
+		return nil, fmt.Errorf("failed to load peer store: %w", err)
 	}
 
-	return store
+	return store, nil
 }
 
 // load reads peer information from persistent storage
-func (ps *PersistentPeerStore) load() {
+func (ps *PersistentPeerStore) load() error {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
@@ -670,25 +826,25 @@ func (ps *PersistentPeerStore) load() {
 	_, err := os.Stat(ps.filename)
 	if os.IsNotExist(err) {
 		ps.logger.Printf("📝 Creating new peer store")
-		return
+		return nil
 	}
 
 	data, err := os.ReadFile(ps.filename)
 	if err != nil {
 		ps.logger.Printf("❌ Error reading peer store: %v", err)
-		return
+		return err
 	}
 
 	// Handle empty file case
 	if len(data) == 0 {
 		ps.logger.Printf("ℹ️  Peer store file is empty")
-		return
+		return nil
 	}
 
 	var loadedPeers map[string]peer.AddrInfo
 	if err := json.Unmarshal(data, &loadedPeers); err != nil {
 		ps.logger.Printf("❌ Error parsing peer data: %v", err)
-		return
+		return err
 	}
 
 	for _, addrInfo := range loadedPeers {
@@ -696,6 +852,7 @@ func (ps *PersistentPeerStore) load() {
 	}
 
 	ps.logger.Printf("✅ Loaded %d peers", len(ps.peers))
+	return nil
 }
 
 // save writes peer information to persistent storage
@@ -781,4 +938,241 @@ func RunBootstrapNode() {
 
 	// Keep the bootstrap node running
 	select {}
+}
+
+// Add these handler methods
+func (bn *BootstrapNode) handleRelay(stream network.Stream) {
+	defer stream.Close()
+
+	// Read relay request
+	var req RelayRequest
+	if err := json.NewDecoder(stream).Decode(&req); err != nil {
+		log.Printf("Failed to decode relay request: %v", err)
+		return
+	}
+
+	// Parse target peer ID
+	targetPID, err := peer.Decode(req.TargetPeer)
+	if err != nil {
+		log.Printf("Invalid target peer ID: %v", err)
+		return
+	}
+
+	// Check if target peer is connected
+	if bn.host.Network().Connectedness(targetPID) != network.Connected {
+		response := RelayResponse{
+			Success: false,
+			Error:   "target peer not connected",
+		}
+		json.NewEncoder(stream).Encode(response)
+		return
+	}
+
+	// Create stream to target peer
+	targetStream, err := bn.host.NewStream(bn.ctx, targetPID, protocol.ID("/blockchain/relay/1.0.0"))
+	if err != nil {
+		log.Printf("Failed to create stream to target peer: %v", err)
+		return
+	}
+	defer targetStream.Close()
+
+	// Forward the data
+	if _, err := targetStream.Write(req.Data); err != nil {
+		log.Printf("Failed to relay data: %v", err)
+		return
+	}
+
+	// Send success response
+	response := RelayResponse{
+		Success: true,
+	}
+	json.NewEncoder(stream).Encode(response)
+}
+
+func (bn *BootstrapNode) handleStatus(stream network.Stream) {
+	defer stream.Close()
+
+	// Read status request
+	var req StatusRequest
+	if err := json.NewDecoder(stream).Decode(&req); err != nil {
+		log.Printf("Failed to decode status request: %v", err)
+		return
+	}
+
+	// Prepare status response
+	status := NodeStatus{
+		PeerCount:    len(bn.host.Network().Peers()),
+		Uptime:       time.Since(bn.startTime),
+		Version:      "1.0.0",
+		NetworkState: bn.getNetworkState(),
+	}
+
+	// Send response
+	if err := json.NewEncoder(stream).Encode(status); err != nil {
+		log.Printf("Failed to send status response: %v", err)
+		return
+	}
+}
+
+// Add these types for request/response handling
+type RelayRequest struct {
+	TargetPeer string
+	Data       []byte
+}
+
+type RelayResponse struct {
+	Success bool
+	Error   string
+}
+
+type StatusRequest struct {
+	IncludeMetrics bool
+}
+
+type NodeStatus struct {
+	PeerCount    int
+	Uptime       time.Duration
+	Version      string
+	NetworkState string
+}
+
+// setupNAT configures NAT traversal for the node
+// setupNAT configures NAT traversal using modern libp2p methods
+func (bn *BootstrapNode) setupNAT() error {
+	// Get the list of external addresses
+	externalAddrs := bn.host.Addrs()
+	log.Printf("🌐 External addresses: %v", externalAddrs)
+
+	// If NAT is enabled, libp2p will automatically handle NAT traversal
+	// using the AutoNAT service and other mechanisms.
+	// You can check if the host is behind a NAT by looking at the addresses.
+	if len(externalAddrs) == 0 {
+		log.Printf("⚠️ Node appears to be behind a NAT with no external addresses")
+	} else {
+		log.Printf("✅ Node has external addresses: %v", externalAddrs)
+	}
+
+	// If you need to explicitly handle NAT traversal, you can use the AutoNAT service.
+	// However, this is usually not necessary as libp2p handles it automatically.
+	return nil
+}
+
+// Helper function to get public IP
+
+// updatePeerScores periodically updates peer scores based on their performance
+func (bn *BootstrapNode) updatePeerScores() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-bn.ctx.Done():
+			return
+		case <-ticker.C:
+			bn.mu.Lock()
+			for peerID := range bn.peerScores {
+				score := bn.peerScores[peerID]
+
+				// Update connection uptime
+				if bn.host.Network().Connectedness(peerID) == network.Connected {
+					score.ConnectionUptime += 1
+				}
+
+				// Update response time from metrics
+				if latency, ok := bn.metrics.Latency[peerID]; ok {
+					score.ResponseTime = float64(latency.Milliseconds())
+				}
+
+				// Update bandwidth usage
+				if bandwidth, ok := bn.metrics.BandwidthUsage[peerID]; ok {
+					score.BandwidthUsage = bandwidth
+				}
+
+				score.LastUpdated = time.Now()
+				bn.peerScores[peerID] = score
+			}
+			bn.mu.Unlock()
+		}
+	}
+}
+
+// Add these types at the top of the file
+type PeerDiscoveryRequest struct {
+	MaxPeers      int      `json:"max_peers"`
+	ExcludedPeers []string `json:"excluded_peers"`
+}
+
+type PeerDiscoveryResponse struct {
+	Success bool            `json:"success"`
+	Message string          `json:"message"`
+	Peers   []peer.AddrInfo `json:"peers"`
+}
+
+// Add methods for NetworkMetrics
+func (nm *NetworkMetrics) IncrementPeerCount() {
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
+	nm.PeerCount++
+}
+
+// Add methods for PersistentPeerStore
+func (ps *PersistentPeerStore) HasPeer(p peer.ID) bool {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	_, exists := ps.peers[p]
+	return exists
+}
+
+// setupPortMapping configures port forwarding using UPnP
+// setupPortMapping configures port forwarding using UPnP
+
+// Add the broadcast helper method
+func (bn *BootstrapNode) broadcastToOtherPeers(source peer.ID, msgType string, data interface{}) {
+	bn.peersMutex.RLock()
+	defer bn.peersMutex.RUnlock()
+
+	for peerID := range bn.peers {
+		// Skip the source peer
+		if peerID == source {
+			continue
+		}
+
+		// Create new stream
+		protocolID := protocol.ID(fmt.Sprintf("/blockchain/%s/1.0.0", msgType))
+		stream, err := bn.host.NewStream(bn.ctx, peerID, protocolID)
+		if err != nil {
+			log.Printf("Failed to create stream to peer %s: %v", peerID, err)
+			continue
+		}
+
+		// Send the data
+		if err := json.NewEncoder(stream).Encode(data); err != nil {
+			log.Printf("Failed to send data to peer %s: %v", peerID, err)
+			stream.Close()
+			continue
+		}
+
+		stream.Close()
+
+		// Update metrics
+		bn.metrics.mu.Lock()
+		bn.metrics.BandwidthUsage[peerID]++
+		bn.metrics.mu.Unlock()
+	}
+}
+
+// getNetworkState determines the current network state
+func (bn *BootstrapNode) getNetworkState() string {
+	peerCount := len(bn.host.Network().Peers())
+
+	switch {
+	case peerCount >= 10:
+		return "healthy"
+	case peerCount >= 5:
+		return "stable"
+	case peerCount > 0:
+		return "developing"
+	default:
+		return "starting"
+	}
 }

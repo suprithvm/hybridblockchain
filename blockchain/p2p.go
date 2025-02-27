@@ -8,7 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 	"time"
+
+	"blockchain-core/blockchain/db"
+	"blockchain-core/blockchain/gas"
 
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
@@ -35,21 +39,39 @@ func (v blankValidator) Validate(_ string, _ []byte) error        { return nil }
 func (v blankValidator) Select(_ string, _ [][]byte) (int, error) { return 0, nil }
 
 type Node struct {
-	Host        host.Host
-	DHT         *dht.IpfsDHT
-	PeerManager *PeerManager
-	Blockchain  *Blockchain
-	Mempool     *Mempool
-	UTXOSet     *UTXOPool
-	StakePool   *StakePool
-	config      *NetworkConfig
-	ctx         context.Context
-	cancel      context.CancelFunc
-	UTXOPool    *UTXOPool
+	Host           host.Host
+	DHT            *dht.IpfsDHT
+	PeerManager    *PeerManager
+	Blockchain     *Blockchain
+	Mempool        *Mempool
+	UTXOSet        *UTXOPool
+	StakePool      *StakePool
+	config         *NetworkConfig
+	ctx            context.Context
+	cancel         context.CancelFunc
+	UTXOPool       *UTXOPool
+	isSyncing      bool
+	syncMu         sync.RWMutex
+	gasModel       *gas.GasModel
+	accountManager *AccountManager
+}
+
+// Add getter method for gas model
+func (n *Node) GetGasModel() *gas.GasModel {
+	return n.gasModel
 }
 
 func NewNode(config *NetworkConfig) (*Node, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Initialize database first
+	database, err := db.NewLevelDB(&db.Config{
+		Path: "chaindata",
+	})
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to initialize database: %w", err)
+	}
 
 	if err := config.ValidateConfig(); err != nil {
 		cancel()
@@ -84,18 +106,21 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		return nil, fmt.Errorf("failed to create DHT: %w", err)
 	}
 
+	// Create node without mempool first
 	node := &Node{
-		Host:        host,
-		DHT:         dhtInstance,
-		PeerManager: NewPeerManager(host),
-		StakePool:   NewStakePool(),
-		config:      config,
-		ctx:         ctx,
-		cancel:      cancel,
+		Host:           host,
+		DHT:            dhtInstance,
+		PeerManager:    NewPeerManager(host),
+		StakePool:      NewStakePool(),
+		config:         config,
+		ctx:            ctx,
+		cancel:         cancel,
+		gasModel:       gas.NewGasModel(gas.MinGasPrice, gas.BaseGasLimit),
+		accountManager: NewAccountManager(database),
 	}
 
-	// Register protocol handlers
-	node.registerProtocolHandlers()
+	// Now initialize mempool with the node reference
+	node.Mempool = NewMempool(node)
 
 	return node, nil
 }
@@ -731,7 +756,7 @@ func (n *Node) SyncBlocks(peerID peer.ID, startHeight, endHeight int) error {
 	}
 
 	// Create temporary mempool and UTXO set for synced blocks
-	tempMempool := NewMempool()
+	tempMempool := NewMempool(n)
 	tempUTXOSet := make(map[string]UTXO)
 
 	// Validate and add blocks
@@ -1032,24 +1057,24 @@ func (n *Node) getBlockHeaders(start, end uint64) []BlockHeader {
 	headers := make([]BlockHeader, 0, end-start+1)
 	for i := start; i <= end; i++ {
 		block := n.Blockchain.Chain[i]
-		
+
 		// Calculate merkle root from transactions
 		txHashes := make([]string, 0)
 		for _, tx := range block.Body.Transactions.GetAllTransactions() {
 			txHashes = append(txHashes, tx.Hash())
 		}
-		
+
 		merkleRoot := CalculateMerkleRoot(txHashes)
-		
+
 		header := BlockHeader{
-			PreviousHash:       block.Header.PreviousHash,
-			BlockNumber:        block.Header.BlockNumber,
-			Timestamp:         block.Header.Timestamp,
-			MerkleRoot:        merkleRoot,
-			StateRoot:         block.Header.StateRoot,
-			Difficulty:        block.Header.Difficulty,
+			PreviousHash: block.Header.PreviousHash,
+			BlockNumber:  block.Header.BlockNumber,
+			Timestamp:    block.Header.Timestamp,
+			MerkleRoot:   merkleRoot,
+			StateRoot:    block.Header.StateRoot,
+			Difficulty:   block.Header.Difficulty,
 		}
-		
+
 		headers = append(headers, header)
 	}
 	return headers
@@ -1086,13 +1111,20 @@ func (n *Node) verifyBlockHeaders(headers []BlockHeader) error {
 
 	// Verify header chain
 	for i := 1; i < len(headers); i++ {
-		block := n.Blockchain.Chain[i-1] 
+		block := n.Blockchain.Chain[i-1]
 		if headers[i].PreviousHash != block.hash {
 			return fmt.Errorf("invalid header chain at height %d", headers[i].BlockNumber)
 		}
 	}
 
 	return nil
+}
+
+// Add method to check sync status
+func (n *Node) IsSyncing() bool {
+	n.syncMu.RLock()
+	defer n.syncMu.RUnlock()
+	return n.isSyncing
 }
 
 // Remove duplicated PeerManager-related code and types

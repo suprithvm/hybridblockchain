@@ -16,6 +16,7 @@ type Blockchain struct {
 	Node        *Node
 	mu          sync.RWMutex
 	currentHash string
+	utxoPool    *UTXOPool
 }
 
 //intializes the blockchain with the genesis block
@@ -60,6 +61,15 @@ func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet m
 		for _, tx := range newBlock.Body.Transactions.GetAllTransactions() {
 			mempool.RemoveTransaction(tx.TransactionID)
 		}
+
+		// Update account states
+		updates := make(map[string]*AccountState)
+		for _, tx := range newBlock.Body.Transactions.GetAllTransactions() {
+			state, _ := bc.Node.accountManager.GetAccountState(tx.Sender)
+			state.Nonce++
+			updates[tx.Sender] = state
+		}
+		bc.Node.accountManager.BatchUpdateAccounts(updates)
 	} else {
 		log.Printf("Block %d validation failed.\n", newBlock.Header.BlockNumber)
 	}
@@ -486,6 +496,54 @@ func (bc *Blockchain) RollbackToHeight(height uint64) error {
 // Add this function
 func calculateHash(block Block) string {
 	header := block.Header
+	data := fmt.Sprintf("%d%d%s%d%s%s%s%d%d",
+		header.Version,
+		header.BlockNumber,
+		header.PreviousHash,
+		header.Timestamp,
+		header.MerkleRoot,
+		header.StateRoot,
+		header.ReceiptsRoot,
+		header.Nonce,
+		header.GasUsed,
+	)
+	hash := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(hash[:])
+}
+
+// VerifyBalance checks if an address has sufficient balance
+func (bc *Blockchain) VerifyBalance(address string, amount float64) bool {
+	balance := bc.GetBalance(address)
+	return balance >= amount
+}
+
+// GetBalance calculates balance from UTXO set
+func (bc *Blockchain) GetBalance(address string) float64 {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	balance := 0.0
+	utxoSet := bc.utxoPool.GetUTXOsForAddress(address)
+
+	for _, utxo := range utxoSet {
+		balance += utxo.Amount
+	}
+
+	return balance
+}
+
+// GetNonce gets the next nonce for an address from UTXO set
+func (bc *Blockchain) GetNonce(address string) uint64 {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	// In UTXO model, nonce is tracked by transaction count
+	return uint64(len(bc.utxoPool.GetUTXOsForAddress(address)))
+}
+
+// CalculateHash calculates block hash
+func (b *Block) CalculateHash() string {
+	header := b.Header
 	data := fmt.Sprintf("%d%d%s%d%s%s%s%d%d",
 		header.Version,
 		header.BlockNumber,
