@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"blockchain-core/blockchain/db"
 	"blockchain-core/blockchain/gas"
 
 	"github.com/libp2p/go-libp2p"
@@ -20,8 +19,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
-	"github.com/libp2p/go-libp2p/p2p/security/noise"
-	libp2ptls "github.com/libp2p/go-libp2p/p2p/security/tls"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -38,6 +35,7 @@ type blankValidator struct{}
 func (v blankValidator) Validate(_ string, _ []byte) error        { return nil }
 func (v blankValidator) Select(_ string, _ [][]byte) (int, error) { return 0, nil }
 
+// Node represents a blockchain network node
 type Node struct {
 	Host           host.Host
 	DHT            *dht.IpfsDHT
@@ -54,6 +52,11 @@ type Node struct {
 	syncMu         sync.RWMutex
 	gasModel       *gas.GasModel
 	accountManager *AccountManager
+	P2PPort        int
+	RPCPort        int
+	NetworkPath    string
+	ChainID        uint64
+	NetworkID      string
 }
 
 // Add getter method for gas model
@@ -61,34 +64,71 @@ func (n *Node) GetGasModel() *gas.GasModel {
 	return n.gasModel
 }
 
+// NewNode creates a new blockchain node
 func NewNode(config *NetworkConfig) (*Node, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-
-	// Initialize database first
-	database, err := db.NewLevelDB(&db.Config{
-		Path: "chaindata",
-	})
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to initialize database: %w", err)
-	}
 
 	if err := config.ValidateConfig(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Create libp2p host with security options
+	// Setup P2P host address
+	addr := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.P2PPort)
+	listenAddr, err := ma.NewMultiaddr(addr)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create listen address: %w", err)
+	}
+
+	// Create libp2p host
 	host, err := libp2p.New(
-		libp2p.ListenAddrStrings(config.GetMultiaddr()),
-		libp2p.Security(libp2ptls.ID, libp2ptls.New),
-		libp2p.Security(noise.ID, noise.New),
-		libp2p.NATPortMap(),
+		libp2p.ListenAddrs(listenAddr),
 		libp2p.EnableRelay(),
+		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}),
+		libp2p.EnableHolePunching(),
 	)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
+		return nil, fmt.Errorf("failed to create host: %w", err)
+	}
+
+	// Add connection logging
+	host.Network().Notify(&network.NotifyBundle{
+		ConnectedF: func(n network.Network, conn network.Conn) {
+			remotePeer := conn.RemotePeer()
+			remoteAddr := conn.RemoteMultiaddr()
+			log.Printf("✅ Connected to peer: %s", remotePeer.String())
+			log.Printf("   • Address: %s", remoteAddr)
+		},
+		DisconnectedF: func(n network.Network, conn network.Conn) {
+			log.Printf("❌ Disconnected from peer: %s", conn.RemotePeer().String())
+		},
+	})
+
+	// If bootstrap nodes are provided, connect to them
+	if len(config.BootstrapNodes) > 0 {
+		log.Printf("🔄 Connecting to bootstrap nodes:")
+		for _, addr := range config.BootstrapNodes {
+			log.Printf("   • Attempting to connect to: %s", addr)
+			maddr, err := ma.NewMultiaddr(addr)
+			if err != nil {
+				log.Printf("   ❌ Invalid bootstrap address: %s", err)
+				continue
+			}
+
+			peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+			if err != nil {
+				log.Printf("   ❌ Failed to parse peer info: %s", err)
+				continue
+			}
+
+			if err := host.Connect(ctx, *peerInfo); err != nil {
+				log.Printf("   ❌ Failed to connect: %s", err)
+				continue
+			}
+			log.Printf("   ✅ Successfully connected to bootstrap node: %s", addr)
+		}
 	}
 
 	// Create DHT with appropriate mode
@@ -106,7 +146,6 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		return nil, fmt.Errorf("failed to create DHT: %w", err)
 	}
 
-	// Create node without mempool first
 	node := &Node{
 		Host:           host,
 		DHT:            dhtInstance,
@@ -116,7 +155,13 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		ctx:            ctx,
 		cancel:         cancel,
 		gasModel:       gas.NewGasModel(gas.MinGasPrice, gas.BaseGasLimit),
-		accountManager: NewAccountManager(database),
+		accountManager: NewAccountManager(config.Blockchain.GetDB()),
+		P2PPort:        config.P2PPort,
+		RPCPort:        config.RPCPort,
+		NetworkPath:    config.NetworkPath,
+		ChainID:        config.ChainID,
+		NetworkID:      config.NetworkID,
+		Blockchain:     config.Blockchain,
 	}
 
 	// Now initialize mempool with the node reference

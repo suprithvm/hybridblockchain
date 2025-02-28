@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/syndtr/goleveldb/leveldb"
@@ -27,8 +28,13 @@ type levelDB struct {
 
 // NewLevelDB creates a new LevelDB instance
 func NewLevelDB(config *Config) (Database, error) {
+	log.Printf("🏗️ Creating LevelDB with config:")
+	log.Printf("   • Path: %s", config.Path)
+	log.Printf("   • MaxOpenFiles: %d", config.MaxOpenFiles)
+
 	if err := config.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config: %w", err)
+		log.Printf("❌ LevelDB config validation failed: %v", err)
+		return nil, err
 	}
 
 	// Create database options
@@ -280,18 +286,4 @@ func (it *levelDBIterator) Release() {
 
 func (it *levelDBIterator) Seek(key []byte) bool {
 	return it.iter.Seek(key)
-}
-
-// NewDatabase creates a new database instance based on the given configuration
-func NewDatabase(config *Config) (Database, error) {
-	if err := config.Validate(); err != nil {
-		return nil, err
-	}
-
-	switch config.Type {
-	case LevelDB:
-		return NewLevelDB(config)
-	default:
-		return nil, fmt.Errorf("unsupported database type: %s", config.Type)
-	}
 }

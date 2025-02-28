@@ -7,6 +7,8 @@ import (
 	"log"
 	"sync"
 
+	"blockchain-core/blockchain/db"
+
 	"github.com/libp2p/go-libp2p/core/host"
 )
 
@@ -17,17 +19,69 @@ type Blockchain struct {
 	mu          sync.RWMutex
 	currentHash string
 	utxoPool    *UTXOPool
+	db          db.Database
 }
 
 //intializes the blockchain with the genesis block
 
-func InitialiseBlockchain() *Blockchain {
+func InitialiseBlockchain(dbConfig *DatabaseConfig) *Blockchain {
+	// Initialize database
+	if dbConfig == nil {
+		dbConfig = &DatabaseConfig{
+			Type:      "leveldb",
+			Path:      "blockchain_data",
+			CacheSize: 256,
+		}
+	}
+
+	// Initialize blockchain with database
+	bc := &Blockchain{
+		Chain:       []Block{},
+		Node:        nil,
+		mu:          sync.RWMutex{},
+		currentHash: "",
+		utxoPool:    nil,
+		db:          initDB(dbConfig),
+	}
 
 	genesis := GenesisBlock()
-	blockchain := &Blockchain{}
+	bc.Chain = append(bc.Chain, genesis)
+	return bc
+}
 
-	blockchain.Chain = append(blockchain.Chain, genesis)
-	return blockchain
+func initDB(config *DatabaseConfig) db.Database {
+	log.Printf("🚀 Initializing Database:")
+	log.Printf("   • Config Type: %s", config.Type)
+	log.Printf("   • Config Path: %s", config.Path)
+
+	opts := db.DefaultOptions()
+
+	// Only override if values are provided
+	if config.Type != "" {
+		opts.Type = config.Type
+	}
+	if config.Path != "" {
+		opts.Path = config.Path
+	}
+	if config.CacheSize > 0 {
+		opts.CacheSize = config.CacheSize
+	}
+	if config.MaxOpenFiles > 0 {
+		opts.MaxOpenFiles = config.MaxOpenFiles
+	}
+
+	log.Printf("📝 Final Database Options:")
+	log.Printf("   • Type: %s", opts.Type)
+	log.Printf("   • Path: %s", opts.Path)
+	log.Printf("   • MaxOpenFiles: %d", opts.MaxOpenFiles)
+
+	database, err := db.NewDatabase(opts)
+	if err != nil {
+		log.Printf("❌ Database initialization failed: %v", err)
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	log.Printf("✅ Database initialized successfully")
+	return database
 }
 
 // Add peerHost as a parameter to blockchain methods where necessary
@@ -557,4 +611,27 @@ func (b *Block) CalculateHash() string {
 	)
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:])
+}
+
+// InitialiseBlockchainWithStore initializes the blockchain with an existing store
+func InitialiseBlockchainWithStore(store *Store) *Blockchain {
+	log.Printf("🔄 Initializing blockchain with existing store")
+
+	bc := &Blockchain{
+		Chain:       []Block{},
+		Node:        nil,
+		mu:          sync.RWMutex{},
+		currentHash: "",
+		utxoPool:    nil,
+		db:          store.db,
+	}
+
+	genesis := GenesisBlock()
+	bc.Chain = append(bc.Chain, genesis)
+	return bc
+}
+
+// Add GetDB method to access the database
+func (bc *Blockchain) GetDB() db.Database {
+	return bc.db
 }

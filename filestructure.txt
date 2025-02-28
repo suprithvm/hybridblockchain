@@ -60,6 +60,7 @@
     |-- wallet_utils.go
 |-- cmd
     |-- gas_cli.go
+|-- db
 |-- docker-compose.yml
 |-- Dockerfile.bootnode
 |-- go.md
@@ -68,7 +69,30 @@
 |-- main.go
 |-- my_wallet.json
 |-- node_data
-    |-- bootnode.key
+    |-- blockchain
+        |-- leveldb
+            |-- 000010.log
+            |-- CURRENT
+            |-- CURRENT.bak
+            |-- LOCK
+            |-- LOG
+            |-- MANIFEST-000011
+    |-- chaindata
+        |-- leveldb
+            |-- 000014.log
+            |-- CURRENT
+            |-- CURRENT.bak
+            |-- LOCK
+            |-- LOG
+            |-- MANIFEST-000015
+    |-- nodedata
+        |-- leveldb
+            |-- 000022.log
+            |-- CURRENT
+            |-- CURRENT.bak
+            |-- LOCK
+            |-- LOG
+            |-- MANIFEST-000023
 |-- notes.rtf
 |-- README.md
 |-- roadmap.txt

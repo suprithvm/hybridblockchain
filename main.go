@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"blockchain-core/blockchain"
 	"blockchain-core/blockchain/db"
@@ -38,8 +37,12 @@ type NodeConfig struct {
 }
 
 func main() {
+	log.Printf("🚀 Starting blockchain node")
+
 	// Parse command line flags
 	config := parseFlags()
+
+	log.Printf("📋 Configuration loaded")
 
 	// Initialize logging
 	setupLogging(config.LogLevel)
@@ -48,8 +51,10 @@ func main() {
 
 	// Create data directories
 	if err := setupDataDir(config.DataDir); err != nil {
-		log.Fatalf("❌ Failed to setup data directory: %v", err)
+		log.Fatalf("❌ Failed to create data directory: %v", err)
 	}
+
+	log.Printf("📂 Data directory setup: %s", config.DataDir)
 
 	// Initialize database
 	db, store := initializeDatabase(config)
@@ -147,37 +152,36 @@ func runBootstrapNode(config *NodeConfig) {
 func runMinerNode(config *NodeConfig, store *blockchain.Store) {
 	log.Printf("⛏️ Starting Miner Node")
 
-	// Initialize blockchain
-	bc := blockchain.InitialiseBlockchain()
-
-	// Create node configuration
-	nodeConfig := &blockchain.NetworkConfig{
-		P2PPort:     extractPort(config.ListenAddr),
-		RPCPort:     extractPort(config.RPCAddr),
-		NetworkPath: config.DataDir,
-		ChainID:     parseChainID(config.NetworkID),
+	// Initialize blockchain with store's database
+	dbConfig := &blockchain.DatabaseConfig{
+		Type:         "leveldb",
+		Path:         filepath.Join(config.DataDir, "chaindata"),
+		CacheSize:    256,
+		MaxOpenFiles: 64,
+		Compression:  true,
 	}
 
-	// Initialize node
-	node, err := blockchain.NewNode(nodeConfig)
+	// Initialize blockchain
+	bc := blockchain.InitialiseBlockchain(dbConfig)
+
+	// Create network configuration
+	networkConfig := &blockchain.NetworkConfig{
+		P2PPort:     extractPort(config.ListenAddr),
+		RPCPort:     extractPort(config.RPCAddr),
+		NetworkPath: filepath.Join(config.DataDir, "chaindata"),
+		ChainID:     parseChainID(config.NetworkID),
+		NetworkID:   config.NetworkID,
+		Blockchain:  bc,
+	}
+
+	// Create the node
+	node, err := blockchain.NewNode(networkConfig)
 	if err != nil {
 		log.Fatalf("❌ Failed to create node: %v", err)
 	}
-	bc.Node = node
+	log.Printf("✅ Node created successfully", node)
 
-	// Initialize mempool and stake pool
-	mempool := blockchain.NewMempool(node)
-	stakePool := blockchain.NewStakePool()
-
-	// Start mining in a goroutine
-	go func() {
-		for {
-			bc.AddBlock(mempool, stakePool, make(map[string]blockchain.UTXO), nil)
-			time.Sleep(time.Second * 10) // Adjust block time as needed
-		}
-	}()
-
-	// Initialize and start sync service
+	// Start sync service
 	startSyncService(config, bc, store)
 }
 
@@ -185,12 +189,17 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 	log.Printf("🔐 Starting Validator Node")
 
 	// Initialize blockchain
-	bc := blockchain.InitialiseBlockchain()
+	dbConfig := &blockchain.DatabaseConfig{
+		Type:      "leveldb",
+		Path:      filepath.Join(config.DataDir, "blockchain"),
+		CacheSize: 256,
+	}
+	bc := blockchain.InitialiseBlockchain(dbConfig)
 
 	// Initialize validator with configuration
 	validatorConfig := &blockchain.ValidatorConfig{
 		Stake:        config.ValidatorStake,
-		MinStake:     100,  // Example minimum stake
+		MinStake:     00,   // Example minimum stake
 		RewardRate:   0.05, // 5% annual return
 		SlashingRate: 0.10, // 10% slashing for misbehavior
 	}
@@ -213,7 +222,12 @@ func runObserverNode(config *NodeConfig, store *blockchain.Store) {
 	log.Printf("👀 Starting Observer Node")
 
 	// Initialize blockchain
-	bc := blockchain.InitialiseBlockchain()
+	dbConfig := &blockchain.DatabaseConfig{
+		Type:      "leveldb",
+		Path:      filepath.Join(config.DataDir, "blockchain"),
+		CacheSize: 256,
+	}
+	bc := blockchain.InitialiseBlockchain(dbConfig)
 
 	// Initialize and start sync service
 	startSyncService(config, bc, store)
@@ -239,18 +253,25 @@ func setupDataDir(dataDir string) error {
 }
 
 func initializeDatabase(config *NodeConfig) (db.Database, *blockchain.Store) {
-	dbConfig := &db.Config{
-		Type:         db.LevelDB,
-		Path:         filepath.Join(config.DataDir, "blockchain"),
-		CacheSize:    512,
+	log.Printf("🔧 Initializing Database in main.go")
+
+	// Create database options
+	dbConfig := &db.Options{
+		Type:         "leveldb",
+		Path:         filepath.Join(config.DataDir, "nodedata"),
+		CacheSize:    256,
 		MaxOpenFiles: 64,
 		Compression:  true,
-		Logger:       &logWrapper{log.Default()},
 	}
+
+	log.Printf("📝 Database Options Created:")
+	log.Printf("   • Type: %s", dbConfig.Type)
+	log.Printf("   • Path: %s", dbConfig.Path)
+	log.Printf("   • MaxOpenFiles: %d", dbConfig.MaxOpenFiles)
 
 	database, err := db.NewDatabase(dbConfig)
 	if err != nil {
-		log.Fatalf("❌ Failed to create database: %v", err)
+		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
 	// Create store with the database interface

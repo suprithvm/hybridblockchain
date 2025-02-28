@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"log"
 	"path/filepath"
 )
 
@@ -175,4 +176,79 @@ func SplitKey(key []byte) (KeyPrefix, []byte) {
 		return 0, nil
 	}
 	return KeyPrefix(key[0]), key[1:]
+}
+
+// Options contains configuration for database
+type Options struct {
+	Type         string
+	Path         string
+	CacheSize    uint64
+	MaxOpenFiles int  // Add MaxOpenFiles field
+	Compression  bool // Add Compression field
+}
+
+// DefaultOptions returns default database options
+func DefaultOptions() *Options {
+	log.Printf("📋 Creating Default Database Options")
+	opts := &Options{
+		Type:         string(LevelDB),
+		Path:         "node_data/blockchain",
+		CacheSize:    512,
+		MaxOpenFiles: 64,
+		Compression:  true,
+	}
+	log.Printf("✓ Default Options Created:")
+	log.Printf("   • MaxOpenFiles: %d", opts.MaxOpenFiles)
+	return opts
+}
+
+// Validate validates the database options
+func (o *Options) Validate() error {
+	log.Printf("🔍 Validating Database Options:")
+	log.Printf("   • Type: %s", o.Type)
+	log.Printf("   • Path: %s", o.Path)
+	log.Printf("   • CacheSize: %d", o.CacheSize)
+	log.Printf("   • MaxOpenFiles: %d", o.MaxOpenFiles)
+	log.Printf("   • Compression: %v", o.Compression)
+
+	if o.Type == "" {
+		return fmt.Errorf("invalid config: database type cannot be empty")
+	}
+	if o.Path == "" {
+		return fmt.Errorf("invalid config: database path cannot be empty")
+	}
+	if o.MaxOpenFiles <= 0 {
+		return fmt.Errorf("invalid config: invalid max open files: %d", o.MaxOpenFiles)
+	}
+	return nil
+}
+
+// NewDatabase creates a new database instance
+func NewDatabase(opts *Options) (Database, error) {
+	log.Printf("🏗️ Creating new database with options:")
+	log.Printf("   • Type: %s", opts.Type)
+	log.Printf("   • Path: %s", opts.Path)
+	log.Printf("   • MaxOpenFiles: %d", opts.MaxOpenFiles)
+
+	// Validate options first
+	log.Printf("🔍 Validating database options...")
+	if err := opts.Validate(); err != nil {
+		log.Printf("❌ Options validation failed: %v", err)
+		return nil, err
+	}
+
+	switch opts.Type {
+	case "leveldb":
+		config := &Config{
+			Type:         DBType(opts.Type),
+			Path:         opts.Path,
+			CacheSize:    int64(opts.CacheSize),
+			MaxOpenFiles: opts.MaxOpenFiles, // Make sure we pass this through
+			Compression:  opts.Compression,
+		}
+		log.Printf("📦 Creating LevelDB instance...")
+		return NewLevelDB(config)
+	default:
+		return nil, fmt.Errorf("unsupported database type: %s", opts.Type)
+	}
 }
