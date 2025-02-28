@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -123,7 +122,6 @@ func parseFlags() *NodeConfig {
 func runBootstrapNode(config *NodeConfig) {
 	log.Printf("🌟 Starting Bootstrap Node")
 
-	ctx := context.Background()
 	bootConfig := &blockchain.BootstrapNodeConfig{
 		ListenPort:         extractPort(config.ListenAddr),
 		DataDir:            config.DataDir,
@@ -136,7 +134,7 @@ func runBootstrapNode(config *NodeConfig) {
 	}
 
 	// Initialize bootstrap node with context
-	node, err := blockchain.NewBootstrapNode(ctx, bootConfig)
+	node, err := blockchain.NewBootstrapNode(bootConfig)
 	if err != nil {
 		log.Fatalf("❌ Failed to create bootstrap node: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -73,6 +74,13 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
+	// If no bootstrap nodes specified, try to read from bootnode.addr file
+	if len(config.BootstrapNodes) == 0 {
+		if addr, err := os.ReadFile("bootnode.addr"); err == nil {
+			config.BootstrapNodes = []string{string(addr)}
+		}
+	}
+
 	// Setup P2P host options
 	opts := []libp2p.Option{
 		libp2p.ListenAddrStrings(
@@ -93,6 +101,14 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		return nil, fmt.Errorf("failed to create host: %w", err)
 	}
 
+	// Create the node instance first
+	n := &Node{
+		Host:   host,
+		config: config,
+		ctx:    ctx,
+		cancel: cancel,
+	}
+
 	// Add connection logging
 	host.Network().Notify(&network.NotifyBundle{
 		ConnectedF: func(n network.Network, conn network.Conn) {
@@ -110,33 +126,7 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 	// Connect to bootstrap nodes if provided
 	if len(config.BootstrapNodes) > 0 {
 		log.Printf("🔄 Connecting to bootstrap nodes:")
-		for _, addr := range config.BootstrapNodes {
-			log.Printf("   • Attempting to connect to: %s", addr)
-
-			// Parse multiaddr
-			maddr, err := ma.NewMultiaddr(addr)
-			if err != nil {
-				log.Printf("   ❌ Invalid bootstrap address: %s", err)
-				continue
-			}
-
-			// Extract peer info
-			peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
-			if err != nil {
-				log.Printf("   ❌ Failed to parse peer info: %s", err)
-				continue
-			}
-
-			// Connect with timeout
-			ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-
-			if err := host.Connect(ctx, *peerInfo); err != nil {
-				log.Printf("   ❌ Failed to connect: %s", err)
-				continue
-			}
-			log.Printf("   ✅ Successfully connected to bootstrap node: %s", addr)
-		}
+		n.connectToBootstrapNodes(ctx)
 	}
 
 	// Create DHT with appropriate mode
@@ -154,28 +144,14 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		return nil, fmt.Errorf("failed to create DHT: %w", err)
 	}
 
-	node := &Node{
-		Host:           host,
-		DHT:            dhtInstance,
-		PeerManager:    NewPeerManager(host),
-		StakePool:      NewStakePool(),
-		config:         config,
-		ctx:            ctx,
-		cancel:         cancel,
-		gasModel:       gas.NewGasModel(gas.MinGasPrice, gas.BaseGasLimit),
-		accountManager: NewAccountManager(config.Blockchain.GetDB()),
-		P2PPort:        config.P2PPort,
-		RPCPort:        config.RPCPort,
-		NetworkPath:    config.NetworkPath,
-		ChainID:        config.ChainID,
-		NetworkID:      config.NetworkID,
-		Blockchain:     config.Blockchain,
-	}
+	n.DHT = dhtInstance
+	n.PeerManager = NewPeerManager(host)
+	n.StakePool = NewStakePool()
+	n.gasModel = gas.NewGasModel(gas.MinGasPrice, gas.BaseGasLimit)
+	n.accountManager = NewAccountManager(config.Blockchain.GetDB())
+	n.Mempool = NewMempool(n)
 
-	// Now initialize mempool with the node reference
-	node.Mempool = NewMempool(node)
-
-	return node, nil
+	return n, nil
 }
 
 // Close gracefully shuts down the node
@@ -1182,3 +1158,68 @@ func (n *Node) IsSyncing() bool {
 
 // Remove duplicated PeerManager-related code and types
 // All PeerManager-related code is now in peer_manager.go
+
+func (n *Node) connectToBootstrapNodes(ctx context.Context) {
+	maxRetries := 5
+	retryDelay := time.Second * 5
+
+	for _, addr := range n.config.BootstrapNodes {
+		for retry := 0; retry < maxRetries; retry++ {
+			log.Printf("   • Attempting to connect to bootstrap node (attempt %d/%d)", retry+1, maxRetries)
+
+			if err := n.connectToNode(ctx, addr); err != nil {
+				log.Printf("   ❌ Connection failed: %s", err)
+				time.Sleep(retryDelay)
+				continue
+			}
+
+			log.Printf("   ✅ Successfully connected to bootstrap node")
+			break
+		}
+	}
+}
+
+func (n *Node) Start() error {
+	// ... existing code ...
+
+	// Monitor connection status
+	go func() {
+		ticker := time.NewTicker(time.Second * 10)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-n.ctx.Done():
+				return
+			case <-ticker.C:
+				if len(n.Host.Network().Peers()) == 0 {
+					log.Printf("⚠️ No peers connected, attempting to reconnect...")
+					n.connectToBootstrapNodes(n.ctx)
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (n *Node) connectToNode(ctx context.Context, addr string) error {
+	// Parse multiaddr
+	maddr, err := ma.NewMultiaddr(addr)
+	if err != nil {
+		return fmt.Errorf("invalid address: %w", err)
+	}
+
+	// Extract peer info
+	peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+	if err != nil {
+		return fmt.Errorf("invalid peer info: %w", err)
+	}
+
+	// Connect to the peer
+	if err := n.Host.Connect(ctx, *peerInfo); err != nil {
+		return fmt.Errorf("connection failed: %w", err)
+	}
+
+	return nil
+}

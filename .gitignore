@@ -2,3 +2,4 @@
 *.log
 *.db
 bootnode_data/
+bootnode.key

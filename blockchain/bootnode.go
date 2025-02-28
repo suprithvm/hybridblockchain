@@ -20,6 +20,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/routing"
+	"github.com/pion/stun"
 
 	"github.com/multiformats/go-multiaddr"
 )
@@ -141,17 +142,63 @@ func (n *Notifier) ListenClose(net network.Network, ma multiaddr.Multiaddr) {
 }
 
 // NewBootstrapNode creates a new bootstrap node
-func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*BootstrapNode, error) {
+func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Get public IP first
+	publicIP, err := getPublicIP()
+	if err != nil {
+		log.Printf("⚠️ Warning: Could not get public IP: %v", err)
+		publicIP = "0.0.0.0"
+	}
+	config.PublicIP = publicIP
+
+	// Load or create private key
+	privKey, err := loadOrCreatePrivateKey(config.DataDir)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create/load identity: %v", err)
+	}
+
+	// Get peer ID from private key
+	peerID, err := peer.IDFromPrivateKey(privKey)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to get peer ID: %v", err)
+	}
+
+	// Setup host options
+	hostOpts := []libp2p.Option{
+		libp2p.ListenAddrStrings(
+			fmt.Sprintf("/ip4/%s/tcp/%d", publicIP, config.ListenPort),
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.ListenPort),
+			fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", config.ListenPort),
+		),
+		libp2p.Identity(privKey),
+		libp2p.EnableRelay(),
+		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}),
+		libp2p.EnableHolePunching(),
+	}
+
+	// Print configuration
 	log.Printf("\n🚀 Initializing Bootstrap Node")
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Printf("📋 Configuration:")
 	log.Printf("   • Listen Port: %d", config.ListenPort)
-	log.Printf("   • Public IP: %s", config.PublicIP)
+	log.Printf("   • Public IP: %s", publicIP)
 	log.Printf("   • NAT Enabled: %v", config.EnableNAT)
 	log.Printf("   • Peer Exchange: %v", config.EnablePeerExchange)
-	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	ctx, cancel := context.WithCancel(ctx)
+	// Store bootnode address with public IP in a file that miners can read
+	multiAddr := fmt.Sprintf("/ip4/%s/tcp/%d/p2p/%s",
+		publicIP,
+		config.ListenPort,
+		peerID.String())
+
+	if err := os.WriteFile("bootnode.addr", []byte(multiAddr), 0644); err != nil {
+		log.Printf("⚠️ Warning: Could not save bootnode address: %v", err)
+	}
 
 	// Create node data directory if it doesn't exist
 	nodeDir := filepath.Dir(config.KeyFile)
@@ -160,45 +207,7 @@ func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*Bootst
 		return nil, fmt.Errorf("failed to create node directory: %w", err)
 	}
 
-	privKey, err := loadOrCreatePrivateKey(config)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to load/create private key: %w", err)
-	}
-
-	// Get peer ID from private key
-	peerID, err := peer.IDFromPrivateKey(privKey)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to get peer ID: %w", err)
-	}
-
-	// Create multiaddress for listening
-	listenAddr, err := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.ListenPort))
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to create listen multiaddr: %w", err)
-	}
-
-	// In NewBootstrapNode() function, modify the host options:
-	hostOpts := []libp2p.Option{
-		libp2p.ListenAddrs(listenAddr),
-		libp2p.Identity(privKey),
-		libp2p.EnableRelay(),
-	}
-
-	if config.EnableNAT {
-		hostOpts = append(hostOpts,
-			libp2p.NATPortMap(),
-			libp2p.EnableNATService(),
-			libp2p.EnableHolePunching(), // Keep this INSIDE the NAT block
-		)
-	} else {
-		hostOpts = append(hostOpts,
-			libp2p.EnableHolePunching(), // Only if you want hole punching without NAT
-		)
-	}
-
+	// Create libp2p host
 	host, err := libp2p.New(hostOpts...)
 	if err != nil {
 		cancel()
@@ -342,33 +351,28 @@ func (config *BootstrapNodeConfig) GetMultiaddr(peerID peer.ID) string {
 }
 
 // loadOrCreatePrivateKey loads an existing private key or creates a new one
-func loadOrCreatePrivateKey(config *BootstrapNodeConfig) (crypto.PrivKey, error) {
-	if config.KeyFile == "" {
-		config.KeyFile = "bootnode.key"
-	}
+func loadOrCreatePrivateKey(dataDir string) (crypto.PrivKey, error) {
+	keyFile := filepath.Join(dataDir, "node.key")
 
 	// Try to load existing key
-	if keyData, err := os.ReadFile(config.KeyFile); err == nil {
-		return crypto.UnmarshalPrivateKey(keyData)
+	if keyBytes, err := os.ReadFile(keyFile); err == nil {
+		return crypto.UnmarshalPrivateKey(keyBytes)
 	}
 
-	// Generate new key if none exists
-	priv, _, err := crypto.GenerateKeyPair(
-		crypto.Ed25519, // Using Ed25519 for better security
-		-1,
-	)
+	// Generate new key
+	priv, _, err := crypto.GenerateKeyPair(crypto.Ed25519, -1)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate key pair: %w", err)
+		return nil, err
 	}
 
 	// Save the key
 	keyBytes, err := crypto.MarshalPrivateKey(priv)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal private key: %w", err)
+		return nil, err
 	}
 
-	if err := os.WriteFile(config.KeyFile, keyBytes, 0600); err != nil {
-		return nil, fmt.Errorf("failed to save private key: %w", err)
+	if err := os.WriteFile(keyFile, keyBytes, 0600); err != nil {
+		return nil, err
 	}
 
 	return priv, nil
@@ -920,7 +924,7 @@ func RunBootstrapNode() {
 	}
 
 	// Create bootstrap node
-	bootstrapNode, err := NewBootstrapNode(context.Background(), config)
+	bootstrapNode, err := NewBootstrapNode(config)
 	if err != nil {
 		log.Fatalf("Failed to create bootstrap node: %v", err)
 	}
@@ -1052,6 +1056,64 @@ func (bn *BootstrapNode) setupNAT() error {
 }
 
 // Helper function to get public IP
+func getPublicIP() (string, error) {
+	var publicIP string
+	
+	done := make(chan bool)
+
+	// Try multiple STUN servers until we get an IPv4
+	stunServers := []string{
+		"stun.l.google.com:19302",
+		"stun1.l.google.com:19302",
+		"stun.stunprotocol.org:3478",
+	}
+
+	for _, server := range stunServers {
+		c, err := stun.Dial("udp4", server) // Force IPv4
+		if err != nil {
+			continue
+		}
+		defer c.Close()
+
+		message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+
+		c.Start(message, func(res stun.Event) {
+			if res.Error != nil {
+				err = res.Error
+				done <- true
+				return
+			}
+
+			var xorAddr stun.XORMappedAddress
+			if getErr := xorAddr.GetFrom(res.Message); getErr != nil {
+				err = getErr
+				done <- true
+				return
+			}
+
+			// Verify we got an IPv4
+			if ip4 := xorAddr.IP.To4(); ip4 != nil {
+				publicIP = ip4.String()
+				done <- true
+			} else {
+				err = fmt.Errorf("got IPv6 address, want IPv4")
+				done <- true
+			}
+		})
+
+		<-done // Wait for STUN response
+
+		if err == nil && publicIP != "" {
+			return publicIP, nil
+		}
+	}
+
+	if publicIP == "" {
+		return "", fmt.Errorf("could not get public IPv4 address from any STUN server")
+	}
+
+	return publicIP, nil
+}
 
 // updatePeerScores periodically updates peer scores based on their performance
 func (bn *BootstrapNode) updatePeerScores() {

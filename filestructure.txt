@@ -58,17 +58,18 @@
     |-- validator.go
     |-- wallet.go
     |-- wallet_utils.go
+|-- bootnode.addr
 |-- bootnode.key
 |-- bootnode_data
     |-- node.key
     |-- nodedata
         |-- leveldb
-            |-- 000002.log
+            |-- 000008.log
             |-- CURRENT
             |-- CURRENT.bak
             |-- LOCK
             |-- LOG
-            |-- MANIFEST-000003
+            |-- MANIFEST-000009
 |-- cmd
     |-- gas_cli.go
 |-- db
