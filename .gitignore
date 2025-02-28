@@ -3,3 +3,4 @@
 *.db
 bootnode_data/
 bootnode.key
+bootnode.addr
