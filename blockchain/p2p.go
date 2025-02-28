@@ -73,21 +73,21 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Setup P2P host address
-	addr := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.P2PPort)
-	listenAddr, err := ma.NewMultiaddr(addr)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to create listen address: %w", err)
-	}
-
-	// Create libp2p host
-	host, err := libp2p.New(
-		libp2p.ListenAddrs(listenAddr),
+	// Setup P2P host options
+	opts := []libp2p.Option{
+		libp2p.ListenAddrStrings(
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.P2PPort),
+			fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", config.P2PPort),
+		),
 		libp2p.EnableRelay(),
 		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}),
 		libp2p.EnableHolePunching(),
-	)
+		libp2p.NATPortMap(),       // Enable NAT port mapping
+		libp2p.EnableNATService(), // Enable NAT service
+	}
+
+	// Create libp2p host
+	host, err := libp2p.New(opts...)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create host: %w", err)
@@ -100,28 +100,36 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 			remoteAddr := conn.RemoteMultiaddr()
 			log.Printf("✅ Connected to peer: %s", remotePeer.String())
 			log.Printf("   • Address: %s", remoteAddr)
+			log.Printf("   • Direction: %s", conn.Stat().Direction)
 		},
 		DisconnectedF: func(n network.Network, conn network.Conn) {
 			log.Printf("❌ Disconnected from peer: %s", conn.RemotePeer().String())
 		},
 	})
 
-	// If bootstrap nodes are provided, connect to them
+	// Connect to bootstrap nodes if provided
 	if len(config.BootstrapNodes) > 0 {
 		log.Printf("🔄 Connecting to bootstrap nodes:")
 		for _, addr := range config.BootstrapNodes {
 			log.Printf("   • Attempting to connect to: %s", addr)
+
+			// Parse multiaddr
 			maddr, err := ma.NewMultiaddr(addr)
 			if err != nil {
 				log.Printf("   ❌ Invalid bootstrap address: %s", err)
 				continue
 			}
 
+			// Extract peer info
 			peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
 			if err != nil {
 				log.Printf("   ❌ Failed to parse peer info: %s", err)
 				continue
 			}
+
+			// Connect with timeout
+			ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
 
 			if err := host.Connect(ctx, *peerInfo); err != nil {
 				log.Printf("   ❌ Failed to connect: %s", err)

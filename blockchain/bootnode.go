@@ -596,35 +596,29 @@ func (bn *BootstrapNode) collectMetrics() {
 
 // Start starts the bootstrap node
 func (bn *BootstrapNode) Start() error {
-	bn.mu.Lock()
-	defer bn.mu.Unlock()
+	log.Printf("\n🚀 Initializing Bootstrap Node")
+	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	if bn.started {
-		return fmt.Errorf("bootstrap node already started")
-	}
+	// Print node status periodically
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		for range ticker.C {
+			peers := bn.host.Network().Peers()
+			log.Printf("\n📊 Network Status Update:")
+			log.Printf("   • Connected Peers: %d", len(peers))
+			log.Printf("   • Active Connections: %d", len(bn.host.Network().Conns()))
+			for _, p := range peers {
+				conns := bn.host.Network().ConnsToPeer(p)
+				for _, c := range conns {
+					log.Printf("   • Peer: %s", p.String())
+					log.Printf("     ‣ Address: %s", c.RemoteMultiaddr())
+					log.Printf("     ‣ Direction: %s", c.Stat().Direction)
+				}
+			}
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		}
+	}()
 
-	// Generate identity if not exists
-	var err error
-	bn.identity, err = loadOrCreateIdentity(bn.config.DataDir)
-	if err != nil {
-		return fmt.Errorf("failed to create identity: %v", err)
-	}
-
-	// Create libp2p host
-	// In NewBootstrapNode function:
-
-	// Initialize peer store
-	bn.peerStore, err = NewPersistentPeerStore(filepath.Join(bn.dataDir, "peerstore.json"))
-	if err != nil {
-		return fmt.Errorf("failed to create peer store: %v", err)
-	}
-
-	// Set stream handlers
-	bn.host.SetStreamHandler(protocol.ID(BlockchainNamespace+"/discovery"), bn.handlePeerDiscovery)
-	bn.host.SetStreamHandler(protocol.ID(BlockchainNamespace+"/relay"), bn.handleRelay)
-	bn.host.SetStreamHandler(protocol.ID(BlockchainNamespace+"/status"), bn.handleStatus)
-
-	bn.started = true
 	return nil
 }
 
