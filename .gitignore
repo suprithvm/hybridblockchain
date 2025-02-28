@@ -3,3 +3,5 @@
 *.db
 bootnode_data/
 miner_data/
+bootnode.key
+bootnode.addr

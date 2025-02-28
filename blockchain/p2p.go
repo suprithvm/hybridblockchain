@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -79,6 +80,13 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
+	// If no bootstrap nodes specified, try to read from bootnode.addr file
+	if len(config.BootstrapNodes) == 0 {
+		if addr, err := os.ReadFile("bootnode.addr"); err == nil {
+			config.BootstrapNodes = []string{string(addr)}
+		}
+	}
+
 	// Setup P2P host options
 	opts := []libp2p.Option{
 		libp2p.ListenAddrStrings(
@@ -99,6 +107,14 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		return nil, fmt.Errorf("failed to create host: %w", err)
 	}
 
+	// Create the node instance first
+	n := &Node{
+		Host:   host,
+		config: config,
+		ctx:    ctx,
+		cancel: cancel,
+	}
+
 	// Add connection logging
 	host.Network().Notify(&network.NotifyBundle{
 		ConnectedF: func(n network.Network, conn network.Conn) {
@@ -116,33 +132,7 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 	// Connect to bootstrap nodes if provided
 	if len(config.BootstrapNodes) > 0 {
 		log.Printf("🔄 Connecting to bootstrap nodes:")
-		for _, addr := range config.BootstrapNodes {
-			log.Printf("   • Attempting to connect to: %s", addr)
-
-			// Parse multiaddr
-			maddr, err := ma.NewMultiaddr(addr)
-			if err != nil {
-				log.Printf("   ❌ Invalid bootstrap address: %s", err)
-				continue
-			}
-
-			// Extract peer info
-			peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
-			if err != nil {
-				log.Printf("   ❌ Failed to parse peer info: %s", err)
-				continue
-			}
-
-			// Connect with timeout
-			ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-
-			if err := host.Connect(ctx, *peerInfo); err != nil {
-				log.Printf("   ❌ Failed to connect: %s", err)
-				continue
-			}
-			log.Printf("   ✅ Successfully connected to bootstrap node: %s", addr)
-		}
+		n.connectToBootstrapNodes(ctx)
 	}
 
 	// Create DHT with appropriate mode
@@ -1277,4 +1267,16 @@ func (n *Node) connectToBootstrapNode(addr string) error {
 type Heartbeat struct {
 	Timestamp int64  `json:"timestamp"`
 	NodeID    string `json:"node_id"`
+}
+
+// Add this method
+func (n *Node) connectToBootstrapNodes(ctx context.Context) {
+	for _, addr := range n.config.BootstrapNodes {
+		log.Printf("   • Attempting to connect to: %s", addr)
+		if err := n.connectToBootstrapNode(addr); err != nil {
+			log.Printf("   ❌ Failed to connect: %s", err)
+			continue
+		}
+		log.Printf("   ✅ Successfully connected to bootstrap node: %s", addr)
+	}
 }
