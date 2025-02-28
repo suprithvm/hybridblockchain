@@ -34,7 +34,7 @@ const (
 	PeerDiscoveryInterval = 5 * time.Minute
 	DHTProviderInterval   = 10 * time.Minute
 
-	DefaultBootstrapAddress = "/ip4/<YOUR_IP>/tcp/50505/p2p/<YOUR_PEER_ID>"
+	DefaultBootstrapAddress = "/ip4/49.204.107.251/tcp/50505/p2p/<PEER_ID>"
 	DefaultListenPort       = 50505
 )
 

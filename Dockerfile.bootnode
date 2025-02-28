@@ -1,5 +1,5 @@
 # Start from golang base image
-FROM golang:1.21-alpine as builder
+FROM golang:1.23.3-alpine as builder
 
 # Add git and build essentials for dependencies
 RUN apk add --no-cache git gcc musl-dev
@@ -17,7 +17,7 @@ RUN go mod download
 COPY . .
 
 # Build the bootnode binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o blockchain
+RUN CGO_ENABLED=0 GOOS=linux go build -o bootnode
 
 # Start a new stage with minimal image
 FROM alpine:latest
@@ -31,9 +31,7 @@ WORKDIR /root/
 RUN mkdir -p /root/bootnode_data /root/keys /root/peerstore
 
 # Copy the binary from builder
-COPY --from=builder /app/blockchain .
-
-
+COPY --from=builder /app/bootnode /usr/local/bin/bootnode
 
 # Expose the default port for both TCP and UDP
 EXPOSE 50505/tcp
@@ -50,12 +48,10 @@ ENV NODE_ROLE=bootnode \
     ENABLE_PEER_EXCHANGE=true
 
 # Run the bootnode with proper configuration
-ENTRYPOINT ["./blockchain"]
-CMD ["--role", "bootnode", \
-     "--port", "50505", \
-     "--data-dir", "/root/bootnode_data", \
-     "--key-file", "/root/keys/node.key", \
-     "--peer-store", "/root/peerstore/peers.json", \
-     "--enable-nat", \
-     "--enable-metrics", \
-     "--enable-peer-exchange"] 
+ENTRYPOINT ["/usr/local/bin/bootnode"]
+CMD ["--role", "bootstrap", \
+     "--listen", ":50505", \
+     "--datadir", "/root/bootnode_data", \
+     "--network", "testnet", \
+     "--metrics", \
+     "--loglevel", "debug"] 

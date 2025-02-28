@@ -2,17 +2,21 @@ package blockchain
 
 import (
 	"fmt"
-	"net"
+	"log"
 	"strings"
 )
 
 // NodeConfig holds configuration for a blockchain node
 type NodeConfig struct {
+	Role               string
 	ListenPort         int
 	DataDir            string
+	Database           *DatabaseConfig
+	BootNodes          []string
+	EnableNAT          bool
+	NetworkID          string
 	IsBootstrap        bool
 	PublicIP           string
-	EnableNAT          bool
 	EnablePeerExchange bool
 }
 
@@ -76,6 +80,8 @@ type NetworkConfig struct {
 	P2PPort     int
 	RPCPort     int
 	NetworkPath string
+	// Add database configuration
+	Database *DatabaseConfig
 }
 
 // TURNConfig holds TURN server configuration
@@ -156,15 +162,11 @@ func (c *NetworkConfig) GetMultiaddr() string {
 }
 
 func (c *NetworkConfig) ValidateConfig() error {
-	// Validate listen host
-	if c.ListenHost != "0.0.0.0" {
-		if net.ParseIP(c.ListenHost) == nil {
-			return fmt.Errorf("invalid listen host: %s", c.ListenHost)
-		}
+	if c.P2PPort <= 0 {
+		return fmt.Errorf("invalid P2P port")
 	}
-	// Validate port
-	if c.ListenPort < 0 || (c.ListenPort > 65535) || (c.ListenPort > 0 && c.ListenPort < 1024) {
-		return fmt.Errorf("invalid port number: %d", c.ListenPort)
+	if c.Blockchain == nil {
+		return fmt.Errorf("blockchain not initialized")
 	}
 	return nil
 }
@@ -179,4 +181,24 @@ func isValidHostname(hostname string) bool {
 		}
 	}
 	return true
+}
+
+// DatabaseConfig holds database-specific configuration
+type DatabaseConfig struct {
+	Type         string
+	Path         string
+	CacheSize    uint64
+	MaxOpenFiles int
+	Compression  bool
+}
+
+func DefaultDatabaseConfig() *DatabaseConfig {
+	log.Printf("Creating default database config")
+	return &DatabaseConfig{
+		Type:         "leveldb",
+		Path:         "blockchain_data",
+		CacheSize:    256,
+		MaxOpenFiles: 64,
+		Compression:  true,
+	}
 }
