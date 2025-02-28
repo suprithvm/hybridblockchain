@@ -36,6 +36,9 @@ const (
 
 	DefaultBootstrapAddress = "/ip4/49.204.107.251/tcp/50505/p2p/<PEER_ID>"
 	DefaultListenPort       = 50505
+
+	// Add constant for heartbeat timeout
+	HeartbeatTimeout = 90 * time.Second // 3x HeartbeatInterval
 )
 
 // Store known bootstrap nodes
@@ -62,25 +65,27 @@ type BootstrapNodeConfig struct {
 
 // BootstrapNode represents a dedicated bootstrap node for the blockchain network
 type BootstrapNode struct {
-	host        host.Host
-	dht         *dht.IpfsDHT
-	routing     routing.Routing
-	ctx         context.Context
-	cancel      context.CancelFunc
-	peerStore   *PersistentPeerStore
-	config      *BootstrapNodeConfig
-	mu          sync.RWMutex
-	started     bool
-	listeners   []net.Listener
-	peerScores  map[peer.ID]*PeerScore
-	metrics     *NetworkMetrics
-	rateLimiter *RateLimiter
-	protocols   map[string]network.StreamHandler
-	peers       map[peer.ID]peer.AddrInfo
-	peersMutex  sync.RWMutex
-	dataDir     string
-	identity    crypto.PrivKey
-	startTime   time.Time
+	host          host.Host
+	dht           *dht.IpfsDHT
+	routing       routing.Routing
+	ctx           context.Context
+	cancel        context.CancelFunc
+	peerStore     *PersistentPeerStore
+	config        *BootstrapNodeConfig
+	mu            sync.RWMutex
+	started       bool
+	listeners     []net.Listener
+	peerScores    map[peer.ID]*PeerScore
+	metrics       *NetworkMetrics
+	rateLimiter   *RateLimiter
+	protocols     map[string]network.StreamHandler
+	peers         map[peer.ID]peer.AddrInfo
+	peersMutex    sync.RWMutex
+	dataDir       string
+	identity      crypto.PrivKey
+	startTime     time.Time
+	lastHeartbeat map[peer.ID]time.Time
+	heartbeatMu   sync.RWMutex
 }
 
 // PeerScore represents the scoring metrics for a peer
@@ -293,9 +298,10 @@ func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*Bootst
 				lastReset time.Time
 			}),
 		},
-		protocols: make(map[string]network.StreamHandler),
-		identity:  privKey,
-		startTime: time.Now(),
+		protocols:     make(map[string]network.StreamHandler),
+		identity:      privKey,
+		startTime:     time.Now(),
+		lastHeartbeat: make(map[peer.ID]time.Time),
 	}
 
 	// Initialize protocol handlers
@@ -322,6 +328,13 @@ func NewBootstrapNode(ctx context.Context, config *BootstrapNodeConfig) (*Bootst
 	log.Println(" Network is active and listening...")
 
 	log.Printf("✨ Bootstrap node initialization complete\n")
+
+	// Set up protocol handlers
+	host.SetStreamHandler(HeartbeatProtocolID, bn.handleHeartbeat)
+
+	// Start heartbeat monitor
+	go bn.monitorHeartbeats()
+
 	return bn, nil
 }
 
@@ -1169,4 +1182,76 @@ func (bn *BootstrapNode) getNetworkState() string {
 	default:
 		return "starting"
 	}
+}
+
+// Add new methods for heartbeat handling
+func (bn *BootstrapNode) handleHeartbeat(stream network.Stream) {
+	defer stream.Close()
+
+	var heartbeat Heartbeat
+	if err := json.NewDecoder(stream).Decode(&heartbeat); err != nil {
+		log.Printf("Error decoding heartbeat: %v", err)
+		return
+	}
+
+	peerID := stream.Conn().RemotePeer()
+	bn.heartbeatMu.Lock()
+	bn.lastHeartbeat[peerID] = time.Now()
+	bn.heartbeatMu.Unlock()
+
+	// Send acknowledgment
+	if err := json.NewEncoder(stream).Encode(Heartbeat{
+		Timestamp: time.Now().Unix(),
+		NodeID:    bn.host.ID().String(),
+	}); err != nil {
+		log.Printf("Error sending heartbeat ack: %v", err)
+	}
+}
+
+func (bn *BootstrapNode) monitorHeartbeats() {
+	ticker := time.NewTicker(HeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-bn.ctx.Done():
+			return
+		case <-ticker.C:
+			bn.checkPeerHeartbeats()
+		}
+	}
+}
+
+func (bn *BootstrapNode) checkPeerHeartbeats() {
+	bn.heartbeatMu.Lock()
+	defer bn.heartbeatMu.Unlock()
+
+	now := time.Now()
+	for peerID, lastBeat := range bn.lastHeartbeat {
+		if now.Sub(lastBeat) > HeartbeatTimeout {
+			log.Printf("⚠️ No heartbeat from peer %s for %v, considering disconnected",
+				peerID.String(), HeartbeatTimeout)
+			delete(bn.lastHeartbeat, peerID)
+
+			// Try to close the connection to trigger reconnection
+			if conn := bn.host.Network().ConnsToPeer(peerID); len(conn) > 0 {
+				for _, c := range conn {
+					c.Close()
+				}
+			}
+		}
+	}
+}
+
+// Add method to check peer health
+func (bn *BootstrapNode) IsPeerHealthy(peerID peer.ID) bool {
+	bn.heartbeatMu.RLock()
+	defer bn.heartbeatMu.RUnlock()
+
+	lastBeat, exists := bn.lastHeartbeat[peerID]
+	if !exists {
+		return false
+	}
+
+	return time.Since(lastBeat) <= HeartbeatTimeout
 }

@@ -63,12 +63,12 @@
     |-- node.key
     |-- nodedata
         |-- leveldb
-            |-- 000002.log
+            |-- 000010.log
             |-- CURRENT
             |-- CURRENT.bak
             |-- LOCK
             |-- LOG
-            |-- MANIFEST-000003
+            |-- MANIFEST-000011
 |-- cmd
     |-- gas_cli.go
 |-- db
@@ -76,8 +76,24 @@
 |-- Dockerfile.bootnode
 |-- go.md
 |-- go.mod
-|-- go.sum
 |-- main.go
+|-- miner_data
+    |-- chaindata
+        |-- leveldb
+            |-- 000004.log
+            |-- CURRENT
+            |-- CURRENT.bak
+            |-- LOCK
+            |-- LOG
+            |-- MANIFEST-000005
+    |-- nodedata
+        |-- leveldb
+            |-- 000004.log
+            |-- CURRENT
+            |-- CURRENT.bak
+            |-- LOCK
+            |-- LOG
+            |-- MANIFEST-000005
 |-- my_wallet.json
 |-- node_data
     |-- blockchain
@@ -110,3 +126,4 @@
 |-- save.txt
 |-- wallet
     |-- test_wallet.json
+allet.json

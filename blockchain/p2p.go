@@ -27,6 +27,9 @@ const (
 	BlockProtocolID       = "/blockchain/blocks/1.0.0"
 	TransactionProtocolID = "/blockchain/txs/1.0.0"
 	HeartbeatProtocolID   = "/blockchain/heartbeat/1.0.0"
+	HeartbeatInterval     = 30 * time.Second
+	ReconnectInterval     = 10 * time.Second
+	MaxReconnectAttempts  = 5
 )
 
 // blankValidator is a no-op validator for DHT records
@@ -37,26 +40,28 @@ func (v blankValidator) Select(_ string, _ [][]byte) (int, error) { return 0, ni
 
 // Node represents a blockchain network node
 type Node struct {
-	Host           host.Host
-	DHT            *dht.IpfsDHT
-	PeerManager    *PeerManager
-	Blockchain     *Blockchain
-	Mempool        *Mempool
-	UTXOSet        *UTXOPool
-	StakePool      *StakePool
-	config         *NetworkConfig
-	ctx            context.Context
-	cancel         context.CancelFunc
-	UTXOPool       *UTXOPool
-	isSyncing      bool
-	syncMu         sync.RWMutex
-	gasModel       *gas.GasModel
-	accountManager *AccountManager
-	P2PPort        int
-	RPCPort        int
-	NetworkPath    string
-	ChainID        uint64
-	NetworkID      string
+	Host            host.Host
+	DHT             *dht.IpfsDHT
+	PeerManager     *PeerManager
+	Blockchain      *Blockchain
+	Mempool         *Mempool
+	UTXOSet         *UTXOPool
+	StakePool       *StakePool
+	config          *NetworkConfig
+	ctx             context.Context
+	cancel          context.CancelFunc
+	keepAliveCtx    context.Context
+	keepAliveCancel context.CancelFunc
+	UTXOPool        *UTXOPool
+	isSyncing       bool
+	syncMu          sync.RWMutex
+	gasModel        *gas.GasModel
+	accountManager  *AccountManager
+	P2PPort         int
+	RPCPort         int
+	NetworkPath     string
+	ChainID         uint64
+	NetworkID       string
 }
 
 // Add getter method for gas model
@@ -67,6 +72,7 @@ func (n *Node) GetGasModel() *gas.GasModel {
 // NewNode creates a new blockchain node
 func NewNode(config *NetworkConfig) (*Node, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+	keepAliveCtx, keepAliveCancel := context.WithCancel(ctx)
 
 	if err := config.ValidateConfig(); err != nil {
 		cancel()
@@ -155,25 +161,33 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 	}
 
 	node := &Node{
-		Host:           host,
-		DHT:            dhtInstance,
-		PeerManager:    NewPeerManager(host),
-		StakePool:      NewStakePool(),
-		config:         config,
-		ctx:            ctx,
-		cancel:         cancel,
-		gasModel:       gas.NewGasModel(gas.MinGasPrice, gas.BaseGasLimit),
-		accountManager: NewAccountManager(config.Blockchain.GetDB()),
-		P2PPort:        config.P2PPort,
-		RPCPort:        config.RPCPort,
-		NetworkPath:    config.NetworkPath,
-		ChainID:        config.ChainID,
-		NetworkID:      config.NetworkID,
-		Blockchain:     config.Blockchain,
+		Host:            host,
+		DHT:             dhtInstance,
+		PeerManager:     NewPeerManager(host),
+		StakePool:       NewStakePool(),
+		config:          config,
+		ctx:             ctx,
+		cancel:          cancel,
+		keepAliveCtx:    keepAliveCtx,
+		keepAliveCancel: keepAliveCancel,
+		gasModel:        gas.NewGasModel(gas.MinGasPrice, gas.BaseGasLimit),
+		accountManager:  NewAccountManager(config.Blockchain.GetDB()),
+		P2PPort:         config.P2PPort,
+		RPCPort:         config.RPCPort,
+		NetworkPath:     config.NetworkPath,
+		ChainID:         config.ChainID,
+		NetworkID:       config.NetworkID,
+		Blockchain:      config.Blockchain,
 	}
 
 	// Now initialize mempool with the node reference
 	node.Mempool = NewMempool(node)
+
+	// Start keep-alive routine
+	go node.startKeepAlive()
+
+	// Start reconnection routine
+	go node.maintainConnections()
 
 	return node, nil
 }
@@ -1182,3 +1196,85 @@ func (n *Node) IsSyncing() bool {
 
 // Remove duplicated PeerManager-related code and types
 // All PeerManager-related code is now in peer_manager.go
+
+func (n *Node) startKeepAlive() {
+	ticker := time.NewTicker(HeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.keepAliveCtx.Done():
+			return
+		case <-ticker.C:
+			for _, peer := range n.Host.Network().Peers() {
+				if err := n.sendHeartbeat(peer); err != nil {
+					log.Printf("Failed to send heartbeat to peer %s: %v", peer.String(), err)
+				}
+			}
+		}
+	}
+}
+
+func (n *Node) sendHeartbeat(peerID peer.ID) error {
+	stream, err := n.Host.NewStream(n.ctx, peerID, HeartbeatProtocolID)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+
+	heartbeat := &Heartbeat{
+		Timestamp: time.Now().Unix(),
+		NodeID:    n.Host.ID().String(),
+	}
+
+	return json.NewEncoder(stream).Encode(heartbeat)
+}
+
+func (n *Node) maintainConnections() {
+	ticker := time.NewTicker(ReconnectInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			if len(n.Host.Network().Peers()) == 0 {
+				log.Printf("No peers connected, attempting to reconnect to bootstrap nodes")
+				for _, addr := range n.config.BootstrapNodes {
+					for attempt := 0; attempt < MaxReconnectAttempts; attempt++ {
+						if err := n.connectToBootstrapNode(addr); err == nil {
+							break
+						}
+						time.Sleep(time.Second * time.Duration(attempt+1))
+					}
+				}
+			}
+		}
+	}
+}
+
+func (n *Node) connectToBootstrapNode(addr string) error {
+	maddr, err := ma.NewMultiaddr(addr)
+	if err != nil {
+		return fmt.Errorf("invalid bootstrap address: %v", err)
+	}
+
+	peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+	if err != nil {
+		return fmt.Errorf("invalid peer info: %v", err)
+	}
+
+	if err := n.Host.Connect(n.ctx, *peerInfo); err != nil {
+		return fmt.Errorf("failed to connect: %v", err)
+	}
+
+	log.Printf("Successfully connected to bootstrap node: %s", addr)
+	return nil
+}
+
+// Add Heartbeat struct
+type Heartbeat struct {
+	Timestamp int64  `json:"timestamp"`
+	NodeID    string `json:"node_id"`
+}
