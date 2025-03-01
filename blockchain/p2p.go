@@ -14,6 +14,7 @@ import (
 
 	"blockchain-core/blockchain/gas"
 
+	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -25,13 +26,25 @@ import (
 
 // Protocol IDs
 const (
-	BlockProtocolID       = "/blockchain/blocks/1.0.0"
-	TransactionProtocolID = "/blockchain/txs/1.0.0"
-	HeartbeatProtocolID   = "/blockchain/heartbeat/1.0.0"
-	HeartbeatInterval     = 30 * time.Second
-	ReconnectInterval     = 10 * time.Second
-	MaxReconnectAttempts  = 5
+	BlockProtocolID         = "/blockchain/blocks/1.0.0"
+	TransactionProtocolID   = "/blockchain/txs/1.0.0"
+	HeartbeatProtocolID     = "/blockchain/heartbeat/1.0.0"
+	HeartbeatInterval       = 30 * time.Second
+	ReconnectInterval       = 10 * time.Second
+	MaxReconnectAttempts    = 5
+	ConnectionRetryInterval = 30 * time.Second
+	MaxConnectionRetries    = 10
+	WalletSetupTimeout      = 5 * time.Minute
 )
+
+// NodeOptions contains options for creating a node
+type NodeOptions struct {
+	ListenAddr     string
+	BootstrapNodes []string
+	NetworkID      string
+	NodeID         string
+	WalletAddress  string
+}
 
 // blankValidator is a no-op validator for DHT records
 type blankValidator struct{}
@@ -63,6 +76,9 @@ type Node struct {
 	NetworkPath     string
 	ChainID         uint64
 	NetworkID       string
+	wallet          *Wallet
+	isRunning       bool
+	runningMu       sync.RWMutex
 }
 
 // Add getter method for gas model
@@ -168,6 +184,7 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		ChainID:         config.ChainID,
 		NetworkID:       config.NetworkID,
 		Blockchain:      config.Blockchain,
+		wallet:          config.Wallet,
 	}
 
 	// Now initialize mempool with the node reference
@@ -1221,7 +1238,7 @@ func (n *Node) sendHeartbeat(peerID peer.ID) error {
 }
 
 func (n *Node) maintainConnections() {
-	ticker := time.NewTicker(ReconnectInterval)
+	ticker := time.NewTicker(ConnectionRetryInterval)
 	defer ticker.Stop()
 
 	for {
@@ -1229,14 +1246,19 @@ func (n *Node) maintainConnections() {
 		case <-n.ctx.Done():
 			return
 		case <-ticker.C:
-			if len(n.Host.Network().Peers()) == 0 {
-				log.Printf("No peers connected, attempting to reconnect to bootstrap nodes")
-				for _, addr := range n.config.BootstrapNodes {
-					for attempt := 0; attempt < MaxReconnectAttempts; attempt++ {
-						if err := n.connectToBootstrapNode(addr); err == nil {
-							break
-						}
-						time.Sleep(time.Second * time.Duration(attempt+1))
+			peers := n.Host.Network().Peers()
+			if len(peers) == 0 {
+				log.Printf("🔄 No peers connected, attempting to reconnect...")
+				n.connectToBootstrapNodes(n.ctx)
+			} else {
+				// Log current connections
+				log.Printf("📊 Current connections: %d peers", len(peers))
+				for _, p := range peers {
+					conns := n.Host.Network().ConnsToPeer(p)
+					for _, conn := range conns {
+						log.Printf("   • Peer: %s", p.String())
+						log.Printf("     ‣ Address: %s", conn.RemoteMultiaddr())
+						log.Printf("     ‣ Direction: %s", conn.Stat().Direction)
 					}
 				}
 			}
@@ -1278,5 +1300,129 @@ func (n *Node) connectToBootstrapNodes(ctx context.Context) {
 			continue
 		}
 		log.Printf("   ✅ Successfully connected to bootstrap node: %s", addr)
+	}
+}
+
+// Add method to start the node
+func (n *Node) Start() error {
+	n.runningMu.Lock()
+	if n.isRunning {
+		n.runningMu.Unlock()
+		return fmt.Errorf("node already running")
+	}
+	n.isRunning = true
+	n.runningMu.Unlock()
+
+	// Start connection maintenance
+	go n.maintainConnections()
+
+	// Start heartbeat
+	go n.startKeepAlive()
+
+	// Start peer discovery
+	go n.discoverPeers()
+
+	return nil
+}
+
+func (n *Node) discoverPeers() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			if n.DHT != nil {
+				ctx, cancel := context.WithTimeout(n.ctx, time.Second*30)
+				// Create a deterministic CID for our blockchain network
+				h := sha256.New()
+				h.Write([]byte(n.NetworkID))
+				mh := h.Sum(nil)
+				c := cid.NewCidV1(cid.Raw, mh)
+
+				peerChan, err := n.DHT.FindProviders(ctx, c)
+				cancel()
+				if err != nil {
+					log.Printf("⚠️ Failed to find providers: %v", err)
+					continue
+				}
+
+				for i := range peerChan {
+					addrInfo := peerChan[i]
+					if addrInfo.ID == n.Host.ID() {
+						continue // Skip self
+					}
+					if err := n.Host.Connect(n.ctx, addrInfo); err != nil {
+						log.Printf("⚠️ Failed to connect to discovered peer %s: %v", addrInfo.ID.String(), err)
+					}
+				}
+			}
+		}
+	}
+}
+
+// RegisterBlockchainHandlers registers blockchain handlers for the node
+func (n *Node) RegisterBlockchainHandlers(bc *Blockchain) error {
+	log.Printf("📝 Registering blockchain handlers for node")
+
+	// The blockchain is already set in the node constructor, but we can update it here if needed
+	n.Blockchain = bc
+
+	// Set up protocol handlers for blockchain operations
+	n.Host.SetStreamHandler("/blockchain/blocks/1.0.0", n.handleBlockStream)
+	n.Host.SetStreamHandler("/blockchain/transactions/1.0.0", n.handleTransactionStream)
+	n.Host.SetStreamHandler("/blockchain/sync/1.0.0", n.handleSyncRequest)
+
+	// Advertise our node as a provider for this blockchain network
+	h := sha256.New()
+	h.Write([]byte(n.NetworkID))
+	mh := h.Sum(nil)
+	c := cid.NewCidV1(cid.Raw, mh)
+
+	// Provide on the DHT
+	if n.DHT != nil {
+		if err := n.DHT.Provide(n.ctx, c, true); err != nil {
+			log.Printf("⚠️ Failed to announce as provider: %v", err)
+		} else {
+			log.Printf("✅ Successfully announced as blockchain provider on the DHT")
+		}
+	}
+
+	return nil
+}
+
+// NewNodeFromOptions creates a new node from NodeOptions
+func NewNodeFromOptions(opts NodeOptions) (*Node, error) {
+	// Convert NodeOptions to NetworkConfig
+	config := &NetworkConfig{
+		P2PPort:        extractPort(opts.ListenAddr),
+		BootstrapNodes: opts.BootstrapNodes,
+		NetworkID:      opts.NetworkID,
+		ChainID:        parseChainID(opts.NetworkID),
+		NetworkPath:    opts.NodeID,
+		DHTServerMode:  true,
+	}
+
+	return NewNode(config)
+}
+
+// Helper function to extract port from address string
+func extractPort(addr string) int {
+	port := 0
+	fmt.Sscanf(addr, ":%d", &port)
+	return port
+}
+
+// Helper function to parse chain ID from network ID
+func parseChainID(networkID string) uint64 {
+	switch networkID {
+	case "mainnet":
+		return 1
+	case "testnet":
+		return 2
+	default:
+		return 3 // devnet
 	}
 }

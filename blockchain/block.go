@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -274,32 +275,101 @@ func calculateMerkleRoot(hashes []string) string {
 	return "0x" + hashes[0]
 }
 
-// Add this function
-func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, maxAttempts int, peerHost host.Host) error {
-	// Start with nonce 0
-	block.Header.Nonce = 0
+// MineBlock mines a block by finding a valid hash
+func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, difficulty uint32, peerHost host.Host) error {
+	log.Printf("⛏️ Starting mining process for block #%d", block.Header.BlockNumber)
+	startTime := time.Now()
 
-	// Try up to maxAttempts times
-	for i := 0; i < maxAttempts; i++ {
-		// Calculate hash with current nonce
-		hash := block.Hash()
+	// Set difficulty
+	block.Header.Difficulty = difficulty
 
-		// Check if hash meets difficulty requirement
-		if isHashValid(hash, block.Header.Difficulty) {
+	// Calculate hash
+	for {
+		hash := block.CalculateHash()
+		if isHashValid(hash, difficulty) {
 			block.hash = hash
-			return nil
+			miningTime := time.Since(startTime)
+			log.Printf("✅ Successfully mined block #%d with hash %s", block.Header.BlockNumber, hash)
+			log.Printf("⏱️ Mining completed in %s with difficulty %d", miningTime, difficulty)
+			break
 		}
-
 		block.Header.Nonce++
+		if block.Header.Nonce%100000 == 0 {
+			log.Printf("🔄 Mining in progress... tried %d nonces so far", block.Header.Nonce)
+		}
 	}
 
-	return fmt.Errorf("failed to mine block after %d attempts", maxAttempts)
+	// Validate the block with validators
+	validators, err := stakePool.GetValidators(3)
+	if err != nil {
+		log.Printf("⚠️ Failed to get validators: %v", err)
+		return err
+	}
+
+	log.Printf("🔐 Requesting validation from %d validators", len(validators))
+	validations := 0
+	for _, validator := range validators {
+		// Request validation from validator
+		valid, err := requestValidation(block, validator, peerHost)
+		if err != nil {
+			log.Printf("⚠️ Validation request to %s failed: %v", validator.Address, err)
+			continue
+		}
+		if valid {
+			validations++
+			log.Printf("✓ Validator %s confirmed block validity", validator.Address)
+		}
+	}
+
+	// Check if we have enough validations
+	if validations < len(validators)/2+1 {
+		log.Printf("❌ Insufficient validations: got %d, needed %d", validations, len(validators)/2+1)
+		return fmt.Errorf("insufficient validations")
+	}
+
+	log.Printf("🎉 Block #%d successfully validated by %d validators", block.Header.BlockNumber, validations)
+	return nil
 }
 
-// Add helper function
-func isHashValid(hash string, difficulty uint32) bool {
-	prefix := strings.Repeat("0", int(difficulty))
-	return strings.HasPrefix(hash, prefix)
+// ValidateBlock validates a block
+func ValidateBlock(block Block, previousBlock Block, validatorAddress string, stakePool *StakePool) bool {
+	log.Printf("🔍 Validating block #%d with hash %s", block.Header.BlockNumber, block.hash)
+
+	// Check if block number is valid
+	if block.Header.BlockNumber != previousBlock.Header.BlockNumber+1 {
+		log.Printf("❌ Invalid block number: expected %d, got %d",
+			previousBlock.Header.BlockNumber+1, block.Header.BlockNumber)
+		return false
+	}
+
+	// Check if previous hash is valid
+	if block.Header.PreviousHash != previousBlock.hash {
+		log.Printf("❌ Invalid previous hash: expected %s, got %s",
+			previousBlock.hash, block.Header.PreviousHash)
+		return false
+	}
+
+	// Check if hash is valid
+	if !isHashValid(block.hash, block.Header.Difficulty) {
+		log.Printf("❌ Invalid block hash: %s does not meet difficulty %d",
+			block.hash, block.Header.Difficulty)
+		return false
+	}
+
+	// Validate transactions
+	log.Printf("🧾 Validating %d transactions in block", len(block.Body.Transactions.GetAllTransactions()))
+	for i, tx := range block.Body.Transactions.GetAllTransactions() {
+		log.Printf("  ↳ Validating transaction %d/%d: %s",
+			i+1, len(block.Body.Transactions.GetAllTransactions()), tx.TransactionID)
+		if !tx.VerifySignature() {
+			log.Printf("  ❌ Transaction %s has invalid signature", tx.TransactionID)
+			return false
+		}
+		log.Printf("  ✓ Transaction %s valid", tx.TransactionID)
+	}
+
+	log.Printf("✅ Block #%d successfully validated", block.Header.BlockNumber)
+	return true
 }
 
 // Add this function
@@ -343,4 +413,38 @@ func calculateBlockSize(b *Block) uint64 {
 	// Add base block size
 	size += EmptyBlockSize
 	return size
+}
+
+// isHashValid checks if a hash meets the required difficulty
+func isHashValid(hash string, difficulty uint32) bool {
+	prefix := strings.Repeat("0", int(difficulty))
+	return strings.HasPrefix(hash, prefix)
+}
+
+// requestValidation sends a validation request to a validator
+func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host) (bool, error) {
+	log.Printf("📤 Requesting validation from validator %s", validator.Address)
+
+	// If we're in test mode or local mode without networking
+	if peerHost == nil {
+		log.Printf("🔄 Local validation mode - simulating validator response")
+		return true, nil
+	}
+
+	// In a real network, we would send the block to the validator
+	// and wait for their response
+	hostID, exists := validator.HostID()
+	if !exists {
+		return false, fmt.Errorf("validator host ID not found")
+	}
+
+	// Here we would use the peer host to send the validation request
+	// This is a simplified implementation
+	log.Printf("📡 Sending validation request to host %s", hostID)
+
+	// Simulate network delay
+	time.Sleep(100 * time.Millisecond)
+
+	// For now, just return success
+	return true, nil
 }

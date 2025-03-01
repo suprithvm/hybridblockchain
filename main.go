@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"blockchain-core/blockchain"
 	"blockchain-core/blockchain/db"
@@ -150,6 +152,12 @@ func runBootstrapNode(config *NodeConfig) {
 func runMinerNode(config *NodeConfig, store *blockchain.Store) {
 	log.Printf("⛏️ Starting Miner Node")
 
+	// Handle wallet setup
+	wallet, err := setupWallet(config.DataDir)
+	if err != nil {
+		log.Fatalf("❌ Failed to setup wallet: %v", err)
+	}
+
 	// Initialize blockchain with store's database
 	dbConfig := &blockchain.DatabaseConfig{
 		Type:         "leveldb",
@@ -164,23 +172,38 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) {
 
 	// Create network configuration
 	networkConfig := &blockchain.NetworkConfig{
-		P2PPort:     extractPort(config.ListenAddr),
-		RPCPort:     extractPort(config.RPCAddr),
-		NetworkPath: filepath.Join(config.DataDir, "chaindata"),
-		ChainID:     parseChainID(config.NetworkID),
-		NetworkID:   config.NetworkID,
-		Blockchain:  bc,
+		P2PPort:        extractPort(config.ListenAddr),
+		RPCPort:        extractPort(config.RPCAddr),
+		BootstrapNodes: config.BootstrapNodes,
+		NetworkID:      config.NetworkID,
+		ChainID:        parseChainID(config.NetworkID),
+		NetworkPath:    config.DataDir,
+		Blockchain:     bc,
+		Wallet:         wallet,
+		DHTServerMode:  true,
 	}
 
-	// Create the node
+	// Create node
 	node, err := blockchain.NewNode(networkConfig)
 	if err != nil {
 		log.Fatalf("❌ Failed to create node: %v", err)
 	}
-	log.Printf("✅ Node created successfully", node)
+
+	// Start the node
+	if err := node.Start(); err != nil {
+		log.Fatalf("❌ Failed to start node: %v", err)
+	}
 
 	// Start sync service
 	startSyncService(config, bc, store)
+
+	// Use the node variable
+	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
+
+	// Register blockchain handlers
+	if err := node.RegisterBlockchainHandlers(bc); err != nil {
+		log.Printf("⚠️ Warning: Failed to register blockchain handlers: %v", err)
+	}
 }
 
 func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
@@ -197,9 +220,9 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 	// Initialize validator with configuration
 	validatorConfig := &blockchain.ValidatorConfig{
 		Stake:        config.ValidatorStake,
-		MinStake:     00,   // Example minimum stake
-		RewardRate:   0.05, // 5% annual return
-		SlashingRate: 0.10, // 10% slashing for misbehavior
+		MinStake:     float64(config.MinerThreads),
+		RewardRate:   config.ValidatorStake * 0.05,
+		SlashingRate: config.ValidatorStake * 0.10,
 	}
 
 	validator, err := blockchain.NewValidator(bc, validatorConfig)
@@ -359,4 +382,186 @@ func parseChainID(networkID string) uint64 {
 	default:
 		return 3 // devnet
 	}
+}
+
+func setupWallet(dataDir string) (*blockchain.Wallet, error) {
+	walletPath := filepath.Join(dataDir, "wallet.json")
+
+	// Check if wallet exists
+	if _, err := os.Stat(walletPath); err == nil {
+		// Load existing wallet
+		return blockchain.LoadWalletFromFile(walletPath)
+	}
+
+	// Create new wallet
+	wallet, err := blockchain.NewWallet()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create wallet: %v", err)
+	}
+
+	// Save wallet
+	if err := wallet.SaveToFile(walletPath); err != nil {
+		return nil, fmt.Errorf("failed to save wallet: %v", err)
+	}
+
+	return wallet, nil
+}
+
+// Initialize miner node
+func initMinerNode(config *NodeConfig) error {
+	log.Printf("🏗️ Initializing miner node with ID: %s", config.DataDir)
+
+	// Load or create wallet
+	wallet, err := setupWallet(config.DataDir)
+	if err != nil {
+		return err
+	}
+	log.Printf("💼 Miner wallet initialized with address: %s", wallet.Address)
+
+	// Initialize blockchain
+	log.Printf("⛓️ Initializing blockchain database at %s", config.DataDir)
+	bc, err := blockchain.NewBlockchain(config.DataDir)
+	if err != nil {
+		return err
+	}
+	log.Printf("✅ Blockchain initialized - current height: %d", bc.GetHeight())
+
+	// Initialize P2P network
+	log.Printf("🌐 Setting up P2P network on port %d", extractPort(config.ListenAddr))
+	node, err := initP2PNetwork(config, bc, wallet)
+	fmt.Println("node", node)
+	if err != nil {
+		return err
+	}
+	log.Printf("🔌 P2P network initialized - connecting to bootstrap nodes")
+
+	// Connect to bootstrap nodes
+	if len(config.BootstrapNodes) > 0 {
+		log.Printf("🔄 Connecting to %d bootstrap nodes", len(config.BootstrapNodes))
+		for _, addr := range config.BootstrapNodes {
+			log.Printf("  ↳ Attempting connection to %s", addr)
+			// Connection logic
+		}
+	}
+
+	// Start mining
+	log.Printf("⛏️ Starting mining process with address %s", wallet.Address)
+	go startMining(bc, wallet.Address)
+	log.Printf("✨ Miner node fully initialized and operational")
+
+	return nil
+}
+
+// Start mining process
+func startMining(bc *blockchain.Blockchain, minerAddress string) {
+	log.Printf("⚒️ Mining service activated for address %s", minerAddress)
+
+	for {
+		log.Printf("🔄 Starting new mining cycle")
+		block, err := bc.MineBlock(minerAddress)
+		if err != nil {
+			log.Printf("❌ Mining error: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		log.Printf("💎 Successfully mined block #%d with %d transactions",
+			block.Header.BlockNumber, len(block.Body.Transactions.GetAllTransactions()))
+		log.Printf("�� Block stats: Hash: %s, Nonce: %d",
+			block.Hash(), block.Header.Nonce)
+
+		// Short pause between mining cycles
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// Initialize validator node
+func initValidatorNode(config *NodeConfig) error {
+	log.Printf("🏗️ Initializing validator node with ID: %s", config.DataDir)
+
+	// Load or create wallet
+	wallet, err := setupWallet(config.DataDir)
+	if err != nil {
+		return err
+	}
+	log.Printf("💼 Validator wallet initialized with address: %s", wallet.Address)
+
+	// Initialize blockchain
+	log.Printf("⛓️ Initializing blockchain database at %s", config.DataDir)
+	bc, err := blockchain.NewBlockchain(config.DataDir)
+	if err != nil {
+		return err
+	}
+	log.Printf("✅ Blockchain initialized - current height: %d", bc.GetHeight())
+
+	// Initialize P2P network
+	log.Printf("🌐 Setting up P2P network on port %d", extractPort(config.ListenAddr))
+	node, err := initP2PNetwork(config, bc, wallet)
+	fmt.Println("node", node)
+	if err != nil {
+		return err
+	}
+	log.Printf("🔌 P2P network initialized - connecting to bootstrap nodes")
+
+	// Create validator config
+	validatorConfig := &blockchain.ValidatorConfig{
+		Stake:        config.ValidatorStake,
+		MinStake:     float64(config.MinerThreads),
+		RewardRate:   config.ValidatorStake * 0.05,
+		SlashingRate: config.ValidatorStake * 0.10,
+	}
+	log.Printf("🔐 Creating validator with stake: %.4f tokens", config.ValidatorStake)
+
+	// Initialize validator
+	validator, err := blockchain.NewValidator(bc, validatorConfig)
+	if err != nil {
+		return err
+	}
+
+	// Start validation
+	log.Printf("🚀 Starting validation process")
+	if err := validator.Start(); err != nil {
+		return err
+	}
+	log.Printf("✨ Validator node fully initialized and operational")
+
+	return nil
+}
+
+// initP2PNetwork initializes the P2P network for the node
+func initP2PNetwork(config *NodeConfig, bc *blockchain.Blockchain, wallet *blockchain.Wallet) (*blockchain.Node, error) {
+	log.Printf("🔌 Initializing P2P network on %s", config.ListenAddr)
+
+	// Create network configuration
+	networkConfig := &blockchain.NetworkConfig{
+		P2PPort:        extractPort(config.ListenAddr),
+		BootstrapNodes: config.BootstrapNodes,
+		NetworkID:      config.NetworkID,
+		ChainID:        parseChainID(config.NetworkID),
+		NetworkPath:    config.DataDir,
+		Blockchain:     bc,
+		Wallet:         wallet,
+		DHTServerMode:  true,
+	}
+
+	// Create and start P2P node
+	node, err := blockchain.NewNode(networkConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create P2P node: %v", err)
+	}
+
+	// Start the node
+	if err := node.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start P2P node: %v", err)
+	}
+
+	// Connect to bootstrap nodes
+	if len(config.BootstrapNodes) > 0 {
+		log.Printf("🔄 Connecting to %d bootstrap nodes", len(config.BootstrapNodes))
+		if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
+			log.Printf("⚠️ Warning: Some bootstrap connections failed: %v", err)
+		}
+	}
+
+	return node, nil
 }

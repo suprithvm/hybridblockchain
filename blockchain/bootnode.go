@@ -1071,7 +1071,7 @@ func (bn *BootstrapNode) setupNAT() error {
 // Helper function to get public IP
 func getPublicIP() (string, error) {
 	var publicIP string
-	
+
 	done := make(chan bool)
 
 	// Try multiple STUN servers until we get an IPv4

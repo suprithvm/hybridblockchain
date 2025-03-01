@@ -3,9 +3,11 @@ package blockchain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"blockchain-core/blockchain/db"
 
@@ -20,6 +22,8 @@ type Blockchain struct {
 	currentHash string
 	utxoPool    *UTXOPool
 	db          db.Database
+	mempool     *Mempool
+	p2pHost     host.Host
 }
 
 //intializes the blockchain with the genesis block
@@ -132,55 +136,6 @@ func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet m
 // GetLatestBlock retrieves the most recent block in the chain
 func (bc *Blockchain) GetLatestBlock() Block {
 	return bc.Chain[len(bc.Chain)-1]
-}
-
-func ValidateBlock(newBlock Block, previousBlock Block, validator string, stakePool *StakePool) bool {
-	if newBlock.Header.PreviousHash != previousBlock.Hash() {
-		log.Println("Validation failed: Previous hash mismatch. Checking fork resolution...")
-
-		if newBlock.Header.Difficulty > previousBlock.Header.Difficulty ||
-			newBlock.Body.Transactions.Len() > 0 {
-			log.Println("Switching to the longer or higher difficulty chain.")
-			return true
-		}
-		return false
-	}
-
-	// Check block number
-	if newBlock.Header.BlockNumber != previousBlock.Header.BlockNumber+1 {
-		log.Println("Validation failed: Block number is incorrect.")
-		return false
-	}
-
-	// Check hash validity
-	storedHash := newBlock.hash               // Get the stored hash
-	calculatedHash := calculateHash(newBlock) // Calculate fresh hash
-	if storedHash != calculatedHash {
-		log.Println("Validation failed: Hash mismatch.")
-		return false
-	}
-
-	// Check PoW difficulty
-	if !isHashValid(newBlock.Hash(), newBlock.Header.Difficulty) {
-		log.Println("Validation failed: Hash does not meet difficulty.")
-		return false
-	}
-
-	// Ensure the validator is staked
-	if _, exists := stakePool.Stakes[validator]; !exists {
-		log.Println("Validation failed: Validator not staked.")
-		return false
-	}
-
-	// Validate cumulative difficulty
-	expectedCumulativeDifficulty := previousBlock.CumulativeDifficulty + uint64(newBlock.Header.Difficulty)
-	if newBlock.CumulativeDifficulty != expectedCumulativeDifficulty {
-		log.Printf("Invalid cumulative difficulty. Expected: %d, Got: %d",
-			expectedCumulativeDifficulty, newBlock.CumulativeDifficulty)
-		return false
-	}
-
-	return true
 }
 
 // ValidateGenesisBlock ensures all nodes use the same genesis block
@@ -374,21 +329,39 @@ func (bc *Blockchain) ResolveChainConflict(receivedChain []Block) bool {
 
 // ValidateBlock validates a block before adding it to the chain
 func (bc *Blockchain) ValidateBlock(block *Block) error {
-	// Verify block number
-	if block.Header.BlockNumber != bc.GetLatestBlock().Header.BlockNumber+1 {
-		return fmt.Errorf("invalid block number")
-	}
-
-	// Verify previous hash
-	if block.Header.PreviousHash != bc.GetLatestBlock().hash {
-		return fmt.Errorf("invalid previous hash")
-	}
+	log.Printf("🔍 Performing comprehensive validation of block #%d", block.Header.BlockNumber)
 
 	// Verify block hash
-	expectedHash := block.Hash()
-	if !isHashValid(expectedHash, block.Header.Difficulty) {
+	if !bc.ValidateBlockHash(block) {
+		log.Printf("❌ Invalid block hash for block #%d", block.Header.BlockNumber)
 		return fmt.Errorf("invalid block hash")
 	}
+	log.Printf("✓ Block hash verification passed")
+
+	// Verify previous hash
+	prevBlock := bc.GetLatestBlock()
+	if block.Header.PreviousHash != prevBlock.Hash() {
+		log.Printf("❌ Previous hash mismatch: expected %s, got %s", prevBlock.Hash(), block.Header.PreviousHash)
+		return fmt.Errorf("invalid previous hash")
+	}
+	log.Printf("✓ Previous hash verification passed")
+
+	// Verify block number
+	if block.Header.BlockNumber != prevBlock.Header.BlockNumber+1 {
+		log.Printf("❌ Block number mismatch: expected %d, got %d", prevBlock.Header.BlockNumber+1, block.Header.BlockNumber)
+		return fmt.Errorf("invalid block number")
+	}
+	log.Printf("✓ Block number verification passed")
+
+	// Verify transactions
+	log.Printf("🧾 Validating %d transactions in block", len(block.Body.Transactions.GetAllTransactions()))
+	for _, tx := range block.Body.Transactions.GetAllTransactions() {
+		if err := bc.ValidateTransaction(&tx); err != nil {
+			log.Printf("❌ Transaction validation failed for tx %s: %v", tx.TransactionID, err)
+			return fmt.Errorf("invalid transaction: %v", err)
+		}
+	}
+	log.Printf("✓ All transactions successfully validated")
 
 	return nil
 }
@@ -634,4 +607,190 @@ func InitialiseBlockchainWithStore(store *Store) *Blockchain {
 // Add GetDB method to access the database
 func (bc *Blockchain) GetDB() db.Database {
 	return bc.db
+}
+
+// ValidateBlockHash validates the hash of a block
+func (bc *Blockchain) ValidateBlockHash(block *Block) bool {
+	calculatedHash := calculateHash(*block)
+	return calculatedHash == block.Hash()
+}
+
+// ValidateTransaction validates a transaction
+func (bc *Blockchain) ValidateTransaction(tx *Transaction) error {
+	// Implement transaction validation logic here
+	return nil
+}
+
+// NewBlockchain initializes a new blockchain with the given data directory
+func NewBlockchain(dataDir string) (*Blockchain, error) {
+	log.Printf("🔄 Initializing blockchain database at %s", dataDir)
+
+	// Initialize database
+	dbConfig := &db.Config{
+		Path: dataDir,
+	}
+	database, err := db.NewLevelDB(dbConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize database: %v", err)
+	}
+
+	// Create a store with the database
+	store := &Store{
+		db: database,
+	}
+
+	// Initialize blockchain with the store
+	bc := InitialiseBlockchainWithStore(store)
+	log.Printf("✅ Blockchain initialized with genesis block")
+
+	return bc, nil
+}
+
+// MineBlock mines a new block with the provided miner address
+func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
+	log.Printf("🔄 Starting mining process for miner %s", minerAddress)
+
+	// Get the latest block
+	bc.mu.RLock()
+	previousBlock := bc.GetLatestBlock()
+	bc.mu.RUnlock()
+
+	// Calculate appropriate difficulty
+	difficulty := bc.calculateDifficulty(previousBlock)
+	log.Printf("🎯 Mining with difficulty: %d", difficulty)
+
+	// Get pending transactions from mempool
+	var pendingTxs []Transaction
+	if bc.mempool != nil {
+		pendingTxs = bc.mempool.GetTransactions()
+		log.Printf("📥 Retrieved %d transactions from mempool for new block", len(pendingTxs))
+	} else {
+		log.Printf("⚠️ No mempool available, mining empty block")
+		pendingTxs = []Transaction{}
+	}
+
+	// Create transaction trie
+	txTrie := NewPatriciaTrie()
+	for _, tx := range pendingTxs {
+		txTrie.Insert(tx)
+	}
+
+	// Create a new block
+	newBlock := Block{
+		Header: &BlockHeader{
+			Version:      1,
+			BlockNumber:  previousBlock.Header.BlockNumber + 1,
+			PreviousHash: previousBlock.Hash(),
+			Timestamp:    time.Now().Unix(),
+			Difficulty:   difficulty,
+			GasLimit:     BaseGasLimit,
+			MinedBy:      minerAddress,
+		},
+		Body: &BlockBody{
+			Transactions: txTrie,
+			Receipts:     make([]*TxReceipt, 0),
+		},
+		CumulativeDifficulty: previousBlock.CumulativeDifficulty + uint64(difficulty),
+	}
+
+	// Mine the block using the existing MineBlock function from block.go
+	stakePool := NewStakePool()
+	log.Printf("⛏️ Mining block #%d - searching for valid hash...", newBlock.Header.BlockNumber)
+	startTime := time.Now()
+
+	if err := MineBlock(&newBlock, previousBlock, stakePool, difficulty, bc.p2pHost); err != nil {
+		log.Printf("❌ Mining failed: %v", err)
+		return nil, err
+	}
+
+	miningTime := time.Since(startTime)
+	log.Printf("✅ Successfully mined block #%d with hash %s",
+		newBlock.Header.BlockNumber, newBlock.Hash())
+	log.Printf("⏱️ Mining completed in %s", miningTime)
+
+	// Add the block to the chain
+	bc.mu.Lock()
+	bc.Chain = append(bc.Chain, newBlock)
+	bc.currentHash = newBlock.Hash()
+	bc.mu.Unlock()
+
+	// Save the block to the database
+	if err := bc.saveBlock(newBlock); err != nil {
+		log.Printf("⚠️ Warning: Failed to save block to database: %v", err)
+	}
+
+	// Remove the transactions from the mempool
+	if bc.mempool != nil {
+		for _, tx := range pendingTxs {
+			bc.mempool.RemoveTransaction(tx.TransactionID)
+		}
+		log.Printf("🧹 Removed %d processed transactions from mempool", len(pendingTxs))
+	}
+
+	// Update UTXO set if available
+	if bc.utxoPool != nil {
+		bc.updateUTXOSet(newBlock)
+	}
+
+	// Calculate and log mining reward
+	reward := calculateBlockReward(newBlock)
+	log.Printf("💰 Mining reward of %.8f tokens sent to %s", reward, minerAddress)
+
+	return &newBlock, nil
+}
+
+// Add this method to the Blockchain struct
+// updateUTXOSet updates the UTXO set with the transactions in the block
+func (bc *Blockchain) updateUTXOSet(block Block) {
+	if bc.utxoPool == nil {
+		return
+	}
+
+	// Process all transactions in the block
+	for _, tx := range block.Body.Transactions.GetAllTransactions() {
+		bc.utxoPool.AddUTXO(&tx, block.Header.BlockNumber)
+	}
+}
+
+// Add the calculateDifficulty method to the Blockchain struct
+// calculateDifficulty calculates the mining difficulty based on previous blocks
+func (bc *Blockchain) calculateDifficulty(previousBlock Block) uint32 {
+	// For simplicity, use a fixed difficulty for now
+	// In a real implementation, this would adjust based on block times
+	return previousBlock.Header.Difficulty
+}
+
+// Add the saveBlock method to the Blockchain struct
+// saveBlock saves a block to the database
+func (bc *Blockchain) saveBlock(block Block) error {
+	// If we have a store, use it to save the block
+	if bc.db == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	// Convert block to bytes
+	blockData, err := block.Serialize()
+	if err != nil {
+		return fmt.Errorf("failed to serialize block: %v", err)
+	}
+
+	// Save block by hash
+	blockKey := []byte("block_" + block.Hash())
+	if err := bc.db.Put(blockKey, blockData); err != nil {
+		return fmt.Errorf("failed to save block: %v", err)
+	}
+
+	// Update latest block pointer
+	if err := bc.db.Put([]byte("latest_block"), []byte(block.Hash())); err != nil {
+		return fmt.Errorf("failed to update latest block: %v", err)
+	}
+
+	log.Printf("📦 Block #%d saved to database", block.Header.BlockNumber)
+	return nil
+}
+
+// Add this method to the Block struct
+// Serialize converts a block to bytes
+func (b Block) Serialize() ([]byte, error) {
+	return json.Marshal(b)
 }

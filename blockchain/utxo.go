@@ -22,6 +22,7 @@ type UTXO struct {
 	Spent         bool    `json:"spent"`
 	BlockHeight   uint64  `json:"block_height"`
 	Timestamp     int64   `json:"timestamp"`
+	ScriptPubKey  string  `json:"script_pub_key"`
 }
 
 // StateSnapshot represents a point-in-time snapshot of the UTXO pool state
@@ -32,7 +33,7 @@ type StateSnapshot struct {
 	Timestamp  int64
 }
 
-// UTXOPool manages all UTXOs with Merkle tree support
+// UTXOPool represents a pool of unspent transaction outputs
 type UTXOPool struct {
 	utxos             map[string]UTXO
 	mu                sync.RWMutex
@@ -46,7 +47,7 @@ type UTXOPool struct {
 	node              *Node
 }
 
-// NewUTXOPool initializes a new UTXO pool
+// NewUTXOPool creates a new UTXO pool
 func NewUTXOPool(database db.Database) *UTXOPool {
 	return &UTXOPool{
 		utxos: make(map[string]UTXO),
@@ -128,6 +129,7 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 			Owner:         tx.Receiver, // Use Receiver instead of Address
 			BlockHeight:   blockHeight,
 			Timestamp:     tx.Timestamp,
+			ScriptPubKey:  output.ScriptPubKey,
 		}
 		pool.utxos[utxoKey] = utxo
 	}
@@ -218,6 +220,7 @@ func UpdateUTXOSet(tx Transaction, utxoSet map[string]UTXO) {
 			OutputIndex:   index,
 			Owner:         tx.Receiver, // Use tx.Receiver directly
 			Amount:        tx.Amount,   // Use tx.Amount directly
+			ScriptPubKey:  tx.Outputs[index].ScriptPubKey,
 		}
 	}
 }

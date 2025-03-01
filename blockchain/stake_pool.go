@@ -1,29 +1,42 @@
 package blockchain
 
 import (
-	"errors"
-	"math/rand"
-	"sync"
 	"context"
+	"errors"
 	"log"
-	"github.com/libp2p/go-libp2p/core/host"
+	"math/rand"
+	"sort"
+	"sync"
 
+	"github.com/libp2p/go-libp2p/core/host"
 )
 
+// ValidatorNode represents a node that can validate blocks
+type ValidatorNode struct {
+	Address string
+	Stake   float64
+	hostID  string
+}
 
-
+// HostID returns the host ID of the validator
+func (v ValidatorNode) HostID() (string, bool) {
+	if v.hostID == "" {
+		return "", false
+	}
+	return v.hostID, true
+}
 
 // StakePool represents the pool of stakes for all nodes.
 type StakePool struct {
-	Stakes      map[string]float64 // Wallet address -> Stake amount
-	WalletToHost map[string]string // Wallet address -> Host ID mapping
-	mu          sync.Mutex         // Protects concurrent access
+	Stakes       map[string]float64 // Wallet address -> Stake amount
+	WalletToHost map[string]string  // Wallet address -> Host ID mapping
+	mu           sync.Mutex         // Protects concurrent access
 }
 
 // NewStakePool initializes a new StakePool.
 func NewStakePool() *StakePool {
 	return &StakePool{
-		Stakes:      make(map[string]float64),
+		Stakes:       make(map[string]float64),
 		WalletToHost: make(map[string]string),
 	}
 }
@@ -66,7 +79,6 @@ func (sp *StakePool) GetTotalStake() float64 {
 	return total
 }
 
-
 // SelectValidator selects a validator based on stake weight
 func (sp *StakePool) SelectValidator(peerHost host.Host) (string, string, error) {
 	sp.mu.Lock()
@@ -99,7 +111,7 @@ func (sp *StakePool) SelectValidator(peerHost host.Host) (string, string, error)
 	// Select validator based on weighted probability
 	r := rand.Float64() * totalStake
 	var cumulativeStake float64
-	
+
 	for walletAddr, stake := range sp.Stakes {
 		cumulativeStake += stake
 		if cumulativeStake >= r {
@@ -116,9 +128,6 @@ func (sp *StakePool) SelectValidator(peerHost host.Host) (string, string, error)
 
 	return "", "", errors.New("failed to select validator")
 }
-
-
-
 
 // BroadcastValidator sends the selected validator's wallet address and host ID to all nodes.
 func (sp *StakePool) BroadcastValidator(peerHost host.Host, walletAddress, hostID string) error {
@@ -146,3 +155,53 @@ func (sp *StakePool) BroadcastValidator(peerHost host.Host, walletAddress, hostI
 	return nil
 }
 
+// GetValidators returns a specified number of validators
+func (sp *StakePool) GetValidators(count int) ([]ValidatorNode, error) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	if len(sp.Stakes) == 0 {
+		return nil, errors.New("no validators available in stake pool")
+	}
+
+	// If we have fewer validators than requested, return all of them
+	validatorCount := min(count, len(sp.Stakes))
+	validators := make([]ValidatorNode, 0, validatorCount)
+
+	// Sort validators by stake to get the highest staked validators
+	type stakedValidator struct {
+		address string
+		hostID  string
+		stake   float64
+	}
+
+	allValidators := make([]stakedValidator, 0, len(sp.Stakes))
+	for addr, stake := range sp.Stakes {
+		hostID := sp.WalletToHost[addr]
+		allValidators = append(allValidators, stakedValidator{
+			address: addr,
+			hostID:  hostID,
+			stake:   stake,
+		})
+	}
+
+	// Sort by stake in descending order
+	sort.Slice(allValidators, func(i, j int) bool {
+		return allValidators[i].stake > allValidators[j].stake
+	})
+
+	// Take the top validators
+	for i := 0; i < validatorCount; i++ {
+		v := allValidators[i]
+		validators = append(validators, ValidatorNode{
+			Address: v.address,
+			Stake:   v.stake,
+			hostID:  v.hostID,
+		})
+	}
+
+	log.Printf("🔍 Selected %d validators from stake pool", len(validators))
+	return validators, nil
+}
+
+// Helper function for Go versions before 1.21

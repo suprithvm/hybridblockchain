@@ -68,7 +68,11 @@ func (v *Validator) Start() error {
 	}
 
 	v.isValidating = true
-	log.Printf("🔐 Validator started with stake: %f", v.config.Stake)
+	log.Printf("🔐 Validator node activated with stake: %.4f tokens", v.config.Stake)
+	log.Printf("📊 Validation parameters: Min Stake: %.4f, Reward Rate: %.2f%%",
+		v.config.MinStake, v.config.RewardRate*100)
+	log.Printf("⏱️ Block timeout: %s, Max missed blocks: %d",
+		v.config.BlockTimeout, v.config.MaxMissed)
 
 	// Start validation in background
 	go v.validate()
@@ -80,10 +84,13 @@ func (v *Validator) validate() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
+	log.Printf("👀 Validator watching for new blocks - last processed: #%d", v.lastBlock)
+
 	for {
 		select {
 		case <-ticker.C:
 			if !v.isValidating {
+				log.Printf("🛑 Validation process terminated")
 				return
 			}
 
@@ -98,10 +105,12 @@ func (v *Validator) validate() {
 
 			// Validate new block if available
 			if currentBlock.Header.BlockNumber > v.lastBlock {
+				log.Printf("🔍 New block #%d detected - beginning validation", currentBlock.Header.BlockNumber)
 				if err := v.validateBlock(currentBlock); err != nil {
 					log.Printf("❌ Block validation failed: %v", err)
 					continue
 				}
+				log.Printf("✅ Block #%d successfully validated", currentBlock.Header.BlockNumber)
 				v.lastBlock = currentBlock.Header.BlockNumber
 				v.distributeRewards(currentBlock)
 			}
@@ -110,27 +119,47 @@ func (v *Validator) validate() {
 }
 
 func (v *Validator) validateBlock(block Block) error {
+	log.Printf("🔐 Validating block #%d with hash %s", block.Header.BlockNumber, block.Hash())
+
 	// Verify block hash
 	if calculatedHash := block.CalculateHash(); calculatedHash != block.Hash() {
+		log.Printf("❌ Hash verification failed - calculated: %s, provided: %s",
+			calculatedHash, block.Hash())
 		return fmt.Errorf("invalid block hash")
 	}
+	log.Printf("✓ Block hash verified successfully")
 
 	// Verify timestamp
 	if block.Header.Timestamp > time.Now().Unix() {
+		log.Printf("❌ Block timestamp is in the future: %s",
+			time.Unix(block.Header.Timestamp, 0).Format(time.RFC3339))
 		return fmt.Errorf("block timestamp is in the future")
 	}
+	log.Printf("✓ Block timestamp verified: %s",
+		time.Unix(block.Header.Timestamp, 0).Format(time.RFC3339))
 
 	// Verify transactions
-	for _, tx := range block.Body.Transactions.GetAllTransactions() {
+	txCount := len(block.Body.Transactions.GetAllTransactions())
+	log.Printf("🧾 Validating %d transactions in block #%d", txCount, block.Header.BlockNumber)
+
+	for i, tx := range block.Body.Transactions.GetAllTransactions() {
+		log.Printf("  ↳ Validating transaction %d/%d: %s", i+1, txCount, tx.TransactionID)
 		if err := v.validateTransaction(tx); err != nil {
+			log.Printf("  ❌ Transaction %s validation failed: %v", tx.TransactionID, err)
 			return fmt.Errorf("transaction validation failed: %v", err)
 		}
+		log.Printf("  ✓ Transaction %s valid", tx.TransactionID)
 	}
+	log.Printf("✓ All transactions verified successfully")
 
 	// Verify state transitions
+	log.Printf("🔄 Verifying state transitions for block #%d", block.Header.BlockNumber)
 	if err := v.validateStateTransitions(block); err != nil {
+		log.Printf("❌ State transition validation failed: %v", err)
 		return fmt.Errorf("state transition validation failed: %v", err)
 	}
+	log.Printf("✓ State transitions verified successfully")
+	log.Printf("🎉 Block #%d fully validated and confirmed", block.Header.BlockNumber)
 
 	return nil
 }
@@ -206,7 +235,10 @@ func (v *Validator) distributeRewards(block Block) {
 	v.rewards += reward
 	v.config.Stake += reward
 
-	log.Printf("💰 Received validation reward: %f", reward)
+	log.Printf("💰 Received validation reward: %.8f tokens for block #%d",
+		reward, block.Header.BlockNumber)
+	log.Printf("📈 Updated validator stake: %.8f tokens (total rewards: %.8f)",
+		v.config.Stake, v.rewards)
 }
 
 func calculateBlockReward(block Block) float64 {
@@ -218,8 +250,6 @@ func calculateBlockReward(block Block) float64 {
 	}
 	return baseReward + fees
 }
-
-
 
 // Stop stops the validation process
 func (v *Validator) Stop() error {

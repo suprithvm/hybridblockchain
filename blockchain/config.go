@@ -82,6 +82,7 @@ type NetworkConfig struct {
 	NetworkPath string
 	// Add database configuration
 	Database *DatabaseConfig
+	Wallet   *Wallet
 }
 
 // TURNConfig holds TURN server configuration
