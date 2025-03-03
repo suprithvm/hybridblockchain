@@ -453,11 +453,19 @@ func setupWallet(dataDir string) (*blockchain.Wallet, error) {
 		fmt.Println("Please enter your 12-word mnemonic phrase:")
 
 		var mnemonic string
-		scanner := bufio.NewScanner(os.Stdin)
+		// Clear any leftover input
+		bufio.NewReader(os.Stdin).ReadString('\n')
+
+		// Use ReadString instead of Scanner for more reliable input
 		fmt.Print("> ")
-		if scanner.Scan() {
-			mnemonic = scanner.Text()
+		reader := bufio.NewReader(os.Stdin)
+		mnemonic, err = reader.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("failed to read mnemonic: %v", err)
 		}
+
+		// Trim whitespace and newlines
+		mnemonic = strings.TrimSpace(mnemonic)
 
 		// Validate mnemonic has 12 words
 		words := strings.Fields(mnemonic)
