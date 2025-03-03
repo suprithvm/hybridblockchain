@@ -12,82 +12,98 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"strings"
 	"sort"
+	"strings"
 
 	"golang.org/x/crypto/sha3"
 )
 
 // GenerateMnemonic creates a new mnemonic phrase
+// GenerateMnemonic creates a BIP39 mnemonic phrase with the specified word count
 func GenerateMnemonic(wordCount int) (string, error) {
-	if wordCount != 12 && wordCount != 24 {
-		return "", errors.New("word count must be 12 or 24")
-	}
+    log.Println("Starting GenerateMnemonic function")
 
-	wordlist, err := LoadBIP39Wordlist()
-	if err != nil {
-		return "", err
-	}
+    if wordCount != 12 && wordCount != 24 {
+        return "", errors.New("word count must be 12 or 24")
+    }
 
-	entropy := make([]byte, wordCount*4/3)
-	_, err = rand.Read(entropy)
-	if err != nil {
-		return "", err
-	}
+    wordlist, err := LoadBIP39Wordlist()
+    if err != nil {
+        return "", fmt.Errorf("failed to load wordlist: %v", err)
+    }
 
-	// Generate mnemonic from entropy
-	mnemonic := make([]string, wordCount)
-	for i := 0; i < wordCount; i++ {
-		index := int(entropy[i]) % len(wordlist)
-		mnemonic[i] = wordlist[index]
-	}
+    // Create a slice to hold the selected words
+    words := make([]string, wordCount)
+    
+    // Generate random indices and select words
+    for i := 0; i < wordCount; i++ {
+        index, err := rand.Int(rand.Reader, big.NewInt(int64(len(wordlist))))
+        if err != nil {
+            return "", fmt.Errorf("failed to generate random index: %v", err)
+        }
+        words[i] = strings.TrimSpace(wordlist[int(index.Int64())])
+    }
 
-	return strings.Join(mnemonic, " "), nil
+    // Join words with spaces between them and ensure no control characters
+    mnemonic := strings.TrimSpace(strings.Join(words, " "))
+    
+    log.Printf("Mnemonic generated with length: %d", len(mnemonic))
+
+    return mnemonic, nil
 }
 
 
-
-// RecoverFromMnemonic recovers a wallet using a mnemonic phrase
 // RecoverFromMnemonic recovers a wallet using a mnemonic phrase
 func RecoverFromMnemonic(mnemonic string) (*ecdsa.PrivateKey, error) {
-	// Load the BIP-39 wordlist
-	wordlist, err := LoadBIP39Wordlist()
-	if err != nil {
-		return nil, err
-	}
+    log.Println("Starting RecoverFromMnemonic function")
+    
+    // Clean the mnemonic of control characters
+    mnemonic = strings.ReplaceAll(mnemonic, "\r", "")
+    mnemonic = strings.TrimSpace(mnemonic)
+    
+    log.Printf("Cleaned mnemonic length: %d", len(mnemonic))
+    
+    // Load the BIP-39 wordlist
+    wordlist, err := LoadBIP39Wordlist()
+    if err != nil {
+        return nil, err
+    }
 
-	// Split the mnemonic into words
-	words := strings.Fields(mnemonic)
-	if len(words) != 12 && len(words) != 24 {
-		return nil, errors.New("mnemonic must have 12 or 24 words")
-	}
+    // Convert the wordlist to a map for faster lookups
+    wordlistMap := make(map[string]bool)
+    for _, word := range wordlist {
+        clean := strings.TrimSpace(word)
+        if clean != "" {
+            wordlistMap[clean] = true
+        }
+    }
 
-	// Verify the mnemonic words against the wordlist
-	for _, word := range words {
-		found := false
-		for _, validWord := range wordlist {
-			if word == validWord {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("invalid mnemonic word: %s", word)
-		}
-	}
+    // Split the mnemonic into words
+    words := strings.Fields(mnemonic) // Better than Split as it handles all whitespace
+    log.Printf("Split mnemonic into %d words", len(words))
+    
+    if len(words) != 12 && len(words) != 24 {
+        return nil, errors.New("mnemonic must have 12 or 24 words")
+    }
 
-	// Generate entropy from the mnemonic
-	hash := sha256.Sum256([]byte(strings.Join(words, " ")))
-	curve := elliptic.P256()
-	privateKey := new(ecdsa.PrivateKey)
-	privateKey.D = new(big.Int).SetBytes(hash[:])
-	privateKey.PublicKey.Curve = curve
-	privateKey.PublicKey.X, privateKey.PublicKey.Y = curve.ScalarBaseMult(privateKey.D.Bytes())
+    // Verify the mnemonic words against the wordlist
+    for i, word := range words {
+        if !wordlistMap[word] {
+            log.Printf("Word %d '%s' not found in wordlist", i, word)
+            return nil, fmt.Errorf("invalid mnemonic word: %s", word)
+        }
+    }
 
-	return privateKey, nil
+    // Generate entropy from the mnemonic
+    hash := sha256.Sum256([]byte(mnemonic))
+    curve := elliptic.P256()
+    privateKey := new(ecdsa.PrivateKey)
+    privateKey.D = new(big.Int).SetBytes(hash[:])
+    privateKey.PublicKey.Curve = curve
+    privateKey.PublicKey.X, privateKey.PublicKey.Y = curve.ScalarBaseMult(privateKey.D.Bytes())
+
+    return privateKey, nil
 }
-
-
 
 // DeriveChildKey derives a child key from a master key
 func DeriveChildKey(masterKey *ecdsa.PrivateKey, index int) (*ecdsa.PrivateKey, error) {
@@ -110,7 +126,7 @@ func LoadBIP39Wordlist() ([]string, error) {
 	}
 
 	// Adjust the path based on the known location of the file
-	wordlistPath := filepath.Join(baseDir, "bip39_wordlist.txt")
+	wordlistPath := filepath.Join(baseDir, "blockchain/bip39_wordlist.txt")
 
 	// Read the file
 	data, err := os.ReadFile(wordlistPath)
@@ -123,35 +139,34 @@ func LoadBIP39Wordlist() ([]string, error) {
 	return words, nil
 }
 
-
 func RecoverMultiSigWallet(mnemonic string, owners []string, requiredSigs int, publicKeyMap map[string]*ecdsa.PublicKey) (*MultiSigwWallet, error) {
-    // Recover master key from mnemonic
-    masterKey, err := RecoverFromMnemonic(mnemonic)
-    if err != nil {
-        return nil, fmt.Errorf("failed to recover master key: %v", err)
-    }
+	// Recover master key from mnemonic
+	masterKey, err := RecoverFromMnemonic(mnemonic)
+	if err != nil {
+		return nil, fmt.Errorf("failed to recover master key: %v", err)
+	}
 	log.Printf("[DEBUG] Recovered Master Key: %x", masterKey.D)
 
-    // Sort the owners to ensure deterministic order
-    sort.Strings(owners)
+	// Sort the owners to ensure deterministic order
+	sort.Strings(owners)
 
-    // Generate the address deterministically
-    address := GenerateMultiSigAddress(publicKeyMap)
+	// Generate the address deterministically
+	address := GenerateMultiSigAddress(publicKeyMap)
 
-    return &MultiSigwWallet{
-        Owners:       owners,
-        RequiredSigs: requiredSigs,
-        Balance:      0,
-        PublicKeyMap: publicKeyMap,
-        Address:      address,
-    }, nil
+	return &MultiSigwWallet{
+		Owners:       owners,
+		RequiredSigs: requiredSigs,
+		Balance:      0,
+		PublicKeyMap: publicKeyMap,
+		Address:      address,
+	}, nil
 }
 
 // GenerateNewPublicKey generates a new public key from a mnemonic phrase
 func GenerateNewPublicKey(mnemonic string) (*ecdsa.PublicKey, error) {
-    privateKey, err := RecoverFromMnemonic(mnemonic)
-    if err != nil {
-        return nil, fmt.Errorf("failed to generate new key from mnemonic: %v", err)
-    }
-    return &privateKey.PublicKey, nil
+	privateKey, err := RecoverFromMnemonic(mnemonic)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate new key from mnemonic: %v", err)
+	}
+	return &privateKey.PublicKey, nil
 }

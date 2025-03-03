@@ -57,6 +57,7 @@
     |-- utxo.go
     |-- validator.go
     |-- wallet.go
+    |-- wallet_test.go
     |-- wallet_utils.go
 |-- bootnode.addr
 |-- bootnode.key
@@ -82,20 +83,21 @@
 |-- miner_data
     |-- chaindata
         |-- leveldb
-            |-- 000006.log
+            |-- 000010.log
             |-- CURRENT
             |-- CURRENT.bak
             |-- LOCK
             |-- LOG
-            |-- MANIFEST-000007
+            |-- MANIFEST-000011
     |-- nodedata
         |-- leveldb
-            |-- 000006.log
+            |-- 000018.log
             |-- CURRENT
             |-- CURRENT.bak
             |-- LOCK
             |-- LOG
-            |-- MANIFEST-000007
+            |-- MANIFEST-000019
+    |-- wallet.json
 |-- my_wallet.json
 |-- node_data
     |-- blockchain

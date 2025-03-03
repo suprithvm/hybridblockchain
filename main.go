@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/elliptic"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -390,19 +393,104 @@ func setupWallet(dataDir string) (*blockchain.Wallet, error) {
 	// Check if wallet exists
 	if _, err := os.Stat(walletPath); err == nil {
 		// Load existing wallet
-		return blockchain.LoadWalletFromFile(walletPath)
+		log.Printf("💼 Loading existing wallet from %s", walletPath)
+		wallet, err := blockchain.LoadWalletFromFile(walletPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load wallet: %v", err)
+		}
+		log.Printf("📝 Wallet address: %s", wallet.Address)
+		return wallet, nil
 	}
 
-	// Create new wallet
-	wallet, err := blockchain.NewWallet()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create wallet: %v", err)
+	// Ask user if they want to create a new wallet or restore from mnemonic
+	fmt.Println("\n💼 Wallet not found. Choose an option:")
+	fmt.Println("1. Create a new wallet")
+	fmt.Println("2. Restore from mnemonic phrase")
+
+	var choice int
+	fmt.Print("\nEnter your choice (1-2): ")
+	fmt.Scanf("%d", &choice)
+
+	var wallet *blockchain.Wallet
+	var err error
+
+	switch choice {
+	case 1:
+		// Create new wallet
+		fmt.Println("\n🔑 Creating new wallet...")
+		wallet, err = blockchain.NewWallet()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create wallet: %v", err)
+		}
+
+		// Display wallet information
+		fmt.Println("\n✅ Wallet created successfully!")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("📝 Wallet Address:", wallet.Address)
+		fmt.Println("🔐 Public Key:", hex.EncodeToString(elliptic.Marshal(wallet.PublicKey.Curve, wallet.PublicKey.X, wallet.PublicKey.Y)))
+		privateKeyBytes, _ := wallet.PrivateKey.D.MarshalText()
+		fmt.Println("🔑 Private Key:", string(privateKeyBytes))
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("⚠️ IMPORTANT: Write down your mnemonic phrase and keep it safe!")
+		fmt.Println("🔤 Mnemonic:", wallet.Mnemonic)
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+		// Ask user to confirm they've saved the mnemonic
+		fmt.Print("\nHave you saved your mnemonic phrase? (y/n): ")
+		var confirm string
+		fmt.Scanf("%s", &confirm)
+		if confirm != "y" && confirm != "Y" {
+			fmt.Println("⚠️ Please save your mnemonic phrase before continuing!")
+			fmt.Println("🔤 Mnemonic:", wallet.Mnemonic)
+			fmt.Print("\nPress Enter when you have saved it...")
+			fmt.Scanln()
+		}
+
+	case 2:
+		// Restore from mnemonic
+		fmt.Println("\n🔄 Wallet Recovery")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("Please enter your 12-word mnemonic phrase:")
+
+		var mnemonic string
+		scanner := bufio.NewScanner(os.Stdin)
+		fmt.Print("> ")
+		if scanner.Scan() {
+			mnemonic = scanner.Text()
+		}
+
+		// Validate mnemonic has 12 words
+		words := strings.Fields(mnemonic)
+		if len(words) != 12 {
+			return nil, fmt.Errorf("invalid mnemonic: expected 12 words, got %d", len(words))
+		}
+
+		fmt.Println("\n🔄 Restoring wallet from mnemonic...")
+		wallet, err = blockchain.RecoverWallet(mnemonic)
+		if err != nil {
+			return nil, fmt.Errorf("failed to restore wallet: %v", err)
+		}
+
+		// Display recovered wallet information
+		fmt.Println("\n✅ Wallet recovered successfully!")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("📝 Wallet Address:", wallet.Address)
+		fmt.Println("🔐 Public Key:", hex.EncodeToString(elliptic.Marshal(wallet.PublicKey.Curve, wallet.PublicKey.X, wallet.PublicKey.Y)))
+		privateKeyBytes, _ := wallet.PrivateKey.D.MarshalText()
+		fmt.Println("🔑 Private Key:", string(privateKeyBytes))
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	default:
+		return nil, fmt.Errorf("invalid choice")
 	}
 
 	// Save wallet
 	if err := wallet.SaveToFile(walletPath); err != nil {
 		return nil, fmt.Errorf("failed to save wallet: %v", err)
 	}
+
+	log.Printf("💼 Wallet saved to %s", walletPath)
+	log.Printf("📝 Wallet address: %s", wallet.Address)
 
 	return wallet, nil
 }
