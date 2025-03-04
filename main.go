@@ -212,34 +212,71 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) {
 func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 	log.Printf("🔐 Starting Validator Node")
 
-	// Initialize blockchain
-	dbConfig := &blockchain.DatabaseConfig{
-		Type:      "leveldb",
-		Path:      filepath.Join(config.DataDir, "blockchain"),
-		CacheSize: 256,
+	// Setup wallet first
+	wallet, err := setupWallet(config.DataDir)
+	if err != nil {
+		log.Fatalf("❌ Failed to setup wallet: %v", err)
 	}
+	log.Printf("💼 Validator wallet initialized with address: %s", wallet.Address)
+
+	// Initialize blockchain with store's database
+	dbConfig := &blockchain.DatabaseConfig{
+		Type:         "leveldb",
+		Path:         filepath.Join(config.DataDir, "chaindata"),
+		CacheSize:    256,
+		MaxOpenFiles: 64,
+		Compression:  true,
+	}
+
+	// Initialize blockchain
 	bc := blockchain.InitialiseBlockchain(dbConfig)
 
-	// Initialize validator with configuration
+	// Create network configuration
+	networkConfig := &blockchain.NetworkConfig{
+		P2PPort:        extractPort(config.ListenAddr),
+		RPCPort:        extractPort(config.RPCAddr),
+		BootstrapNodes: config.BootstrapNodes,
+		NetworkID:      config.NetworkID,
+		ChainID:        parseChainID(config.NetworkID),
+		NetworkPath:    config.DataDir,
+		Blockchain:     bc,
+		Wallet:         wallet,
+		DHTServerMode:  true,
+	}
+
+	// Initialize P2P network
+	node, err := blockchain.NewNode(networkConfig)
+	if err != nil {
+		log.Fatalf("❌ Failed to create P2P node: %v", err)
+	}
+
+	// Start the node
+	if err := node.Start(); err != nil {
+		log.Fatalf("❌ Failed to start node: %v", err)
+	}
+
+	// Create validator config
 	validatorConfig := &blockchain.ValidatorConfig{
 		Stake:        config.ValidatorStake,
-		MinStake:     float64(config.MinerThreads),
-		RewardRate:   config.ValidatorStake * 0.05,
-		SlashingRate: config.ValidatorStake * 0.10,
+		MinStake:     0.0, // Minimum stake requirement
+		RewardRate:   0.05,   // 5% reward rate
+		SlashingRate: 0.10,   // 10% slashing rate
 	}
 
+	// Initialize validator
 	validator, err := blockchain.NewValidator(bc, validatorConfig)
 	if err != nil {
-		log.Fatalf("❌ Failed to create validator: %v", err)
+		log.Fatalf("❌ Failed to initialize validator: %v", err)
 	}
 
-	// Start validation
+	// Start validation process
 	if err := validator.Start(); err != nil {
 		log.Fatalf("❌ Failed to start validator: %v", err)
 	}
 
-	// Initialize and start sync service
-	startSyncService(config, bc, store)
+	log.Printf("✅ Validator node is running")
+	log.Printf("📝 Validator Address: %s", wallet.Address)
+	log.Printf("💰 Staked Amount: %.2f", config.ValidatorStake)
 }
 
 func runObserverNode(config *NodeConfig, store *blockchain.Store) {
