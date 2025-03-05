@@ -17,6 +17,7 @@ import (
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -35,6 +36,12 @@ const (
 	ConnectionRetryInterval = 30 * time.Second
 	MaxConnectionRetries    = 10
 	WalletSetupTimeout      = 5 * time.Minute
+	ValidatorSelectionTopic = "/blockchain/validator/selection/1.0.0"
+	ValidatorVoteTopic      = "/blockchain/validator/vote/1.0.0"
+	ValidatorProtocolID     = "/blockchain/validator/1.0.0"
+	ValidatorHeartbeatTopic = "/blockchain/validator/heartbeat/1.0.0"
+	ValidatorTimeoutTopic   = "/blockchain/validator/timeout/1.0.0"
+	ValidatorSetUpdateTopic = "/blockchain/validator/set/1.0.0"
 )
 
 // NodeOptions contains options for creating a node
@@ -54,31 +61,34 @@ func (v blankValidator) Select(_ string, _ [][]byte) (int, error) { return 0, ni
 
 // Node represents a blockchain network node
 type Node struct {
-	Host            host.Host
-	DHT             *dht.IpfsDHT
-	PeerManager     *PeerManager
-	Blockchain      *Blockchain
-	Mempool         *Mempool
-	UTXOSet         *UTXOPool
-	StakePool       *StakePool
-	config          *NetworkConfig
-	ctx             context.Context
-	cancel          context.CancelFunc
-	keepAliveCtx    context.Context
-	keepAliveCancel context.CancelFunc
-	UTXOPool        *UTXOPool
-	isSyncing       bool
-	syncMu          sync.RWMutex
-	gasModel        *gas.GasModel
-	accountManager  *AccountManager
-	P2PPort         int
-	RPCPort         int
-	NetworkPath     string
-	ChainID         uint64
-	NetworkID       string
-	wallet          *Wallet
-	isRunning       bool
-	runningMu       sync.RWMutex
+	Host              host.Host
+	DHT               *dht.IpfsDHT
+	PeerManager       *PeerManager
+	Blockchain        *Blockchain
+	Mempool           *Mempool
+	UTXOSet           *UTXOPool
+	StakePool         *StakePool
+	config            *NetworkConfig
+	ctx               context.Context
+	cancel            context.CancelFunc
+	keepAliveCtx      context.Context
+	keepAliveCancel   context.CancelFunc
+	UTXOPool          *UTXOPool
+	isSyncing         bool
+	syncMu            sync.RWMutex
+	gasModel          *gas.GasModel
+	accountManager    *AccountManager
+	P2PPort           int
+	RPCPort           int
+	NetworkPath       string
+	ChainID           uint64
+	NetworkID         string
+	wallet            *Wallet
+	isRunning         bool
+	runningMu         sync.RWMutex
+	knownPeers        map[peer.ID]bool
+	PubSub            *pubsub.PubSub
+	validatorProtocol *ValidatorProtocol
 }
 
 // Add getter method for gas model
@@ -123,12 +133,21 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		return nil, fmt.Errorf("failed to create host: %w", err)
 	}
 
+	// Initialize pubsub
+	ps, err := pubsub.NewGossipSub(ctx, host)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create pubsub: %w", err)
+	}
+
 	// Create the node instance first
 	n := &Node{
-		Host:   host,
-		config: config,
-		ctx:    ctx,
-		cancel: cancel,
+		Host:       host,
+		config:     config,
+		ctx:        ctx,
+		cancel:     cancel,
+		knownPeers: make(map[peer.ID]bool),
+		PubSub:     ps,
 	}
 
 	// Add connection logging
@@ -170,7 +189,6 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		Host:            host,
 		DHT:             dhtInstance,
 		PeerManager:     NewPeerManager(host),
-		StakePool:       NewStakePool(),
 		config:          config,
 		ctx:             ctx,
 		cancel:          cancel,
@@ -185,7 +203,10 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		NetworkID:       config.NetworkID,
 		Blockchain:      config.Blockchain,
 		wallet:          config.Wallet,
+		knownPeers:      make(map[peer.ID]bool),
+		PubSub:          ps,
 	}
+	node.StakePool = NewStakePool(config.Blockchain)
 
 	// Now initialize mempool with the node reference
 	node.Mempool = NewMempool(node)
@@ -195,6 +216,14 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 
 	// Start reconnection routine
 	go node.maintainConnections()
+
+	// Initialize validator protocol
+	node.validatorProtocol = NewValidatorProtocol(node)
+
+	// Subscribe to validator topics
+	if err := node.subscribeToValidatorTopics(); err != nil {
+		return nil, fmt.Errorf("failed to subscribe to validator topics: %w", err)
+	}
 
 	return node, nil
 }
@@ -1303,30 +1332,26 @@ func (n *Node) connectToBootstrapNodes(ctx context.Context) {
 	}
 }
 
-// Add method to start the node
+// Start starts the node and its services
 func (n *Node) Start() error {
-	n.runningMu.Lock()
-	if n.isRunning {
-		n.runningMu.Unlock()
-		return fmt.Errorf("node already running")
+	// Start DHT in server mode
+	if err := n.DHT.Bootstrap(n.ctx); err != nil {
+		return fmt.Errorf("failed to bootstrap DHT: %v", err)
 	}
-	n.isRunning = true
-	n.runningMu.Unlock()
-
-	// Start connection maintenance
-	go n.maintainConnections()
-
-	// Start heartbeat
-	go n.startKeepAlive()
 
 	// Start peer discovery
 	go n.discoverPeers()
+
+	// Start blockchain sync
+	if n.config.Blockchain != nil {
+		go n.startBlockchainSync()
+	}
 
 	return nil
 }
 
 func (n *Node) discoverPeers() {
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -1334,29 +1359,32 @@ func (n *Node) discoverPeers() {
 		case <-n.ctx.Done():
 			return
 		case <-ticker.C:
-			if n.DHT != nil {
-				ctx, cancel := context.WithTimeout(n.ctx, time.Second*30)
-				// Create a deterministic CID for our blockchain network
-				h := sha256.New()
-				h.Write([]byte(n.NetworkID))
-				mh := h.Sum(nil)
-				c := cid.NewCidV1(cid.Raw, mh)
-
-				peerChan, err := n.DHT.FindProviders(ctx, c)
-				cancel()
-				if err != nil {
-					log.Printf("⚠️ Failed to find providers: %v", err)
+			peers := n.Host.Network().Peers()
+			for _, peerID := range peers {
+				// Skip if we already know this peer
+				if n.knownPeers[peerID] {
 					continue
 				}
 
-				for i := range peerChan {
-					addrInfo := peerChan[i]
-					if addrInfo.ID == n.Host.ID() {
-						continue // Skip self
-					}
-					if err := n.Host.Connect(n.ctx, addrInfo); err != nil {
-						log.Printf("⚠️ Failed to connect to discovered peer %s: %v", addrInfo.ID.String(), err)
-					}
+				// Add to known peers
+				n.knownPeers[peerID] = true
+
+				// Get peer info
+				addrs := n.Host.Peerstore().Addrs(peerID)
+				if len(addrs) == 0 {
+					continue
+				}
+
+				// Notify about new peer
+				log.Printf("📡 Discovered new peer: %s at %s", peerID.String(), addrs[0])
+
+				// Try to connect
+				peerInfo := peer.AddrInfo{
+					ID:    peerID,
+					Addrs: addrs,
+				}
+				if err := n.Host.Connect(n.ctx, peerInfo); err != nil {
+					log.Printf("⚠️ Failed to connect to discovered peer: %v", err)
 				}
 			}
 		}
@@ -1425,4 +1453,274 @@ func parseChainID(networkID string) uint64 {
 	default:
 		return 3 // devnet
 	}
+}
+
+func (n *Node) startBlockchainSync() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			// Get latest block from peers
+			for _, peer := range n.Host.Network().Peers() {
+				if err := n.syncWithPeer(peer); err != nil {
+					log.Printf("⚠️ Failed to sync with peer %s: %v", peer.String(), err)
+				}
+			}
+		}
+	}
+}
+
+func (n *Node) syncWithPeer(peerID peer.ID) error {
+	// Open sync stream
+	s, err := n.Host.NewStream(context.Background(), peerID, "/blockchain/1.0.0/sync")
+	if err != nil {
+		return fmt.Errorf("failed to open sync stream: %v", err)
+	}
+	defer s.Close()
+
+	// Send sync request
+	request := struct {
+		StartHeight int
+		EndHeight   int
+	}{
+		StartHeight: 0,
+		EndHeight:   -1,
+	}
+
+	if err := json.NewEncoder(s).Encode(request); err != nil {
+		return fmt.Errorf("failed to send sync request: %v", err)
+	}
+
+	// Receive and process blocks
+	var blocks []Block
+	if err := json.NewDecoder(s).Decode(&blocks); err != nil {
+		return fmt.Errorf("failed to receive blocks: %v", err)
+	}
+
+	// Create temporary mempool and UTXO set for synced blocks
+	tempMempool := NewMempool(n)
+	tempUTXOSet := make(map[string]UTXO)
+
+	// Validate and add blocks
+	for _, block := range blocks {
+		// Validate block structure and hash
+		if err := validateBlockStructure(&block); err != nil {
+			return fmt.Errorf("invalid block structure at height %d: %v", block.Header.BlockNumber, err)
+		}
+
+		// Add block to blockchain
+		n.Blockchain.AddBlock(tempMempool, n.StakePool, tempUTXOSet, n.Host)
+	}
+
+	return nil
+}
+
+func (n *Node) BroadcastValidatorSelection(validatorAddr string, proof *SelectionProof) error {
+	msg := &ValidatorSelectionMessage{
+		ValidatorAddress: validatorAddr,
+		Proof:            proof,
+		BlockHeight:      n.Blockchain.GetLatestBlock().Header.BlockNumber,
+		Timestamp:        time.Now(),
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal validator selection: %w", err)
+	}
+
+	return n.publishMessage(ValidatorSelectionTopic, data)
+}
+
+func (n *Node) BroadcastValidatorVote(validatorAddr string, vote bool, blockHash string) error {
+	msg := &ValidatorVoteMessage{
+		ValidatorAddress: validatorAddr,
+		Vote:             vote,
+		BlockHash:        blockHash,
+		Timestamp:        time.Now(),
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal validator vote: %w", err)
+	}
+
+	return n.publishMessage(ValidatorVoteTopic, data)
+}
+
+// Add message types
+type ValidatorSelectionMessage struct {
+	ValidatorAddress string
+	Proof            *SelectionProof
+	BlockHeight      uint64
+	Timestamp        time.Time
+}
+
+type ValidatorVoteMessage struct {
+	ValidatorAddress string
+	Vote             bool
+	BlockHash        string
+	Timestamp        time.Time
+}
+
+// Add this method to Node struct
+func (n *Node) publishMessage(topic string, data []byte) error {
+	// Create a new pubsub topic
+	t, err := n.PubSub.Join(topic)
+	if err != nil {
+		return fmt.Errorf("failed to join topic %s: %w", topic, err)
+	}
+
+	// Publish the message
+	err = t.Publish(n.ctx, data)
+	if err != nil {
+		return fmt.Errorf("failed to publish message: %w", err)
+	}
+
+	return nil
+}
+
+// Add these methods to Node struct
+func (n *Node) BroadcastValidatorTimeout(validatorAddr string) error {
+	msg := &ValidatorTimeoutMessage{
+		ValidatorAddress: validatorAddr,
+		Timestamp:        time.Now(),
+		TimeoutCount:     n.validatorProtocol.validators[validatorAddr].Timeouts,
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal validator timeout: %w", err)
+	}
+
+	return n.publishMessage(ValidatorTimeoutTopic, data)
+}
+
+func (n *Node) BroadcastValidatorSetUpdate(activeValidators []string) error {
+	msg := &ValidatorSetUpdateMessage{
+		ActiveValidators: activeValidators,
+		Timestamp:        time.Now(),
+		BlockHeight:      n.Blockchain.GetLatestBlock().Header.BlockNumber,
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal validator set update: %w", err)
+	}
+
+	return n.publishMessage(ValidatorSetUpdateTopic, data)
+}
+
+// Add this method to Node
+func (n *Node) subscribeToValidatorTopics() error {
+	topics := []string{
+		ValidatorHeartbeatTopic,
+		ValidatorTimeoutTopic,
+		ValidatorSetUpdateTopic,
+	}
+
+	for _, topic := range topics {
+		if err := n.subscribeTopic(topic, n.handleValidatorMessage); err != nil {
+			return fmt.Errorf("failed to subscribe to %s: %w", topic, err)
+		}
+	}
+	return nil
+}
+
+// Add message handler
+func (n *Node) handleValidatorMessage(topic string, data []byte) error {
+	switch topic {
+	case ValidatorHeartbeatTopic:
+		var msg ValidatorHeartbeatMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return err
+		}
+		n.validatorProtocol.HandleHeartbeat(msg.ValidatorAddress)
+
+	case ValidatorTimeoutTopic:
+		var msg ValidatorTimeoutMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return err
+		}
+		n.validatorProtocol.handleValidatorTimeout(msg.ValidatorAddress)
+
+	case ValidatorSetUpdateTopic:
+		var msg ValidatorSetUpdateMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return err
+		}
+		// Update local validator set
+		n.updateValidatorSet(msg.ActiveValidators)
+	}
+	return nil
+}
+
+// Add this helper method
+func (n *Node) updateValidatorSet(activeValidators []string) {
+	n.validatorProtocol.mu.Lock()
+	defer n.validatorProtocol.mu.Unlock()
+
+	// Update validator states
+	for addr := range n.validatorProtocol.validators {
+		isActive := false
+		for _, activeAddr := range activeValidators {
+			if addr == activeAddr {
+				isActive = true
+				break
+			}
+		}
+		if state := n.validatorProtocol.validators[addr]; state != nil {
+			state.IsActive = isActive
+		}
+	}
+}
+
+// Add these message types at the top of the file
+type ValidatorHeartbeatMessage struct {
+	ValidatorAddress string    `json:"validator_address"`
+	Timestamp        time.Time `json:"timestamp"`
+	BlockHeight      uint64    `json:"block_height"`
+}
+
+type ValidatorTimeoutMessage struct {
+	ValidatorAddress string    `json:"validator_address"`
+	Timestamp        time.Time `json:"timestamp"`
+	TimeoutCount     uint64    `json:"timeout_count"`
+}
+
+type ValidatorSetUpdateMessage struct {
+	ActiveValidators []string  `json:"active_validators"`
+	Timestamp        time.Time `json:"timestamp"`
+	BlockHeight      uint64    `json:"block_height"`
+}
+
+// Add subscribeTopic method to Node struct
+func (n *Node) subscribeTopic(topic string, handler func(string, []byte) error) error {
+	ps, err := n.PubSub.Join(topic)
+	if err != nil {
+		return fmt.Errorf("failed to join topic %s: %w", topic, err)
+	}
+
+	sub, err := ps.Subscribe()
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to topic %s: %w", topic, err)
+	}
+
+	go func() {
+		for {
+			msg, err := sub.Next(n.ctx)
+			if err != nil {
+				log.Printf("Error receiving message: %v", err)
+				continue
+			}
+			if err := handler(topic, msg.Data); err != nil {
+				log.Printf("Error handling message: %v", err)
+			}
+		}
+	}()
+
+	return nil
 }

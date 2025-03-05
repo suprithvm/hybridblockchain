@@ -1,6 +1,9 @@
 package blockchain
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Message struct {
 	Type    string      `json:"type"`
@@ -116,4 +119,20 @@ type Checkpoint struct {
 	UTXORoot         string `json:"utxo_root"`
 	Timestamp        int64  `json:"timestamp"`
 	ValidatorSetHash string `json:"validator_set_hash"`
+}
+
+// ValidatorPerformance tracks validator metrics
+type ValidatorPerformance struct {
+	BlocksProposed    uint64    `json:"blocks_proposed"`
+	BlocksValidated   uint64    `json:"blocks_validated"`
+	MissedValidations uint64    `json:"missed_validations"`
+	UptimePercentage  float64   `json:"uptime_percentage"`
+	LastUpdate        time.Time `json:"last_update"`
+}
+
+// WithdrawalRequest represents a stake withdrawal request
+type WithdrawalRequest struct {
+	RequestTime time.Time `json:"request_time"`
+	Amount      uint64    `json:"amount"`
+	Status      string    `json:"status"` // "pending", "processed", "cancelled"
 }

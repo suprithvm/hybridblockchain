@@ -2,6 +2,7 @@ package blockchain
 
 import (
 	"blockchain-core/blockchain/gas"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -29,20 +30,23 @@ const (
 
 // BlockHeader contains block metadata
 type BlockHeader struct {
-	Version      uint32 // Block version
-	BlockNumber  uint64 // Height of the block
-	PreviousHash string // Hash of previous block
-	Timestamp    int64  // Block creation time
-	MerkleRoot   string // Merkle root of transactions
-	StateRoot    string // State root after transactions
-	ReceiptsRoot string // Root hash of transaction receipts
-	Difficulty   uint32 // Mining difficulty
-	Nonce        uint64 // PoW nonce
-	GasLimit     uint64 // Maximum gas allowed
-	GasUsed      uint64 // Actual gas used
-	MinedBy      string // Address of miner
-	ValidatedBy  string // Address of PoS validator
-	ExtraData    []byte // Additional data (limited size)
+	Version          uint32          // Block version
+	BlockNumber      uint64          // Height of the block
+	PreviousHash     string          // Hash of previous block
+	Timestamp        int64           // Block creation time
+	MerkleRoot       string          // Merkle root of transactions
+	StateRoot        string          // State root after transactions
+	ReceiptsRoot     string          // Root hash of transaction receipts
+	Difficulty       uint32          // Mining difficulty
+	Nonce            uint64          // PoW nonce
+	GasLimit         uint64          // Maximum gas allowed
+	GasUsed          uint64          // Actual gas used
+	MinedBy          string          // Address of miner
+	ValidatedBy      string          // Address of PoS validator
+	ExtraData        []byte          // Additional data (limited size)
+	ValidatorProof   *SelectionProof // Proof of validator selection
+	ValidatorAddress string          // Selected validator's address
+	ValidatorSig     []byte          // Validator's signature
 }
 
 // BlockBody contains the actual block data
@@ -51,7 +55,7 @@ type BlockBody struct {
 	Receipts     []*TxReceipt
 }
 
-// Block represents a complete block
+// Block represents a block in the blockchain
 type Block struct {
 	Header               *BlockHeader
 	Body                 *BlockBody
@@ -447,4 +451,44 @@ func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host
 
 	// For now, just return success
 	return true, nil
+}
+
+// Add this method to Block
+func (b *Block) VerifyValidatorSelection(selector *ValidatorSelector) error {
+	if b.Header.ValidatorProof == nil {
+		return fmt.Errorf("missing validator selection proof")
+	}
+
+	// Verify the selection proof
+	validator, proof, err := selector.SelectValidator(
+		b.Header.BlockNumber,
+		b.Header.PreviousHash,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to verify validator selection: %w", err)
+	}
+
+	// Verify the selected validator matches
+	if validator.Address != b.Header.ValidatorAddress {
+		return fmt.Errorf("invalid validator selection")
+	}
+
+	// Verify proof matches
+	if !verifyProof(proof, b.Header.ValidatorProof) {
+		return fmt.Errorf("invalid selection proof")
+	}
+
+	return nil
+}
+
+// Add this function
+func verifyProof(proof1, proof2 *SelectionProof) bool {
+	if proof1 == nil || proof2 == nil {
+		return false
+	}
+	// Compare proof fields
+	return proof1.Seed != nil &&
+		bytes.Equal(proof1.Seed, proof2.Seed) &&
+		proof1.Weight == proof2.Weight &&
+		proof1.Score == proof2.Score
 }

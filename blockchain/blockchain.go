@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,14 +17,24 @@ import (
 
 // chain of blocks are stored
 type Blockchain struct {
-	Chain       []Block
-	Node        *Node
-	mu          sync.RWMutex
-	currentHash string
-	utxoPool    *UTXOPool
-	db          db.Database
-	mempool     *Mempool
-	p2pHost     host.Host
+	Chain            []Block
+	Node             *Node
+	mu               sync.RWMutex
+	currentHash      string
+	utxoPool         *UTXOPool
+	db               db.Database
+	mempool          *Mempool
+	p2pHost          host.Host
+	ctx              context.Context
+	cancel           context.CancelFunc
+	stakePool        *StakePool
+	utxoSet          map[string]UTXO
+	Validators       map[string]*Validator
+	consensus        *ConsensusEngine
+	rewardCalculator *RewardCalculator
+	slashingManager  *SlashingManager
+	communityPool    float64
+	balances         map[string]float64
 }
 
 //intializes the blockchain with the genesis block
@@ -40,16 +51,26 @@ func InitialiseBlockchain(dbConfig *DatabaseConfig) *Blockchain {
 
 	// Initialize blockchain with database
 	bc := &Blockchain{
-		Chain:       []Block{},
-		Node:        nil,
-		mu:          sync.RWMutex{},
-		currentHash: "",
-		utxoPool:    nil,
-		db:          initDB(dbConfig),
+		Chain:         []Block{},
+		Node:          nil,
+		mu:            sync.RWMutex{},
+		currentHash:   "",
+		utxoPool:      nil,
+		db:            initDB(dbConfig),
+		utxoSet:       make(map[string]UTXO),
+		Validators:    make(map[string]*Validator),
+		communityPool: 0,
+		balances:      make(map[string]float64),
 	}
 
 	genesis := GenesisBlock()
 	bc.Chain = append(bc.Chain, genesis)
+	bc.stakePool = NewStakePool(bc)
+
+	// Initialize validator selector and consensus engine
+	selector := NewValidatorSelector(bc.stakePool)
+	bc.consensus = NewConsensusEngine(bc, selector)
+
 	return bc
 }
 
@@ -89,14 +110,14 @@ func initDB(config *DatabaseConfig) db.Database {
 }
 
 // Add peerHost as a parameter to blockchain methods where necessary
-func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet map[string]UTXO, peerHost host.Host) {
+func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet map[string]UTXO, peerHost host.Host) error {
 	previousBlock := bc.GetLatestBlock()
 
 	// Select validator
 	validatorWallet, validatorHost, err := stakePool.SelectValidator(peerHost)
 	if err != nil {
 		log.Printf("Failed to select validator: %v", err)
-		return
+		return err
 	}
 
 	// Create the new block
@@ -106,7 +127,12 @@ func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet m
 	err = MineBlock(&newBlock, previousBlock, stakePool, 10, peerHost)
 	if err != nil {
 		log.Printf("Failed to mine block: %v", err)
-		return
+		return err
+	}
+
+	// Start consensus round for the new block
+	if err := bc.consensus.StartConsensusRound(&newBlock); err != nil {
+		return fmt.Errorf("consensus failed: %w", err)
 	}
 
 	// Validate and add the block to the chain
@@ -131,6 +157,8 @@ func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet m
 	} else {
 		log.Printf("Block %d validation failed.\n", newBlock.Header.BlockNumber)
 	}
+
+	return nil
 }
 
 // GetLatestBlock retrieves the most recent block in the chain
@@ -548,15 +576,7 @@ func (bc *Blockchain) VerifyBalance(address string, amount float64) bool {
 func (bc *Blockchain) GetBalance(address string) float64 {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-
-	balance := 0.0
-	utxoSet := bc.utxoPool.GetUTXOsForAddress(address)
-
-	for _, utxo := range utxoSet {
-		balance += utxo.Amount
-	}
-
-	return balance
+	return bc.balances[address]
 }
 
 // GetNonce gets the next nonce for an address from UTXO set
@@ -591,12 +611,16 @@ func InitialiseBlockchainWithStore(store *Store) *Blockchain {
 	log.Printf("🔄 Initializing blockchain with existing store")
 
 	bc := &Blockchain{
-		Chain:       []Block{},
-		Node:        nil,
-		mu:          sync.RWMutex{},
-		currentHash: "",
-		utxoPool:    nil,
-		db:          store.db,
+		Chain:         []Block{},
+		Node:          nil,
+		mu:            sync.RWMutex{},
+		currentHash:   "",
+		utxoPool:      nil,
+		db:            store.db,
+		utxoSet:       make(map[string]UTXO),
+		Validators:    make(map[string]*Validator),
+		communityPool: 0,
+		balances:      make(map[string]float64),
 	}
 
 	genesis := GenesisBlock()
@@ -694,7 +718,7 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	}
 
 	// Mine the block using the existing MineBlock function from block.go
-	stakePool := NewStakePool()
+	stakePool := NewStakePool(bc)
 	log.Printf("⛏️ Mining block #%d - searching for valid hash...", newBlock.Header.BlockNumber)
 	startTime := time.Now()
 
@@ -793,4 +817,117 @@ func (bc *Blockchain) saveBlock(block Block) error {
 // Serialize converts a block to bytes
 func (b Block) Serialize() ([]byte, error) {
 	return json.Marshal(b)
+}
+
+// InitializeChain starts the blockchain
+func (bc *Blockchain) InitializeChain() error {
+	// Initialize genesis block if chain is empty
+	if bc.GetHeight() == 0 {
+		genesis := GenesisBlock()
+		bc.AddBlock(bc.mempool, bc.stakePool, bc.utxoSet, bc.p2pHost)
+		log.Printf("🌟 Genesis block created", genesis)
+	}
+
+	// Start block processing
+	go bc.processBlocks()
+
+	return nil
+}
+
+func (bc *Blockchain) processBlocks() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-bc.ctx.Done():
+			return
+		case <-ticker.C:
+			// Process pending transactions using existing AddBlock method
+			bc.AddBlock(bc.mempool, bc.stakePool, bc.utxoSet, bc.p2pHost)
+		}
+	}
+}
+
+// VerifyStake checks if a stake is valid and mature
+func (bc *Blockchain) VerifyStake(address string) error {
+	stake, exists := bc.stakePool.Stakes[address]
+	if !exists {
+		return fmt.Errorf("no stake found for address: %s", address)
+	}
+
+	if time.Since(stake.StartTime) < MinStakeAge {
+		return fmt.Errorf("stake not mature yet, needs %v more",
+			MinStakeAge-time.Since(stake.StartTime))
+	}
+
+	return nil
+}
+
+// ValidateValidator checks if a validator is eligible
+func (bc *Blockchain) ValidateValidator(validator *Validator) error {
+	// Verify stake
+	if err := bc.VerifyStake(validator.Address); err != nil {
+		return fmt.Errorf("stake verification failed: %w", err)
+	}
+
+	// Check validator status
+	if validator.Status == ValidatorStatusSlashed {
+		return fmt.Errorf("validator has been slashed")
+	}
+
+	// Verify minimum score for active validators
+	if validator.Status == ValidatorStatusActive && validator.Score < 100 {
+		return fmt.Errorf("validator score too low: %d", validator.Score)
+	}
+
+	return nil
+}
+
+// UpdateValidatorSet updates the active validator set
+func (bc *Blockchain) UpdateValidatorSet() error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	for address, validator := range bc.Validators {
+		if err := bc.ValidateValidator(validator); err != nil {
+			// Move to probation if validation fails
+			validator.Status = ValidatorStatusProbation
+			bc.Validators[address] = validator
+		}
+	}
+
+	return nil
+}
+
+func (bc *Blockchain) finalizeBlock(block *Block, validator *Validator) error {
+	// ... existing code ...
+
+	// Distribute rewards
+	if err := bc.rewardCalculator.DistributeRewards(block, validator); err != nil {
+		return fmt.Errorf("failed to distribute rewards: %w", err)
+	}
+
+	// Check for violations
+	if err := bc.slashingManager.CheckTimeoutViolations(validator); err != nil {
+		log.Printf("Validator %s slashed for timeout violations", validator.Address)
+	}
+	if err := bc.slashingManager.CheckConsensusViolations(validator); err != nil {
+		log.Printf("Validator %s slashed for consensus violations", validator.Address)
+	}
+
+	return nil
+}
+
+// Add balance management methods
+func (bc *Blockchain) AddBalance(address string, amount float64) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	if bc.balances == nil {
+		bc.balances = make(map[string]float64)
+	}
+
+	bc.balances[address] += amount
+	return nil
 }

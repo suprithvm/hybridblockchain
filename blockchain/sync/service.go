@@ -270,3 +270,53 @@ func (s *SyncService) PropagateTransaction(ctx context.Context, tx *pb.Transacti
 		PropagatedTo: 1, // For now, just indicate success
 	}, nil
 }
+
+// SyncValidatorSet implements ChainSync.SyncValidatorSet
+func (s *SyncService) SyncValidatorSet(ctx context.Context, req *pb.ValidatorSetRequest) (*pb.ValidatorSetResponse, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.blockchain == nil {
+		return nil, fmt.Errorf("blockchain not initialized")
+	}
+
+	activeValidators := make([]*pb.ValidatorInfo, 0)
+	for addr, validator := range s.blockchain.Validators {
+		if validator.Status == blockchain.ValidatorStatusActive {
+			activeValidators = append(activeValidators, &pb.ValidatorInfo{
+				Address:  addr,
+				Score:    validator.Score,
+				LastSeen: timestamppb.New(validator.LastActive),
+				IsActive: true,
+			})
+		}
+	}
+
+	return &pb.ValidatorSetResponse{
+		Validators:  activeValidators,
+		BlockHeight: s.blockchain.GetLatestBlock().Header.BlockNumber,
+		Timestamp:   timestamppb.Now(),
+	}, nil
+}
+
+// RecoverValidator implements ChainSync.RecoverValidator
+func (s *SyncService) RecoverValidator(ctx context.Context, req *pb.ValidatorRecoveryRequest) (*pb.ValidatorRecoveryResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	validator, exists := s.blockchain.Validators[req.ValidatorAddress]
+	if !exists {
+		return nil, fmt.Errorf("validator not found")
+	}
+
+	// Attempt to recover validator
+	if err := validator.Recover(); err != nil {
+		return nil, fmt.Errorf("failed to recover validator: %w", err)
+	}
+
+	return &pb.ValidatorRecoveryResponse{
+		Success:   true,
+		NewStatus: int32(validator.Status),
+		Message:   "Validator recovered successfully",
+	}, nil
+}

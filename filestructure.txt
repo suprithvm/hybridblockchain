@@ -9,6 +9,7 @@
     |-- blockchain.go
     |-- bootnode.go
     |-- config.go
+    |-- consensus.go
     |-- crypto.go
     |-- db
         |-- interface.go
@@ -33,12 +34,12 @@
     |-- p2p_test.go
     |-- patricia_trie.go
     |-- peer_manager.go
-    |-- peer_manager_test.go
+    |-- rewards.go
     |-- rpc.go
+    |-- slashing.go
     |-- stake_pool.go
     |-- state.go
     |-- store.go
-    |-- store_test.go
     |-- sync
         |-- client.go
         |-- converters.go
@@ -56,6 +57,8 @@
     |-- types.go
     |-- utxo.go
     |-- validator.go
+    |-- validator_protocol.go
+    |-- validator_selection.go
     |-- wallet.go
     |-- wallet_test.go
     |-- wallet_utils.go

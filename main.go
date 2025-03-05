@@ -230,6 +230,9 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 
 	// Initialize blockchain
 	bc := blockchain.InitialiseBlockchain(dbConfig)
+	if err := bc.InitializeChain(); err != nil {
+		log.Fatalf("❌ Failed to initialize blockchain: %v", err)
+	}
 
 	// Create network configuration
 	networkConfig := &blockchain.NetworkConfig{
@@ -258,13 +261,13 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 	// Create validator config
 	validatorConfig := &blockchain.ValidatorConfig{
 		Stake:        config.ValidatorStake,
-		MinStake:     0.0, // Minimum stake requirement
-		RewardRate:   0.05,   // 5% reward rate
-		SlashingRate: 0.10,   // 10% slashing rate
+		MinStake:     0.0,  // Minimum stake requirement
+		RewardRate:   0.05, // 5% reward rate
+		SlashingRate: 0.10, // 10% slashing rate
 	}
 
 	// Initialize validator
-	validator, err := blockchain.NewValidator(bc, validatorConfig)
+	validator, err := blockchain.NewValidator(bc, validatorConfig, wallet.Address)
 	if err != nil {
 		log.Fatalf("❌ Failed to initialize validator: %v", err)
 	}
@@ -646,7 +649,7 @@ func initValidatorNode(config *NodeConfig) error {
 	log.Printf("🔐 Creating validator with stake: %.4f tokens", config.ValidatorStake)
 
 	// Initialize validator
-	validator, err := blockchain.NewValidator(bc, validatorConfig)
+	validator, err := blockchain.NewValidator(bc, validatorConfig, wallet.Address)
 	if err != nil {
 		return err
 	}

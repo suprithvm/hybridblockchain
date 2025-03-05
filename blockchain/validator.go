@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+// Add these validator status constants
+const (
+	ValidatorStatusPending   = iota // Initial state
+	ValidatorStatusActive           // Actively validating
+	ValidatorStatusProbation        // Under probation due to poor performance
+	ValidatorStatusSlashed          // Slashed due to violations
+	ValidatorStatusInactive         // Voluntarily inactive
+)
+
 // ValidatorConfig holds configuration for a validator node
 type ValidatorConfig struct {
 	Stake        float64
@@ -20,19 +29,33 @@ type ValidatorConfig struct {
 
 // Validator represents a validator node in the network
 type Validator struct {
-	blockchain   *Blockchain
-	config       *ValidatorConfig
-	mu           sync.RWMutex
-	isValidating bool
-	missedBlocks int
-	lastBlock    uint64
-	rewards      float64
-	slashed      bool
-	validators   map[string]float64 // Address -> Stake mapping
+	Address           string                `json:"address"`
+	PublicKey         []byte                `json:"public_key"`
+	Status            int                   `json:"status"`
+	Score             uint64                `json:"score"`
+	LastActive        time.Time             `json:"last_active"`
+	Performance       *ValidatorPerformance `json:"performance"`
+	Violations        int                   `json:"violations"`
+	Timeouts          int                   `json:"timeouts"`
+	ProbationEndTime  time.Time             `json:"probation_end_time"`
+	ConsensusFailures int                   `json:"consensus_failures"`
+
+	// Private fields
+	blockchain     *Blockchain
+	config         *ValidatorConfig
+	mu             sync.RWMutex
+	isValidating   bool
+	missedBlocks   int
+	lastBlock      uint64
+	rewards        float64
+	slashed        bool
+	validators     map[string]float64
+	isSelected     bool
+	selectionProof *SelectionProof
 }
 
 // NewValidator creates a new validator instance
-func NewValidator(bc *Blockchain, config *ValidatorConfig) (*Validator, error) {
+func NewValidator(bc *Blockchain, config *ValidatorConfig, walletAddress string) (*Validator, error) {
 	if config.Stake < config.MinStake {
 		return nil, fmt.Errorf("stake amount %f is below minimum required %f",
 			config.Stake, config.MinStake)
@@ -49,6 +72,7 @@ func NewValidator(bc *Blockchain, config *ValidatorConfig) (*Validator, error) {
 	return &Validator{
 		blockchain: bc,
 		config:     config,
+		Address:    walletAddress,
 		validators: make(map[string]float64),
 		lastBlock:  bc.GetLatestBlock().Header.BlockNumber,
 	}, nil
@@ -86,34 +110,31 @@ func (v *Validator) validate() {
 
 	log.Printf("👀 Validator watching for new blocks - last processed: #%d", v.lastBlock)
 
-	for {
-		select {
-		case <-ticker.C:
-			if !v.isValidating {
-				log.Printf("🛑 Validation process terminated")
-				return
-			}
+	for range ticker.C {
+		if !v.isValidating {
+			log.Printf("�� Validation process terminated")
+			return
+		}
 
-			// Get latest block
-			currentBlock := v.blockchain.GetLatestBlock()
+		// Get latest block
+		currentBlock := v.blockchain.GetLatestBlock()
 
-			// Check if we missed any blocks
-			if currentBlock.Header.BlockNumber > v.lastBlock+1 {
-				missed := currentBlock.Header.BlockNumber - v.lastBlock - 1
-				v.handleMissedBlocks(int(missed))
-			}
+		// Check if we missed any blocks
+		if currentBlock.Header.BlockNumber > v.lastBlock+1 {
+			missed := currentBlock.Header.BlockNumber - v.lastBlock - 1
+			v.handleMissedBlocks(int(missed))
+		}
 
-			// Validate new block if available
-			if currentBlock.Header.BlockNumber > v.lastBlock {
-				log.Printf("🔍 New block #%d detected - beginning validation", currentBlock.Header.BlockNumber)
-				if err := v.validateBlock(currentBlock); err != nil {
-					log.Printf("❌ Block validation failed: %v", err)
-					continue
-				}
-				log.Printf("✅ Block #%d successfully validated", currentBlock.Header.BlockNumber)
-				v.lastBlock = currentBlock.Header.BlockNumber
-				v.distributeRewards(currentBlock)
+		// Validate new block if available
+		if currentBlock.Header.BlockNumber > v.lastBlock {
+			log.Printf("🔍 New block #%d detected - beginning validation", currentBlock.Header.BlockNumber)
+			if err := v.validateBlock(currentBlock); err != nil {
+				log.Printf("❌ Block validation failed: %v", err)
+				continue
 			}
+			log.Printf("✅ Block #%d successfully validated", currentBlock.Header.BlockNumber)
+			v.lastBlock = currentBlock.Header.BlockNumber
+			v.distributeRewards(currentBlock)
 		}
 	}
 }
@@ -278,4 +299,150 @@ func (v *Validator) GetStats() map[string]interface{} {
 		"slashed":      v.slashed,
 		"lastBlock":    v.lastBlock,
 	}
+}
+
+// UpdateValidatorScore calculates and updates validator score
+func (v *Validator) UpdateValidatorScore() {
+	if v.Performance == nil {
+		v.Performance = &ValidatorPerformance{
+			LastUpdate: time.Now(),
+		}
+		return
+	}
+
+	// Calculate base score from successful validations
+	baseScore := v.Performance.BlocksValidated * 10
+
+	// Subtract penalties for missed validations
+	penalties := v.Performance.MissedValidations * 20
+
+	// Factor in uptime
+	uptimeScore := uint64(v.Performance.UptimePercentage * 100)
+
+	// Calculate final score
+	if penalties > baseScore {
+		v.Score = 0
+	} else {
+		v.Score = baseScore - penalties + uptimeScore
+	}
+
+	// Update status based on score
+	v.updateStatus()
+}
+
+// updateStatus updates validator status based on score and violations
+func (v *Validator) updateStatus() {
+	switch {
+	case v.Score < 100:
+		v.Status = ValidatorStatusProbation
+	case v.Score >= 100 && v.Status != ValidatorStatusSlashed:
+		v.Status = ValidatorStatusActive
+	}
+}
+
+// RecordValidation records a successful block validation
+func (v *Validator) RecordValidation(success bool) {
+	if v.Performance == nil {
+		v.Performance = &ValidatorPerformance{}
+	}
+
+	if success {
+		v.Performance.BlocksValidated++
+		v.LastActive = time.Now()
+	} else {
+		v.Performance.MissedValidations++
+	}
+
+	// Update uptime percentage
+	total := v.Performance.BlocksValidated + v.Performance.MissedValidations
+	if total > 0 {
+		v.Performance.UptimePercentage = float64(v.Performance.BlocksValidated) / float64(total) * 100
+	}
+
+	v.UpdateValidatorScore()
+}
+
+func (v *Validator) CheckSelectionEligibility() error {
+	if v.Status != ValidatorStatusActive {
+		return fmt.Errorf("validator not active")
+	}
+
+	if v.Score < 100 {
+		return fmt.Errorf("validator score too low")
+	}
+
+	if v.slashed {
+		return fmt.Errorf("validator has been slashed")
+	}
+
+	return nil
+}
+
+func (v *Validator) NotifySelection(proof *SelectionProof) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if err := v.CheckSelectionEligibility(); err != nil {
+		return err
+	}
+
+	v.isSelected = true
+	v.selectionProof = proof
+	v.LastActive = time.Now()
+
+	log.Printf("🎯 Validator %s selected for next block validation", v.Address)
+	return nil
+}
+
+func (v *Validator) IsReady() bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
+	return v.isValidating && !v.slashed && v.Status == ValidatorStatusActive
+}
+
+// Add these methods
+func (v *Validator) IsSlashed() bool {
+	return v.Status == ValidatorStatusSlashed
+}
+
+func (v *Validator) Vote(blockHash string, vote bool) error {
+	if !v.IsReady() {
+		return fmt.Errorf("validator not ready to vote")
+	}
+
+	return v.blockchain.Node.BroadcastValidatorVote(v.Address, vote, blockHash)
+}
+
+func (v *Validator) ProcessSelection(proof *SelectionProof) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if err := v.CheckSelectionEligibility(); err != nil {
+		return err
+	}
+
+	v.isSelected = true
+	v.selectionProof = proof
+	v.LastActive = time.Now()
+
+	return nil
+}
+
+// Add this method to Validator struct
+func (v *Validator) Recover() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if v.Status != ValidatorStatusProbation && v.Status != ValidatorStatusSlashed {
+		return fmt.Errorf("validator not in recoverable state")
+	}
+
+	// Reset validator metrics
+	v.Score = 100
+	v.Timeouts = 0
+	v.Status = ValidatorStatusActive
+	v.LastActive = time.Now()
+
+	return nil
 }

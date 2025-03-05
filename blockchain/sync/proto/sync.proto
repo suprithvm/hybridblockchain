@@ -136,4 +136,32 @@ message PropagateResponse {
     bool success = 1;
     string error_message = 2;
     uint32 propagated_to = 3;
+}
+
+// Add these message definitions
+message ValidatorSetRequest {
+    uint64 block_height = 1;
+}
+
+message ValidatorSetResponse {
+    repeated ValidatorInfo validators = 1;
+    uint64 block_height = 2;
+    google.protobuf.Timestamp timestamp = 3;
+}
+
+message ValidatorInfo {
+    string address = 1;
+    uint64 score = 2;
+    google.protobuf.Timestamp last_seen = 3;
+    bool is_active = 4;
+}
+
+message ValidatorRecoveryRequest {
+    string validator_address = 1;
+}
+
+message ValidatorRecoveryResponse {
+    bool success = 1;
+    int32 new_status = 2;
+    string message = 3;
 } 
