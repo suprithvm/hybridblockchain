@@ -92,6 +92,7 @@ type BootstrapNode struct {
 	startTime     time.Time
 	lastHeartbeat map[peer.ID]time.Time
 	heartbeatMu   sync.RWMutex
+	node          *Node
 }
 
 // PeerScore represents the scoring metrics for a peer
@@ -316,6 +317,7 @@ func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
 		identity:      privKey,
 		startTime:     time.Now(),
 		lastHeartbeat: make(map[peer.ID]time.Time),
+		node:          nil,
 	}
 
 	// Initialize protocol handlers
@@ -344,7 +346,7 @@ func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
 	log.Printf("✨ Bootstrap node initialization complete\n")
 
 	// Set up protocol handlers
-	host.SetStreamHandler(HeartbeatProtocolID, bn.handleHeartbeat)
+	bn.host.SetStreamHandler(HeartbeatProtocolID, bn.handleHeartbeat)
 
 	// Start heartbeat monitor
 	go bn.monitorHeartbeats()
@@ -640,6 +642,32 @@ func (bn *BootstrapNode) Start() error {
 			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		}
 	}()
+
+	// Register sync protocol handler
+	bn.host.SetStreamHandler("/blockchain/1.0.0/sync", func(stream network.Stream) {
+		defer stream.Close()
+
+		// Handle sync request
+		var req SyncRequest
+		if err := json.NewDecoder(stream).Decode(&req); err != nil {
+			log.Printf("Error decoding sync request: %v", err)
+			return
+		}
+
+		// Get chain info using the correct field name for BootstrapNode
+		// Looking at the code, it seems the blockchain field might be named differently
+		latestBlock := bn.node.Blockchain.GetLatestBlock() // Try using node.Blockchain
+		resp := SyncResponse{
+			Height:        latestBlock.Header.BlockNumber,
+			LastBlockHash: latestBlock.Hash(),
+			Success:       true,
+		}
+
+		// Send response
+		if err := json.NewEncoder(stream).Encode(resp); err != nil {
+			log.Printf("Error encoding sync response: %v", err)
+		}
+	})
 
 	return nil
 }
@@ -1673,4 +1701,15 @@ func (bn *BootNode) Shutdown() error {
 		return bn.host.Close()
 	}
 	return nil
+}
+
+// Add these types
+type SyncRequest struct {
+	NodeID string `json:"node_id"`
+}
+
+type SyncResponse struct {
+	Height        uint64 `json:"height"`
+	LastBlockHash string `json:"last_block_hash"`
+	Success       bool   `json:"success"`
 }

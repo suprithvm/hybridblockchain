@@ -94,20 +94,20 @@
 |-- miner_data
     |-- chaindata
         |-- leveldb
-            |-- 000020.log
+            |-- 000022.log
             |-- CURRENT
             |-- CURRENT.bak
             |-- LOCK
             |-- LOG
-            |-- MANIFEST-000021
+            |-- MANIFEST-000023
     |-- nodedata
         |-- leveldb
-            |-- 000034.log
+            |-- 000036.log
             |-- CURRENT
             |-- CURRENT.bak
             |-- LOCK
             |-- LOG
-            |-- MANIFEST-000035
+            |-- MANIFEST-000037
     |-- wallet.json
 |-- my_wallet.json
 |-- node_data
