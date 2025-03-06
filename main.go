@@ -288,9 +288,38 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 				len(node.Host.Network().Peers()))
 			// Register sync protocol handler
 			node.Host.SetStreamHandler("/blockchain/1.0.0/sync", func(stream network.Stream) {
-				// Basic sync implementation
-				log.Printf("Received sync request from %s", stream.Conn().RemotePeer())
-				stream.Close()
+				defer stream.Close()
+
+				// Send sync request
+				req := blockchain.SyncRequest{
+					NodeID: node.Host.ID().String(),
+				}
+
+				if err := json.NewEncoder(stream).Encode(req); err != nil {
+					log.Printf("Failed to send sync request: %v", err)
+					return
+				}
+
+				// Receive sync response
+				var resp blockchain.SyncResponse
+				if err := json.NewDecoder(stream).Decode(&resp); err != nil {
+					log.Printf("Failed to decode sync response: %v", err)
+					return
+				}
+
+				// Handle the response
+				if resp.Success {
+					if resp.IsGenesisNode {
+						log.Printf("Connected to genesis node - no blockchain data available yet")
+						// Initialize as first node in the network
+					} else {
+						log.Printf("Received blockchain info: Height=%d, LastHash=%s",
+							resp.Height, resp.LastBlockHash)
+						// Implement blockchain sync logic here
+					}
+				} else {
+					log.Printf("Sync request failed")
+				}
 			})
 		} else {
 			log.Printf("No peers to sync with, continuing as genesis node")

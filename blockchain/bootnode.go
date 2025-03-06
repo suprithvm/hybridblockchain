@@ -1791,8 +1791,6 @@ type DiscoveryResponse struct {
 	Success      bool       `json:"success"`
 }
 
-
-
 type PeerStatus int
 
 const (
