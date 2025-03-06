@@ -530,11 +530,12 @@ func (bc *Blockchain) GetBlockByHeight(height interface{}) *Block {
 	return &bc.Chain[h]
 }
 
-// Add these methods to Blockchain struct
+// GetHeight returns the current height of the blockchain
 func (bc *Blockchain) GetHeight() uint64 {
-	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-	return uint64(len(bc.Chain) - 1)
+	if len(bc.Chain) == 0 {
+		return 0
+	}
+	return bc.Chain[len(bc.Chain)-1].Header.BlockNumber
 }
 
 func (bc *Blockchain) RollbackToHeight(height uint64) error {

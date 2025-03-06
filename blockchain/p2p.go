@@ -89,7 +89,7 @@ type Node struct {
 	knownPeers        map[peer.ID]bool
 	PubSub            *pubsub.PubSub
 	validatorProtocol *ValidatorProtocol
-	bootstrapNodes    []peer.AddrInfo
+	bootstrapNodes    map[peer.ID]bool
 	wg                sync.WaitGroup
 }
 
@@ -144,12 +144,13 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 
 	// Create the node instance first
 	n := &Node{
-		Host:       host,
-		config:     config,
-		ctx:        ctx,
-		cancel:     cancel,
-		knownPeers: make(map[peer.ID]bool),
-		PubSub:     ps,
+		Host:           host,
+		config:         config,
+		ctx:            ctx,
+		cancel:         cancel,
+		knownPeers:     make(map[peer.ID]bool),
+		PubSub:         ps,
+		bootstrapNodes: make(map[peer.ID]bool),
 	}
 
 	// Add connection logging
@@ -207,6 +208,7 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		wallet:          config.Wallet,
 		knownPeers:      make(map[peer.ID]bool),
 		PubSub:          ps,
+		bootstrapNodes:  make(map[peer.ID]bool),
 	}
 	node.StakePool = NewStakePool(config.Blockchain)
 
@@ -225,6 +227,21 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 	// Subscribe to validator topics
 	if err := node.subscribeToValidatorTopics(); err != nil {
 		return nil, fmt.Errorf("failed to subscribe to validator topics: %w", err)
+	}
+
+	// Initialize bootstrap nodes
+	for _, addrStr := range config.BootstrapNodes {
+		addr, err := ma.NewMultiaddr(addrStr)
+		if err != nil {
+			log.Printf("Warning: Failed to parse bootstrap node address %s: %v", addrStr, err)
+			continue
+		}
+		info, err := peer.AddrInfoFromP2pAddr(addr)
+		if err != nil {
+			log.Printf("Warning: Failed to get peer info from address %s: %v", addrStr, err)
+			continue
+		}
+		node.bootstrapNodes[info.ID] = true
 	}
 
 	return node, nil
@@ -246,8 +263,12 @@ func (n *Node) DiscoverPeers() error {
 	}
 
 	// Connect to bootstrap nodes first
-	if err := n.ConnectToBootstrapNodes(n.ctx); err != nil {
-		log.Printf("Warning: Failed to connect to some bootstrap nodes: %v", err)
+	for peerID := range n.bootstrapNodes {
+		if err := n.Host.Connect(n.ctx, n.Host.Peerstore().PeerInfo(peerID)); err != nil {
+			log.Printf("Warning: Failed to connect to bootstrap node %s: %v", peerID, err)
+			continue
+		}
+		log.Printf("✅ Connected to bootstrap node: %s", peerID)
 	}
 
 	// Start DHT bootstrap
@@ -1485,12 +1506,18 @@ func (n *Node) startBlockchainSync() {
 }
 
 func (n *Node) syncWithPeer(peerID peer.ID) error {
-	// Open sync stream
-	s, err := n.Host.NewStream(context.Background(), peerID, "/blockchain/1.0.0/sync")
+	// Skip sync if this is a bootstrap node
+	if n.IsPeerBootstrapNode(peerID) {
+		return nil
+	}
+
+	log.Printf("Syncing blockchain with peer: %s", peerID)
+
+	stream, err := n.Host.NewStream(n.ctx, peerID, protocol.ID("/blockchain/1.0.0/sync"))
 	if err != nil {
 		return fmt.Errorf("failed to open sync stream: %v", err)
 	}
-	defer s.Close()
+	defer stream.Close()
 
 	// Send sync request
 	request := struct {
@@ -1501,34 +1528,25 @@ func (n *Node) syncWithPeer(peerID peer.ID) error {
 		EndHeight:   -1,
 	}
 
-	if err := json.NewEncoder(s).Encode(request); err != nil {
+	if err := json.NewEncoder(stream).Encode(request); err != nil {
 		return fmt.Errorf("failed to send sync request: %v", err)
 	}
 
 	// Receive and process blocks
 	var blocks []Block
-	if err := json.NewDecoder(s).Decode(&blocks); err != nil {
+	if err := json.NewDecoder(stream).Decode(&blocks); err != nil {
 		return fmt.Errorf("failed to receive blocks: %v", err)
 	}
 
 	// Validate and add blocks
 	for _, block := range blocks {
-		// Validate block structure and hash
 		if err := validateBlockStructure(&block); err != nil {
 			return fmt.Errorf("invalid block structure at height %d: %v", block.Header.BlockNumber, err)
 		}
 
 		// Add block to blockchain
-		if len(blocks) > 0 {
-			log.Printf("Received %d blocks from peer %s", len(blocks), peerID)
-			for _, block := range blocks {
-				// Pass all required arguments to AddBlock
-				if err := n.Blockchain.AddBlock(&block, n.Mempool, n.StakePool, n.UTXOSet.GetAllUTXOs(), n.Host); err != nil {
-					log.Printf("Failed to add block: %v", err)
-				}
-			}
-		} else {
-			log.Printf("No new blocks received from peer %s", peerID)
+		if err := n.Blockchain.AddBlock(&block, n.Mempool, n.StakePool, n.UTXOSet.GetAllUTXOs(), n.Host); err != nil {
+			return fmt.Errorf("failed to add block at height %d: %v", block.Header.BlockNumber, err)
 		}
 	}
 
@@ -1748,12 +1766,9 @@ func (n *Node) SetStreamHandler(protocolID string, handler network.StreamHandler
 
 // IsPeerBootstrapNode checks if a peer is a bootstrap node
 func (n *Node) IsPeerBootstrapNode(peerID peer.ID) bool {
-	for _, bootNode := range n.bootstrapNodes {
-		if bootNode.ID == peerID {
-			return true
-		}
-	}
-	return false
+	n.syncMu.RLock()
+	defer n.syncMu.RUnlock()
+	return n.bootstrapNodes[peerID]
 }
 
 // SyncWithPeer attempts to sync blockchain data with a peer

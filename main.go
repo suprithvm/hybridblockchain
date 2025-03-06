@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/elliptic"
 	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -17,9 +16,6 @@ import (
 	"blockchain-core/blockchain"
 	"blockchain-core/blockchain/db"
 	"blockchain-core/blockchain/sync"
-
-	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/multiformats/go-multiaddr"
 )
 
 type NodeRole int
@@ -201,83 +197,44 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 		log.Fatalf("❌ Failed to start node: %v", err)
 	}
 
-	// Connect to bootstrap nodes first
+	// Connect to bootstrap nodes and discover peers
 	log.Printf("🔄 Connecting to bootstrap nodes:")
-	for _, bootstrapAddr := range config.BootstrapNodes {
-		// Parse the multiaddr
-		addr, err := multiaddr.NewMultiaddr(bootstrapAddr)
-		if err != nil {
-			log.Printf("Failed to parse bootstrap address %s: %v", bootstrapAddr, err)
-			continue
-		}
-
-		// Extract the peer ID from the multiaddr
-		info, err := peer.AddrInfoFromP2pAddr(addr)
-		if err != nil {
-			log.Printf("Failed to get peer info from address %s: %v", bootstrapAddr, err)
-			continue
-		}
-
-		// Connect to bootstrap node using the peer ID
-		stream, err := node.Host.NewStream(context.Background(), info.ID, "/blockchain/1.0.0/discovery")
-		if err != nil {
-			log.Printf("Failed to connect to bootstrap node %s: %v", info.ID, err)
-			continue
-		}
-
-		// Send discovery request
-		req := blockchain.DiscoveryRequest{
-			NodeID:      node.Host.ID().String(),
-			NodeVersion: "1.0.0",
-		}
-
-		if err := json.NewEncoder(stream).Encode(req); err != nil {
-			log.Printf("Failed to send discovery request: %v", err)
-			stream.Close()
-			continue
-		}
-
-		// Get peer list
-		var resp blockchain.DiscoveryResponse
-		if err := json.NewDecoder(stream).Decode(&resp); err != nil {
-			log.Printf("Failed to decode discovery response: %v", err)
-			stream.Close()
-			continue
-		}
-		stream.Close()
-
-		if resp.NetworkEmpty {
-			log.Printf("🆕 First node in the network")
-			// Initialize as first node
-			continue
-		}
-
-		// After successful connection, don't try to sync blockchain data
-		log.Printf("✅ Connected to bootstrap node: %s", bootstrapAddr)
-	}
-
-	// Then discover and connect to regular peers
-	log.Printf("🔄 Discovering peers in the network")
 	if err := node.DiscoverPeers(); err != nil {
 		log.Printf("⚠️ Peer discovery warning: %v", err)
 	}
 
-	// Only sync with non-bootstrap peers
-	for _, peerID := range node.Host.Network().Peers() {
-		if !node.IsPeerBootstrapNode(peerID) {
-			if err := node.SyncWithPeer(peerID); err != nil {
-				log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
-			}
-		}
-	}
-
-	// Use the node variable
+	// Log node ID
 	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
 
 	// Register blockchain handlers
 	if err := node.RegisterBlockchainHandlers(bc); err != nil {
 		log.Printf("⚠️ Warning: Failed to register blockchain handlers: %v", err)
 	}
+
+	// Start periodic peer discovery and blockchain syncing
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// Discover new peers
+				if err := node.DiscoverPeers(); err != nil {
+					log.Printf("⚠️ Peer discovery warning: %v", err)
+				}
+
+				// Sync with non-bootstrap peers
+				for _, peerID := range node.Host.Network().Peers() {
+					if !node.IsPeerBootstrapNode(peerID) {
+						if err := node.SyncWithPeer(peerID); err != nil {
+							log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
+						}
+					}
+				}
+			}
+		}
+	}()
 
 	return nil
 }
@@ -303,9 +260,6 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 
 	// Initialize blockchain
 	bc := blockchain.InitialiseBlockchain(dbConfig)
-	if err := bc.InitializeChain(); err != nil {
-		log.Fatalf("❌ Failed to initialize blockchain: %v", err)
-	}
 
 	// Create network configuration
 	networkConfig := &blockchain.NetworkConfig{
@@ -331,6 +285,45 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		log.Fatalf("❌ Failed to start node: %v", err)
 	}
 
+	// Connect to bootstrap nodes and discover peers
+	log.Printf("🔄 Connecting to bootstrap nodes:")
+	if err := node.DiscoverPeers(); err != nil {
+		log.Printf("⚠️ Peer discovery warning: %v", err)
+	}
+
+	// Log node ID
+	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
+
+	// Register blockchain handlers
+	if err := node.RegisterBlockchainHandlers(bc); err != nil {
+		log.Printf("⚠️ Warning: Failed to register blockchain handlers: %v", err)
+	}
+
+	// Check if blockchain exists and sync if needed
+	if bc.GetHeight() == 0 {
+		log.Printf("🆕 No existing blockchain found. Initializing genesis block...")
+		if err := bc.InitializeChain(); err != nil {
+			log.Fatalf("❌ Failed to initialize genesis block: %v", err)
+		}
+		log.Printf("✅ Genesis block initialized")
+	} else {
+		log.Printf("📥 Existing blockchain found at height %d. Starting sync...", bc.GetHeight())
+		// Start syncing with peers
+		go func() {
+			for {
+				// Sync with non-bootstrap peers
+				for _, peerID := range node.Host.Network().Peers() {
+					if !node.IsPeerBootstrapNode(peerID) {
+						if err := node.SyncWithPeer(peerID); err != nil {
+							log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
+						}
+					}
+				}
+				time.Sleep(30 * time.Second) // Sync every 30 seconds
+			}
+		}()
+	}
+
 	// Create validator config
 	validatorConfig := &blockchain.ValidatorConfig{
 		Stake:        config.ValidatorStake,
@@ -353,6 +346,31 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 	log.Printf("✅ Validator node is running")
 	log.Printf("📝 Validator Address: %s", wallet.Address)
 	log.Printf("💰 Staked Amount: %.2f", config.ValidatorStake)
+
+	// Start periodic peer discovery and blockchain syncing
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// Discover new peers
+				if err := node.DiscoverPeers(); err != nil {
+					log.Printf("⚠️ Peer discovery warning: %v", err)
+				}
+
+				// Sync with non-bootstrap peers
+				for _, peerID := range node.Host.Network().Peers() {
+					if !node.IsPeerBootstrapNode(peerID) {
+						if err := node.SyncWithPeer(peerID); err != nil {
+							log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
+						}
+					}
+				}
+			}
+		}
+	}()
 }
 
 func runObserverNode(config *NodeConfig, store *blockchain.Store) {
