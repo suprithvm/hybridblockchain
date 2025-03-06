@@ -93,6 +93,7 @@ type BootstrapNode struct {
 	lastHeartbeat map[peer.ID]time.Time
 	heartbeatMu   sync.RWMutex
 	node          *Node
+	blockchain    *Blockchain
 }
 
 // PeerScore represents the scoring metrics for a peer
@@ -346,7 +347,45 @@ func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
 	log.Printf("✨ Bootstrap node initialization complete\n")
 
 	// Set up protocol handlers
-	bn.host.SetStreamHandler(HeartbeatProtocolID, bn.handleHeartbeat)
+	bn.host.SetStreamHandler("/blockchain/1.0.0/sync", func(stream network.Stream) {
+		defer stream.Close()
+
+		// Handle sync request
+		var req SyncRequest
+		if err := json.NewDecoder(stream).Decode(&req); err != nil {
+			log.Printf("Error decoding sync request: %v", err)
+			return
+		}
+
+		// Initialize response
+		resp := SyncResponse{
+			Success: true,
+		}
+
+		// Check if blockchain is initialized
+		if bn.blockchain != nil {
+			// Get actual blockchain data
+			latestBlock := bn.blockchain.GetLatestBlock()
+			resp.Height = latestBlock.Header.BlockNumber
+			resp.LastBlockHash = latestBlock.Hash()
+			log.Printf("📊 Syncing peer with blockchain height %d, hash %s",
+				resp.Height, resp.LastBlockHash)
+		} else {
+			// No blockchain available - this is a fresh network
+			resp.Height = 0
+			resp.LastBlockHash = ""
+			resp.IsGenesisNode = true
+			log.Printf("🆕 No blockchain available for sync - informing peer this is a fresh network")
+		}
+
+		// Send response
+		if err := json.NewEncoder(stream).Encode(resp); err != nil {
+			log.Printf("❌ Error encoding sync response: %v", err)
+			return
+		}
+
+		log.Printf("✅ Responded to sync request from: %s", stream.Conn().RemotePeer().String())
+	})
 
 	// Start heartbeat monitor
 	go bn.monitorHeartbeats()
@@ -643,30 +682,55 @@ func (bn *BootstrapNode) Start() error {
 		}
 	}()
 
-	// Register sync protocol handler
-	bn.host.SetStreamHandler("/blockchain/1.0.0/sync", func(stream network.Stream) {
+	// Register peer discovery protocol handler
+	bn.host.SetStreamHandler("/blockchain/1.0.0/discovery", func(stream network.Stream) {
 		defer stream.Close()
 
-		// Handle sync request
-		var req SyncRequest
+		// Handle discovery request
+		var req DiscoveryRequest
 		if err := json.NewDecoder(stream).Decode(&req); err != nil {
-			log.Printf("Error decoding sync request: %v", err)
+			log.Printf("Error decoding discovery request: %v", err)
 			return
 		}
 
-		// Get chain info using the correct field name for BootstrapNode
-		// Looking at the code, it seems the blockchain field might be named differently
-		latestBlock := bn.node.Blockchain.GetLatestBlock() // Try using node.Blockchain
-		resp := SyncResponse{
-			Height:        latestBlock.Header.BlockNumber,
-			LastBlockHash: latestBlock.Hash(),
-			Success:       true,
+		// Get list of active peers
+		peers := bn.host.Network().Peers()
+		activePeers := make([]PeerInfo, 0)
+
+		for _, p := range peers {
+			// Skip requesting peer
+			if p == stream.Conn().RemotePeer() {
+				continue
+			}
+
+			// Get peer addresses
+			addrs := bn.host.Peerstore().Addrs(p)
+			if len(addrs) > 0 {
+				activePeers = append(activePeers, PeerInfo{
+					ID:       p,
+					Address:  addrs[0].String(),
+					LastSeen: time.Now(),
+					Version:  "1.0.0",
+					Status:   PeerStatusActive,
+				})
+			}
+		}
+
+		// Create discovery response
+		resp := DiscoveryResponse{
+			Peers:        activePeers,
+			NetworkEmpty: len(activePeers) == 0,
+			Success:      true,
 		}
 
 		// Send response
 		if err := json.NewEncoder(stream).Encode(resp); err != nil {
-			log.Printf("Error encoding sync response: %v", err)
+			log.Printf("❌ Error encoding discovery response: %v", err)
+			return
 		}
+
+		log.Printf("✅ Sent peer list to: %s (Found %d peers)",
+			stream.Conn().RemotePeer().String(), len(activePeers))
 	})
 
 	return nil
@@ -1712,4 +1776,27 @@ type SyncResponse struct {
 	Height        uint64 `json:"height"`
 	LastBlockHash string `json:"last_block_hash"`
 	Success       bool   `json:"success"`
+	IsGenesisNode bool   `json:"is_genesis_node,omitempty"`
 }
+
+// Discovery protocol types
+type DiscoveryRequest struct {
+	NodeID      string `json:"node_id"`
+	NodeVersion string `json:"node_version"`
+}
+
+type DiscoveryResponse struct {
+	Peers        []PeerInfo `json:"peers"`
+	NetworkEmpty bool       `json:"network_empty"`
+	Success      bool       `json:"success"`
+}
+
+
+
+type PeerStatus int
+
+const (
+	PeerStatusUnknown PeerStatus = iota
+	PeerStatusActive
+	PeerStatusInactive
+)

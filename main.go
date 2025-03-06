@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/elliptic"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -16,6 +17,10 @@ import (
 	"blockchain-core/blockchain"
 	"blockchain-core/blockchain/db"
 	"blockchain-core/blockchain/sync"
+
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multiaddr"
 )
 
 type NodeRole int
@@ -152,7 +157,7 @@ func runBootstrapNode(config *NodeConfig) {
 	log.Printf("✅ Bootstrap node is running on %s", config.ListenAddr)
 }
 
-func runMinerNode(config *NodeConfig, store *blockchain.Store) {
+func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 	log.Printf("⛏️ Starting Miner Node")
 
 	// Handle wallet setup
@@ -197,8 +202,100 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) {
 		log.Fatalf("❌ Failed to start node: %v", err)
 	}
 
-	// Start sync service
-	startSyncService(config, bc, store)
+	// Start mining process
+	// Uncomment when mining is needed
+	// func startMining(bc *blockchain.Blockchain, minerAddress string) {
+	//     log.Printf("⚒️ Mining service activated for address %s", minerAddress)
+	//     ...
+	// }
+
+	// Connect to bootstrap nodes first
+	for _, addrStr := range config.BootstrapNodes {
+		// Parse the multiaddr
+		addr, err := multiaddr.NewMultiaddr(addrStr)
+		if err != nil {
+			log.Printf("Failed to parse bootstrap address %s: %v", addrStr, err)
+			continue
+		}
+
+		// Extract the peer ID from the multiaddr
+		info, err := peer.AddrInfoFromP2pAddr(addr)
+		if err != nil {
+			log.Printf("Failed to get peer info from address %s: %v", addrStr, err)
+			continue
+		}
+
+		// Connect to bootstrap node using the peer ID
+		stream, err := node.Host.NewStream(context.Background(), info.ID, "/blockchain/1.0.0/discovery")
+		if err != nil {
+			log.Printf("Failed to connect to bootstrap node %s: %v", info.ID, err)
+			continue
+		}
+
+		// Send discovery request
+		req := blockchain.DiscoveryRequest{
+			NodeID:      node.Host.ID().String(),
+			NodeVersion: "1.0.0",
+		}
+
+		if err := json.NewEncoder(stream).Encode(req); err != nil {
+			log.Printf("Failed to send discovery request: %v", err)
+			stream.Close()
+			continue
+		}
+
+		// Get peer list
+		var resp blockchain.DiscoveryResponse
+		if err := json.NewDecoder(stream).Decode(&resp); err != nil {
+			log.Printf("Failed to decode discovery response: %v", err)
+			stream.Close()
+			continue
+		}
+		stream.Close()
+
+		if resp.NetworkEmpty {
+			log.Printf("🆕 First node in the network")
+			// Initialize as first node
+			continue
+		}
+
+		// Connect to discovered peers
+		for _, peerInfo := range resp.Peers {
+			// Parse the multiaddr
+			addr, err := multiaddr.NewMultiaddr(peerInfo.Address)
+			if err != nil {
+				log.Printf("Failed to parse peer address %s: %v", peerInfo.Address, err)
+				continue
+			}
+
+			// Create a peer.AddrInfo
+			addrInfo := peer.AddrInfo{
+				ID:    peerInfo.ID,
+				Addrs: []multiaddr.Multiaddr{addr},
+			}
+
+			// Connect using the Host
+			if err := node.Host.Connect(context.Background(), addrInfo); err != nil {
+				log.Printf("Failed to connect to peer %s: %v", peerInfo.ID, err)
+				continue
+			}
+			log.Printf("✅ Connected to peer: %s", peerInfo.ID)
+		}
+
+		// Start blockchain sync with connected peers
+		if len(node.Host.Network().Peers()) > 0 {
+			log.Printf("🔄 Starting blockchain sync with %d connected peers",
+				len(node.Host.Network().Peers()))
+			// Register sync protocol handler
+			node.Host.SetStreamHandler("/blockchain/1.0.0/sync", func(stream network.Stream) {
+				// Basic sync implementation
+				log.Printf("Received sync request from %s", stream.Conn().RemotePeer())
+				stream.Close()
+			})
+		} else {
+			log.Printf("No peers to sync with, continuing as genesis node")
+		}
+	}
 
 	// Use the node variable
 	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
@@ -207,6 +304,8 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) {
 	if err := node.RegisterBlockchainHandlers(bc); err != nil {
 		log.Printf("⚠️ Warning: Failed to register blockchain handlers: %v", err)
 	}
+
+	return nil
 }
 
 func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
@@ -604,7 +703,7 @@ func startMining(bc *blockchain.Blockchain, minerAddress string) {
 
 		log.Printf("💎 Successfully mined block #%d with %d transactions",
 			block.Header.BlockNumber, len(block.Body.Transactions.GetAllTransactions()))
-		log.Printf("�� Block stats: Hash: %s, Nonce: %d",
+		log.Printf(" Block stats: Hash: %s, Nonce: %d",
 			block.Hash(), block.Header.Nonce)
 
 		// Short pause between mining cycles

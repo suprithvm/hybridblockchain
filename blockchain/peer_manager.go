@@ -34,7 +34,7 @@ const (
 	ReputationThresholdGood = 50
 	ReputationThresholdBad  = -20
 	VotingTimeout           = 30 * time.Second
-	MinVotingQuorum         = 2 / 3
+	MinVotingQuorum         = 2.0 / 3.0	
 	MaxRollbackBlocks       = 100
 	MsgNewBlock             = "NEW_BLOCK"
 	MsgGetBlocks            = "GET_BLOCKS"
@@ -52,9 +52,9 @@ type SyncProgress struct {
 }
 
 type PeerInfo struct {
-	ID             peer.ID
+	ID             peer.ID `json:"id"`
 	Score          int
-	LastSeen       time.Time
+	LastSeen       time.Time `json:"last_seen"`
 	Connected      bool
 	Blacklisted    bool
 	ConnectedAt    time.Time
@@ -62,7 +62,7 @@ type PeerInfo struct {
 	FailCount      int
 	IsSyncing      bool
 	SyncProgress   SyncProgress
-	Version        string
+	Version        string `json:"version"`
 	Capabilities   []string
 	LatencyStats   LatencyStats
 	ValidBlocks    int
@@ -71,6 +71,8 @@ type PeerInfo struct {
 	InvalidTxs     int
 	LastVote       string
 	VoteTimestamp  int64
+	Status   PeerStatus `json:"status"`
+	Address  string     `json:"address"`
 }
 
 type LatencyStats struct {
