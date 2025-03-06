@@ -844,8 +844,33 @@ func (bc *Blockchain) processBlocks() {
 		case <-bc.ctx.Done():
 			return
 		case <-ticker.C:
-			// Process pending transactions using existing AddBlock method
-			bc.AddBlock(bc.mempool, bc.stakePool, bc.utxoSet, bc.p2pHost)
+			// Create a new block with pending transactions
+			previousBlock := bc.GetLatestBlock()
+
+			// Create transaction trie
+			txTrie := NewPatriciaTrie()
+			for _, tx := range bc.mempool.GetTransactions() {
+				txTrie.Insert(tx)
+			}
+
+			newBlock := Block{
+				Header: &BlockHeader{
+					Version:      1,
+					BlockNumber:  previousBlock.Header.BlockNumber + 1,
+					PreviousHash: previousBlock.Hash(),
+					Timestamp:    time.Now().Unix(),
+					Difficulty:   previousBlock.Header.Difficulty,
+					GasLimit:     BaseGasLimit,
+				},
+				Body: &BlockBody{
+					Transactions: txTrie,
+				},
+			}
+
+			// Process pending transactions using AddBlock method
+			if err := bc.AddBlock(&newBlock, bc.mempool, bc.stakePool, bc.utxoSet, bc.p2pHost); err != nil {
+				log.Printf("Failed to add block: %v", err)
+			}
 		}
 	}
 }

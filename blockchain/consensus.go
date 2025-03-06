@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -128,12 +129,16 @@ func (ce *ConsensusEngine) finalizeBlock() {
 	}
 
 	// Add block to chain
-	ce.blockchain.AddBlock(
+	if err := ce.blockchain.AddBlock(
+		ce.state.ProposedBlock, // Add the proposed block as first argument
 		ce.blockchain.mempool,
 		ce.blockchain.stakePool,
 		ce.blockchain.utxoSet,
 		ce.blockchain.p2pHost,
-	)
+	); err != nil {
+		log.Printf("Failed to add block to chain: %v", err)
+		return
+	}
 
 	// Broadcast finalized block
 	block := *ce.state.ProposedBlock // Dereference the pointer

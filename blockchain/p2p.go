@@ -22,7 +22,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
-	"github.com/multiformats/go-multiaddr"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -240,22 +239,26 @@ func (n *Node) Close() error {
 	return n.DHT.Close()
 }
 
-// DiscoverPeers uses DHT to discover peers
-func (n *Node) DiscoverPeers() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-n.ctx.Done():
-			return
-		case <-ticker.C:
-			if n.PeerManager.NeedMorePeers() {
-				n.findAndConnectPeers()
-			}
-			n.PeerManager.CleanupPeers()
-		}
+// DiscoverPeers finds and connects to peers in the network
+func (n *Node) DiscoverPeers() error {
+	if len(n.bootstrapNodes) == 0 {
+		return fmt.Errorf("no bootstrap nodes configured")
 	}
+
+	// Connect to bootstrap nodes first
+	if err := n.ConnectToBootstrapNodes(n.ctx); err != nil {
+		log.Printf("Warning: Failed to connect to some bootstrap nodes: %v", err)
+	}
+
+	// Start DHT bootstrap
+	if err := n.bootstrapDHT(n.ctx); err != nil {
+		log.Printf("Warning: DHT bootstrap failed: %v", err)
+	}
+
+	// Start peer discovery
+	go n.discoverPeers()
+
+	return nil
 }
 
 // findAndConnectPeers finds and connects to new peers
@@ -831,14 +834,7 @@ func (n *Node) broadcastNewChainState() {
 
 // SyncBlocks initiates block synchronization with a peer
 func (n *Node) SyncBlocks(peerID peer.ID, startHeight, endHeight int) error {
-	// Open sync stream
-	s, err := n.Host.NewStream(context.Background(), peerID, "/blockchain/1.0.0/sync")
-	if err != nil {
-		return fmt.Errorf("failed to open sync stream: %v", err)
-	}
-	defer s.Close()
-
-	// Send sync request
+	// Create sync request
 	request := struct {
 		StartHeight int
 		EndHeight   int
@@ -846,6 +842,13 @@ func (n *Node) SyncBlocks(peerID peer.ID, startHeight, endHeight int) error {
 		StartHeight: startHeight,
 		EndHeight:   endHeight,
 	}
+
+	// Open sync stream
+	s, err := n.Host.NewStream(n.ctx, peerID, protocol.ID("/blockchain/1.0.0/sync"))
+	if err != nil {
+		return fmt.Errorf("failed to open sync stream: %v", err)
+	}
+	defer s.Close()
 
 	if err := json.NewEncoder(s).Encode(request); err != nil {
 		return fmt.Errorf("failed to send sync request: %v", err)
@@ -861,9 +864,11 @@ func (n *Node) SyncBlocks(peerID peer.ID, startHeight, endHeight int) error {
 		return fmt.Errorf("failed to receive blocks: %v", err)
 	}
 
-	// Create temporary mempool and UTXO set for synced blocks
-	tempMempool := NewMempool(n)
-	tempUTXOSet := make(map[string]UTXO)
+	// Convert UTXOPool to map[string]UTXO
+	utxoMap := make(map[string]UTXO)
+	for _, utxo := range n.UTXOSet.GetAllUTXOs() {
+		utxoMap[utxo.TransactionID] = utxo
+	}
 
 	// Validate and add blocks
 	for i, block := range blocks {
@@ -873,7 +878,9 @@ func (n *Node) SyncBlocks(peerID peer.ID, startHeight, endHeight int) error {
 		}
 
 		// Add block to blockchain
-		n.Blockchain.AddBlock(tempMempool, n.StakePool, tempUTXOSet, n.Host)
+		if err := n.Blockchain.AddBlock(&block, n.Mempool, n.StakePool, utxoMap, n.Host); err != nil {
+			return fmt.Errorf("failed to add block at height %d: %v", startHeight+i, err)
+		}
 
 		// Update sync progress
 		n.PeerManager.UpdateSyncProgress(peerID, startHeight+i+1, endHeight)
@@ -1504,10 +1511,6 @@ func (n *Node) syncWithPeer(peerID peer.ID) error {
 		return fmt.Errorf("failed to receive blocks: %v", err)
 	}
 
-	// Create temporary mempool and UTXO set for synced blocks
-	tempMempool := NewMempool(n)
-	tempUTXOSet := make(map[string]UTXO)
-
 	// Validate and add blocks
 	for _, block := range blocks {
 		// Validate block structure and hash
@@ -1793,60 +1796,6 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 		}
 	} else {
 		log.Printf("No new blocks received from peer %s", peerID)
-	}
-
-	return nil
-}
-
-// DiscoverPeers finds and connects to peers in the network
-func (n *Node) DiscoverPeers() error {
-	if len(n.bootstrapNodes) == 0 {
-		return fmt.Errorf("no bootstrap nodes configured")
-	}
-
-	bootNode := n.bootstrapNodes[0]
-	stream, err := n.Host.NewStream(n.ctx, bootNode.ID, protocol.ID("/blockchain/1.0.0/discovery"))
-	if err != nil {
-		return fmt.Errorf("failed to open discovery stream: %v", err)
-	}
-	defer stream.Close()
-
-	req := DiscoveryRequest{
-		NodeID:      n.Host.ID().String(),
-		NodeVersion: "1.0.0",
-	}
-
-	if err := json.NewEncoder(stream).Encode(req); err != nil {
-		return fmt.Errorf("failed to send discovery request: %v", err)
-	}
-
-	var resp DiscoveryResponse
-	if err := json.NewDecoder(stream).Decode(&resp); err != nil {
-		return fmt.Errorf("failed to receive discovery response: %v", err)
-	}
-
-	// Connect to discovered peers
-	for _, peerInfo := range resp.Peers {
-		if n.IsPeerBootstrapNode(peerInfo.ID) {
-			continue // Skip bootstrap nodes
-		}
-
-		addr, err := multiaddr.NewMultiaddr(peerInfo.Address)
-		if err != nil {
-			log.Printf("Failed to parse peer address %s: %v", peerInfo.Address, err)
-			continue
-		}
-
-		addrInfo := peer.AddrInfo{
-			ID:    peerInfo.ID,
-			Addrs: []multiaddr.Multiaddr{addr},
-		}
-
-		if err := n.Host.Connect(n.ctx, addrInfo); err != nil {
-			log.Printf("Failed to connect to peer %s: %v", peerInfo.ID, err)
-			continue
-		}
-		log.Printf("✅ Connected to peer: %s", peerInfo.ID)
 	}
 
 	return nil
