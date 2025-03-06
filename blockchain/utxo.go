@@ -791,3 +791,8 @@ func (u *UTXOPool) restoreSnapshot(height uint64) error {
 	}
 	return fmt.Errorf("no snapshot found for height %d", height)
 }
+func (u *UTXOPool) GetAllUTXOs() map[string]UTXO {
+    u.mu.RLock()
+    defer u.mu.RUnlock()
+    return u.utxos
+} 

@@ -111,21 +111,21 @@ func initDB(config *DatabaseConfig) db.Database {
 }
 
 // Add peerHost as a parameter to blockchain methods where necessary
-func (bc *Blockchain) AddBlock(mempool *Mempool, stakePool *StakePool, utxoSet map[string]UTXO, peerHost host.Host) error {
+func (bc *Blockchain) AddBlock(block *Block, mempool *Mempool, stakePool *StakePool, utxos map[string]UTXO, host host.Host) error {
 	previousBlock := bc.GetLatestBlock()
 
 	// Select validator
-	validatorWallet, validatorHost, err := stakePool.SelectValidator(peerHost)
+	validatorWallet, validatorHost, err := stakePool.SelectValidator(host)
 	if err != nil {
 		log.Printf("Failed to select validator: %v", err)
 		return err
 	}
 
 	// Create the new block
-	newBlock := NewBlock(previousBlock, mempool, utxoSet, previousBlock.Header.Difficulty, validatorWallet)
+	newBlock := NewBlock(previousBlock, mempool, utxos, previousBlock.Header.Difficulty, validatorWallet)
 
 	// Mine and validate the block
-	err = MineBlock(&newBlock, previousBlock, stakePool, 10, peerHost)
+	err = MineBlock(&newBlock, previousBlock, stakePool, 10, host)
 	if err != nil {
 		log.Printf("Failed to mine block: %v", err)
 		return err
@@ -825,7 +825,7 @@ func (bc *Blockchain) InitializeChain() error {
 	// Initialize genesis block if chain is empty
 	if bc.GetHeight() == 0 {
 		genesis := GenesisBlock()
-		bc.AddBlock(bc.mempool, bc.stakePool, bc.utxoSet, bc.p2pHost)
+		bc.AddBlock(&genesis, bc.mempool, bc.stakePool, bc.utxoSet, bc.p2pHost)
 		log.Printf("🌟 Genesis block created", genesis)
 	}
 
@@ -982,5 +982,3 @@ func (up *UTXOPool) GetRootHash() string {
 
 	return hex.EncodeToString(hasher.Sum(nil))
 }
-
-

@@ -22,6 +22,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/multiformats/go-multiaddr"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -89,6 +90,8 @@ type Node struct {
 	knownPeers        map[peer.ID]bool
 	PubSub            *pubsub.PubSub
 	validatorProtocol *ValidatorProtocol
+	bootstrapNodes    []peer.AddrInfo
+	wg                sync.WaitGroup
 }
 
 // Add getter method for gas model
@@ -1513,7 +1516,17 @@ func (n *Node) syncWithPeer(peerID peer.ID) error {
 		}
 
 		// Add block to blockchain
-		n.Blockchain.AddBlock(tempMempool, n.StakePool, tempUTXOSet, n.Host)
+		if len(blocks) > 0 {
+			log.Printf("Received %d blocks from peer %s", len(blocks), peerID)
+			for _, block := range blocks {
+				// Pass all required arguments to AddBlock
+				if err := n.Blockchain.AddBlock(&block, n.Mempool, n.StakePool, n.UTXOSet.GetAllUTXOs(), n.Host); err != nil {
+					log.Printf("Failed to add block: %v", err)
+				}
+			}
+		} else {
+			log.Printf("No new blocks received from peer %s", peerID)
+		}
 	}
 
 	return nil
@@ -1728,4 +1741,113 @@ func (n *Node) subscribeTopic(topic string, handler func(string, []byte) error) 
 // Add to Node struct methods
 func (n *Node) SetStreamHandler(protocolID string, handler network.StreamHandler) {
 	n.Host.SetStreamHandler(protocol.ID(protocolID), handler)
+}
+
+// IsPeerBootstrapNode checks if a peer is a bootstrap node
+func (n *Node) IsPeerBootstrapNode(peerID peer.ID) bool {
+	for _, bootNode := range n.bootstrapNodes {
+		if bootNode.ID == peerID {
+			return true
+		}
+	}
+	return false
+}
+
+// SyncWithPeer attempts to sync blockchain data with a peer
+func (n *Node) SyncWithPeer(peerID peer.ID) error {
+	// Skip sync if this is a bootstrap node
+	if n.IsPeerBootstrapNode(peerID) {
+		log.Printf("Skipping blockchain sync with bootstrap node: %s", peerID)
+		return nil
+	}
+
+	log.Printf("Syncing blockchain with peer: %s", peerID)
+
+	stream, err := n.Host.NewStream(n.ctx, peerID, protocol.ID("/blockchain/1.0.0/sync"))
+	if err != nil {
+		return fmt.Errorf("failed to open sync stream: %v", err)
+	}
+	defer stream.Close()
+
+	// Send sync request
+	req := SyncRequest{
+		NodeID: n.Host.ID().String(),
+	}
+
+	if err := json.NewEncoder(stream).Encode(req); err != nil {
+		return fmt.Errorf("failed to send sync request: %v", err)
+	}
+
+	// Receive blocks
+	var blocks []Block
+	if err := json.NewDecoder(stream).Decode(&blocks); err != nil {
+		return fmt.Errorf("failed to receive blocks: %v", err)
+	}
+
+	if len(blocks) > 0 {
+		log.Printf("Received %d blocks from peer %s", len(blocks), peerID)
+		for _, block := range blocks {
+			if err := n.Blockchain.AddBlock(&block, n.Mempool, n.StakePool, n.UTXOSet.GetAllUTXOs(), n.Host); err != nil {
+				log.Printf("Failed to add block: %v", err)
+			}
+		}
+	} else {
+		log.Printf("No new blocks received from peer %s", peerID)
+	}
+
+	return nil
+}
+
+// DiscoverPeers finds and connects to peers in the network
+func (n *Node) DiscoverPeers() error {
+	if len(n.bootstrapNodes) == 0 {
+		return fmt.Errorf("no bootstrap nodes configured")
+	}
+
+	bootNode := n.bootstrapNodes[0]
+	stream, err := n.Host.NewStream(n.ctx, bootNode.ID, protocol.ID("/blockchain/1.0.0/discovery"))
+	if err != nil {
+		return fmt.Errorf("failed to open discovery stream: %v", err)
+	}
+	defer stream.Close()
+
+	req := DiscoveryRequest{
+		NodeID:      n.Host.ID().String(),
+		NodeVersion: "1.0.0",
+	}
+
+	if err := json.NewEncoder(stream).Encode(req); err != nil {
+		return fmt.Errorf("failed to send discovery request: %v", err)
+	}
+
+	var resp DiscoveryResponse
+	if err := json.NewDecoder(stream).Decode(&resp); err != nil {
+		return fmt.Errorf("failed to receive discovery response: %v", err)
+	}
+
+	// Connect to discovered peers
+	for _, peerInfo := range resp.Peers {
+		if n.IsPeerBootstrapNode(peerInfo.ID) {
+			continue // Skip bootstrap nodes
+		}
+
+		addr, err := multiaddr.NewMultiaddr(peerInfo.Address)
+		if err != nil {
+			log.Printf("Failed to parse peer address %s: %v", peerInfo.Address, err)
+			continue
+		}
+
+		addrInfo := peer.AddrInfo{
+			ID:    peerInfo.ID,
+			Addrs: []multiaddr.Multiaddr{addr},
+		}
+
+		if err := n.Host.Connect(n.ctx, addrInfo); err != nil {
+			log.Printf("Failed to connect to peer %s: %v", peerInfo.ID, err)
+			continue
+		}
+		log.Printf("✅ Connected to peer: %s", peerInfo.ID)
+	}
+
+	return nil
 }

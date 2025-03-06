@@ -34,7 +34,7 @@ const (
 	ReputationThresholdGood = 50
 	ReputationThresholdBad  = -20
 	VotingTimeout           = 30 * time.Second
-	MinVotingQuorum         = 2.0 / 3.0	
+	MinVotingQuorum         = 2.0 / 3.0
 	MaxRollbackBlocks       = 100
 	MsgNewBlock             = "NEW_BLOCK"
 	MsgGetBlocks            = "GET_BLOCKS"
@@ -71,8 +71,8 @@ type PeerInfo struct {
 	InvalidTxs     int
 	LastVote       string
 	VoteTimestamp  int64
-	Status   PeerStatus `json:"status"`
-	Address  string     `json:"address"`
+	Status         PeerStatus `json:"status"`
+	Address        string     `json:"address"`
 }
 
 type LatencyStats struct {

@@ -18,7 +18,6 @@ import (
 	"blockchain-core/blockchain/db"
 	"blockchain-core/blockchain/sync"
 
-	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -202,26 +201,20 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 		log.Fatalf("❌ Failed to start node: %v", err)
 	}
 
-	// Start mining process
-	// Uncomment when mining is needed
-	// func startMining(bc *blockchain.Blockchain, minerAddress string) {
-	//     log.Printf("⚒️ Mining service activated for address %s", minerAddress)
-	//     ...
-	// }
-
 	// Connect to bootstrap nodes first
-	for _, addrStr := range config.BootstrapNodes {
+	log.Printf("🔄 Connecting to bootstrap nodes:")
+	for _, bootstrapAddr := range config.BootstrapNodes {
 		// Parse the multiaddr
-		addr, err := multiaddr.NewMultiaddr(addrStr)
+		addr, err := multiaddr.NewMultiaddr(bootstrapAddr)
 		if err != nil {
-			log.Printf("Failed to parse bootstrap address %s: %v", addrStr, err)
+			log.Printf("Failed to parse bootstrap address %s: %v", bootstrapAddr, err)
 			continue
 		}
 
 		// Extract the peer ID from the multiaddr
 		info, err := peer.AddrInfoFromP2pAddr(addr)
 		if err != nil {
-			log.Printf("Failed to get peer info from address %s: %v", addrStr, err)
+			log.Printf("Failed to get peer info from address %s: %v", bootstrapAddr, err)
 			continue
 		}
 
@@ -259,70 +252,22 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 			continue
 		}
 
-		// Connect to discovered peers
-		for _, peerInfo := range resp.Peers {
-			// Parse the multiaddr
-			addr, err := multiaddr.NewMultiaddr(peerInfo.Address)
-			if err != nil {
-				log.Printf("Failed to parse peer address %s: %v", peerInfo.Address, err)
-				continue
+		// After successful connection, don't try to sync blockchain data
+		log.Printf("✅ Connected to bootstrap node: %s", bootstrapAddr)
+	}
+
+	// Then discover and connect to regular peers
+	log.Printf("🔄 Discovering peers in the network")
+	if err := node.DiscoverPeers(); err != nil {
+		log.Printf("⚠️ Peer discovery warning: %v", err)
+	}
+
+	// Only sync with non-bootstrap peers
+	for _, peerID := range node.Host.Network().Peers() {
+		if !node.IsPeerBootstrapNode(peerID) {
+			if err := node.SyncWithPeer(peerID); err != nil {
+				log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
 			}
-
-			// Create a peer.AddrInfo
-			addrInfo := peer.AddrInfo{
-				ID:    peerInfo.ID,
-				Addrs: []multiaddr.Multiaddr{addr},
-			}
-
-			// Connect using the Host
-			if err := node.Host.Connect(context.Background(), addrInfo); err != nil {
-				log.Printf("Failed to connect to peer %s: %v", peerInfo.ID, err)
-				continue
-			}
-			log.Printf("✅ Connected to peer: %s", peerInfo.ID)
-		}
-
-		// Start blockchain sync with connected peers
-		if len(node.Host.Network().Peers()) > 0 {
-			log.Printf("🔄 Starting blockchain sync with %d connected peers",
-				len(node.Host.Network().Peers()))
-			// Register sync protocol handler
-			node.Host.SetStreamHandler("/blockchain/1.0.0/sync", func(stream network.Stream) {
-				defer stream.Close()
-
-				// Send sync request
-				req := blockchain.SyncRequest{
-					NodeID: node.Host.ID().String(),
-				}
-
-				if err := json.NewEncoder(stream).Encode(req); err != nil {
-					log.Printf("Failed to send sync request: %v", err)
-					return
-				}
-
-				// Receive sync response
-				var resp blockchain.SyncResponse
-				if err := json.NewDecoder(stream).Decode(&resp); err != nil {
-					log.Printf("Failed to decode sync response: %v", err)
-					return
-				}
-
-				// Handle the response
-				if resp.Success {
-					if resp.IsGenesisNode {
-						log.Printf("Connected to genesis node - no blockchain data available yet")
-						// Initialize as first node in the network
-					} else {
-						log.Printf("Received blockchain info: Height=%d, LastHash=%s",
-							resp.Height, resp.LastBlockHash)
-						// Implement blockchain sync logic here
-					}
-				} else {
-					log.Printf("Sync request failed")
-				}
-			})
-		} else {
-			log.Printf("No peers to sync with, continuing as genesis node")
 		}
 	}
 
