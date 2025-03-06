@@ -80,30 +80,31 @@ func ConvertUTXOToProto(utxo *blockchain.UTXO, chunkNumber uint32, totalChunks u
 		return nil
 	}
 
-	data, err := json.Marshal(utxo)
-	if err != nil {
-		return nil
+	protoUTXO := &pb.UTXO{
+		TxId:   utxo.TransactionID,
+		Amount: utxo.Amount,
+		Owner:  utxo.Owner,
 	}
 
 	return &pb.UTXOResponse{
+		Utxos:       []*pb.UTXO{protoUTXO},
 		ChunkNumber: chunkNumber,
-		UtxoData:    data,
 		TotalChunks: totalChunks,
 	}
 }
 
 // ConvertProtoToUTXO converts a protobuf UTXOResponse to blockchain.UTXO
 func ConvertProtoToUTXO(resp *pb.UTXOResponse) (*blockchain.UTXO, error) {
-	if resp == nil {
+	if resp == nil || len(resp.Utxos) == 0 {
 		return nil, nil
 	}
 
-	var utxo blockchain.UTXO
-	if err := json.Unmarshal(resp.UtxoData, &utxo); err != nil {
-		return nil, err
-	}
-
-	return &utxo, nil
+	protoUTXO := resp.Utxos[0]
+	return &blockchain.UTXO{
+		TransactionID: protoUTXO.TxId,
+		Amount:        protoUTXO.Amount,
+		Owner:         protoUTXO.Owner,
+	}, nil
 }
 
 // ConvertTransactionToProto converts a blockchain.Transaction to protobuf Transaction

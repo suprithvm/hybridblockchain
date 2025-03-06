@@ -1,47 +1,13 @@
 package sync
 
 import (
+	"blockchain-core/blockchain"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
-	"blockchain-core/blockchain"
-	pb "blockchain-core/blockchain/sync/proto"
-
-	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
-
-// SyncService implements the ChainSync and NetworkSync services
-type SyncService struct {
-	pb.UnimplementedChainSyncServer
-	pb.UnimplementedNetworkSyncServer
-	config *SyncConfig
-	state  *SyncState
-	mu     sync.RWMutex
-
-	// Blockchain components
-	blockchain *blockchain.Blockchain
-	store      *blockchain.Store
-
-	// gRPC server
-	server   *grpc.Server
-	listener net.Listener
-}
-
-// NewSyncService creates a new sync service instance
-func NewSyncService(config *SyncConfig, bc *blockchain.Blockchain, store *blockchain.Store) *SyncService {
-	if config == nil {
-		config = DefaultSyncConfig()
-	}
-	return &SyncService{
-		config:     config,
-		state:      &SyncState{},
-		blockchain: bc,
-		store:      store,
-	}
-}
 
 // SyncConfig holds configuration for sync operations
 type SyncConfig struct {

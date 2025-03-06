@@ -76,10 +76,9 @@ message UTXORequest {
 
 // UTXOResponse contains UTXO chunk data
 message UTXOResponse {
-    uint32 chunk_number = 1;
-    bytes utxo_data = 2;
-    string merkle_proof = 3;
-    uint32 total_chunks = 4;
+    repeated UTXO utxos = 1;
+    uint32 chunk_number = 2;
+    uint32 total_chunks = 3;
 }
 
 // VerifyStateRequest requests state verification
@@ -91,7 +90,9 @@ message VerifyStateRequest {
 // VerifyStateResponse contains verification result
 message VerifyStateResponse {
     bool valid = 1;
-    string error_message = 2;
+    string state_root = 2;
+    string utxo_root = 3;
+    string error_message = 4;
 }
 
 // DiscoverRequest requests peer discovery
@@ -164,4 +165,11 @@ message ValidatorRecoveryResponse {
     bool success = 1;
     int32 new_status = 2;
     string message = 3;
+}
+
+// Add this message definition
+message UTXO {
+    string tx_id = 1;
+    double amount = 2;
+    string owner = 3;
 } 

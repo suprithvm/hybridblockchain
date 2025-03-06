@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -931,3 +932,55 @@ func (bc *Blockchain) AddBalance(address string, amount float64) error {
 	bc.balances[address] += amount
 	return nil
 }
+
+// Add these methods to the Blockchain struct
+func (bc *Blockchain) GetState() *ChainState {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return &ChainState{
+		Height:      bc.GetHeight(),
+		RootHash:    bc.currentHash,
+		UTXOSetRoot: bc.utxoPool.GetRootHash(),
+		StateRoot:   bc.currentHash,
+		Timestamp:   time.Now().Unix(),
+	}
+}
+
+func (bc *Blockchain) GetUTXOState() *ChainState {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return &ChainState{
+		RootHash:  bc.utxoPool.GetRootHash(),
+		Timestamp: time.Now().Unix(),
+	}
+}
+
+type ChainState struct {
+	Height      uint64
+	RootHash    string
+	UTXOSetRoot string
+	StateRoot   string
+	Timestamp   int64
+}
+
+func (s *ChainState) Hash() string {
+	return s.RootHash
+}
+
+// Add this method to UTXOPool struct
+func (up *UTXOPool) GetRootHash() string {
+	up.mu.RLock()
+	defer up.mu.RUnlock()
+
+	// Create a hash of all UTXOs
+	hasher := sha256.New()
+	for txID, utxo := range up.utxos {
+		hasher.Write([]byte(txID))
+		hasher.Write([]byte(utxo.Owner))
+		binary.Write(hasher, binary.BigEndian, utxo.Amount)
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+

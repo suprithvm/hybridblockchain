@@ -349,6 +349,7 @@ func initializeDatabase(config *NodeConfig) (db.Database, *blockchain.Store) {
 }
 
 func startSyncService(config *NodeConfig, bc *blockchain.Blockchain, store *blockchain.Store) {
+	// Create sync config from node config
 	syncConfig := &sync.SyncConfig{
 		ListenAddr:     config.ListenAddr,
 		BootstrapNodes: config.BootstrapNodes,

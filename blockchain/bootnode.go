@@ -23,6 +23,11 @@ import (
 	"github.com/pion/stun"
 
 	"github.com/multiformats/go-multiaddr"
+
+	syncpb "blockchain-core/blockchain/sync/proto"
+
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Constants for blockchain network configuration
@@ -1173,7 +1178,6 @@ type PeerDiscoveryRequest struct {
 
 type PeerDiscoveryResponse struct {
 	Success bool            `json:"success"`
-	Message string          `json:"message"`
 	Peers   []peer.AddrInfo `json:"peers"`
 }
 
@@ -1316,4 +1320,357 @@ func (bn *BootstrapNode) IsPeerHealthy(peerID peer.ID) bool {
 	}
 
 	return time.Since(lastBeat) <= HeartbeatTimeout
+}
+
+type BootNode struct {
+	node       *Node
+	blockchain *Blockchain
+	syncServer *SyncServer
+	grpcServer *grpc.Server
+	mu         sync.RWMutex
+	host       host.Host
+	ctx        context.Context
+	cancel     context.CancelFunc
+}
+
+type SyncServer struct {
+	syncpb.UnimplementedChainSyncServer
+	syncpb.UnimplementedNetworkSyncServer
+	blockchain *Blockchain
+	node       *Node
+}
+
+func NewBootNode(config *NetworkConfig) (*BootNode, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Create libp2p host
+	h, err := libp2p.New()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
+	}
+
+	// Initialize blockchain
+	bc := InitialiseBlockchain(config.Database)
+
+	// Create node instance
+	node := &Node{
+		Host: h,
+	}
+
+	syncServer := &SyncServer{
+		blockchain: bc,
+		node:       node,
+	}
+
+	bootNode := &BootNode{
+		node:       node,
+		host:       h,
+		blockchain: bc,
+		syncServer: syncServer,
+		ctx:        ctx,
+		cancel:     cancel,
+	}
+
+	// Register protocol handlers
+	h.SetStreamHandler("/blockchain/1.0.0/sync", bootNode.handleSync)
+	h.SetStreamHandler("/blockchain/1.0.0/blocks", bootNode.handleBlocks)
+	h.SetStreamHandler("/blockchain/1.0.0/transactions", bootNode.handleTransactions)
+
+	return bootNode, nil
+}
+
+// SyncServer implementations
+func (s *SyncServer) GetChainInfo(ctx context.Context, req *syncpb.ChainInfoRequest) (*syncpb.ChainInfoResponse, error) {
+	latestBlock := s.blockchain.GetLatestBlock()
+	return &syncpb.ChainInfoResponse{
+		Height:          latestBlock.Header.BlockNumber,
+		LastBlockHash:   latestBlock.Hash(),
+		NetworkVersion:  1,
+		ProtocolVersion: 1,
+		MinPeerVersion:  1,
+		Timestamp:       timestamppb.Now(),
+	}, nil
+}
+
+func (s *SyncServer) StreamBlocks(req *syncpb.BlockRequest, stream syncpb.ChainSync_StreamBlocksServer) error {
+	for height := req.StartHeight; height <= req.EndHeight; height++ {
+		block := s.blockchain.GetBlockByHeight(height)
+		if block == nil {
+			return fmt.Errorf("failed to get block at height %d", height)
+		}
+
+		resp := &syncpb.BlockResponse{
+			Height:          height,
+			BlockData:       []byte(block.Hash()),
+			TransactionData: convertTransactions(block),
+			MerkleRoot:      block.Header.MerkleRoot,
+			StateRoot:       block.Header.StateRoot,
+			Timestamp:       timestamppb.Now(),
+		}
+
+		if err := stream.Send(resp); err != nil {
+			return fmt.Errorf("failed to send block: %v", err)
+		}
+	}
+	return nil
+}
+
+// Add other required server implementations...
+
+// Add required protocol handlers
+func (bn *BootNode) handleSync(stream network.Stream) {
+	defer stream.Close()
+	ctx := context.Background()
+
+	var req syncpb.ChainInfoRequest
+	if err := json.NewDecoder(stream).Decode(&req); err != nil {
+		log.Printf("Error decoding sync request: %v", err)
+		return
+	}
+
+	resp, err := bn.syncServer.GetChainInfo(ctx, &req)
+	if err != nil {
+		log.Printf("Error getting chain info: %v", err)
+		return
+	}
+
+	if err := json.NewEncoder(stream).Encode(resp); err != nil {
+		log.Printf("Error encoding sync response: %v", err)
+	}
+}
+
+func (bn *BootNode) handleBlocks(stream network.Stream) {
+	defer stream.Close()
+
+	// Handle block request
+	var req syncpb.BlockRequest
+	if err := json.NewDecoder(stream).Decode(&req); err != nil {
+		log.Printf("Error decoding block request: %v", err)
+		return
+	}
+
+	// Create block stream
+	blockStream := &blockStreamServer{stream: stream}
+	if err := bn.syncServer.StreamBlocks(&req, blockStream); err != nil {
+		log.Printf("Error streaming blocks: %v", err)
+	}
+}
+
+func (bn *BootNode) handleTransactions(stream network.Stream) {
+	defer stream.Close()
+
+	// Handle transaction request
+	var tx syncpb.Transaction
+	if err := json.NewDecoder(stream).Decode(&tx); err != nil {
+		log.Printf("Error decoding transaction: %v", err)
+		return
+	}
+
+	// Process transaction using background context
+	resp, err := bn.syncServer.PropagateTransaction(context.Background(), &tx)
+	if err != nil {
+		log.Printf("Error processing transaction: %v", err)
+		return
+	}
+
+	// Send response
+	if err := json.NewEncoder(stream).Encode(resp); err != nil {
+		log.Printf("Error encoding transaction response: %v", err)
+	}
+}
+
+func (s *SyncServer) SyncUTXOSet(req *syncpb.UTXORequest, stream syncpb.ChainSync_SyncUTXOSetServer) error {
+	utxos := s.blockchain.GetUTXOSet()
+
+	chunkSize := 1000
+	var chunk []*syncpb.UTXO
+
+	for txID, utxo := range utxos {
+		utxoData := &syncpb.UTXO{
+			TxId:   txID,
+			Amount: utxo.Amount,
+			Owner:  utxo.Owner,
+		}
+		chunk = append(chunk, utxoData)
+
+		if len(chunk) >= chunkSize {
+			resp := &syncpb.UTXOResponse{
+				Utxos: chunk,
+			}
+			if err := stream.Send(resp); err != nil {
+				return fmt.Errorf("failed to send UTXO chunk: %v", err)
+			}
+			chunk = nil
+		}
+	}
+
+	if len(chunk) > 0 {
+		resp := &syncpb.UTXOResponse{
+			Utxos: chunk,
+		}
+		if err := stream.Send(resp); err != nil {
+			return fmt.Errorf("failed to send final UTXO chunk: %v", err)
+		}
+	}
+
+	return nil
+}
+
+func (s *SyncServer) VerifyState(ctx context.Context, req *syncpb.VerifyStateRequest) (*syncpb.VerifyStateResponse, error) {
+	state := s.blockchain.GetState()
+	utxoState := s.blockchain.GetUTXOState()
+
+	return &syncpb.VerifyStateResponse{
+		Valid:        true,
+		StateRoot:    state.Hash(),
+		UtxoRoot:     utxoState.Hash(),
+		ErrorMessage: "",
+	}, nil
+}
+
+// Helper types
+type blockStreamServer struct {
+	stream network.Stream
+	grpc.ServerStream
+}
+
+func (s *blockStreamServer) Send(resp *syncpb.BlockResponse) error {
+	return json.NewEncoder(s.stream).Encode(resp)
+}
+
+// Helper function to convert transactions
+func convertTransactions(block *Block) [][]byte {
+	if block == nil || block.Body == nil || block.Body.Transactions == nil {
+		return nil
+	}
+
+	// Get transactions from block body
+	txs := block.Body.Transactions.GetAllTransactions()
+	result := make([][]byte, len(txs))
+
+	for i, tx := range txs {
+		txBytes, err := json.Marshal(tx)
+		if err != nil {
+			continue
+		}
+		result[i] = txBytes
+	}
+	return result
+}
+
+// Add this type definition in bootnode.go
+type SyncService interface {
+	Start() error
+	Stop()
+}
+
+// Update the syncServer implementation with full functionality
+type syncServer struct {
+	syncpb.UnimplementedChainSyncServer
+	syncpb.UnimplementedNetworkSyncServer
+	blockchain *Blockchain
+	node       *Node
+	server     *grpc.Server
+	listener   net.Listener
+}
+
+func (s *syncServer) Start() error {
+	// Create listener
+	lis, err := net.Listen("tcp", ":50505") // Use configurable port
+	if err != nil {
+		return fmt.Errorf("failed to listen: %v", err)
+	}
+	s.listener = lis
+
+	// Register services
+	syncpb.RegisterChainSyncServer(s.server, s)
+	syncpb.RegisterNetworkSyncServer(s.server, s)
+
+	// Start server
+	log.Printf("Starting sync service on %s", lis.Addr())
+	go func() {
+		if err := s.server.Serve(lis); err != nil {
+			log.Printf("Failed to serve: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+func (s *syncServer) Stop() {
+	if s.server != nil {
+		s.server.GracefulStop()
+	}
+	if s.listener != nil {
+		s.listener.Close()
+	}
+}
+
+// Implement required gRPC methods
+func (s *syncServer) GetChainInfo(ctx context.Context, req *syncpb.ChainInfoRequest) (*syncpb.ChainInfoResponse, error) {
+	latestBlock := s.blockchain.GetLatestBlock()
+	return &syncpb.ChainInfoResponse{
+		Height:          latestBlock.Header.BlockNumber,
+		LastBlockHash:   latestBlock.Hash(),
+		NetworkVersion:  1,
+		ProtocolVersion: 1,
+		MinPeerVersion:  1,
+		Timestamp:       timestamppb.Now(),
+	}, nil
+}
+
+func (s *syncServer) StreamBlocks(req *syncpb.BlockRequest, stream syncpb.ChainSync_StreamBlocksServer) error {
+	for height := req.StartHeight; height <= req.EndHeight; height++ {
+		block := s.blockchain.GetBlockByHeight(height)
+		if block == nil {
+			return fmt.Errorf("block not found at height %d", height)
+		}
+
+		resp := &syncpb.BlockResponse{
+			Height:    height,
+			BlockData: []byte(block.Hash()),
+			Timestamp: timestamppb.Now(),
+		}
+
+		if err := stream.Send(resp); err != nil {
+			return fmt.Errorf("failed to send block: %v", err)
+		}
+	}
+	return nil
+}
+
+func (s *syncServer) PropagateTransaction(ctx context.Context, tx *syncpb.Transaction) (*syncpb.PropagateResponse, error) {
+	// Add transaction propagation logic
+	return &syncpb.PropagateResponse{
+		Success: true,
+	}, nil
+}
+
+// Update constructor with full initialization
+func NewSyncService(node *BootNode) SyncService {
+	return &syncServer{
+		blockchain: node.blockchain,
+		node:       node.node,
+		server:     grpc.NewServer(),
+	}
+}
+
+// Update StartSync to use local NewSyncService
+func (bn *BootNode) StartSync() error {
+	log.Printf("Starting sync service for node %s", bn.host.ID())
+	syncService := NewSyncService(bn)
+	return syncService.Start()
+}
+
+// Shutdown implements Node interface
+func (bn *BootNode) Shutdown() error {
+	log.Printf("Shutting down node %s", bn.host.ID())
+	if bn.cancel != nil {
+		bn.cancel()
+	}
+	if bn.host != nil {
+		return bn.host.Close()
+	}
+	return nil
 }

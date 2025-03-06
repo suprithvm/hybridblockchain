@@ -184,7 +184,7 @@ func isValidHostname(hostname string) bool {
 	return true
 }
 
-// DatabaseConfig holds database-specific configuration
+// DatabaseConfig holds database configuration
 type DatabaseConfig struct {
 	Type         string
 	Path         string
@@ -193,6 +193,13 @@ type DatabaseConfig struct {
 	Compression  bool
 }
 
+// Config holds all blockchain configuration
+type Config struct {
+	Network  *NetworkConfig
+	Database *DatabaseConfig
+}
+
+// DefaultDatabaseConfig returns default database settings
 func DefaultDatabaseConfig() *DatabaseConfig {
 	log.Printf("Creating default database config")
 	return &DatabaseConfig{

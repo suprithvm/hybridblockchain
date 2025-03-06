@@ -26,6 +26,7 @@
         |-- model.go
         |-- tracker.go
     |-- hd_wallet.go
+    |-- interfaces.go
     |-- mempool.go
     |-- multi_sig_utils.go
     |-- multi_sig_wallet.go
@@ -62,6 +63,13 @@
     |-- wallet.go
     |-- wallet_test.go
     |-- wallet_utils.go
+|-- blockchain_data
+    |-- leveldb
+        |-- 000001.log
+        |-- CURRENT
+        |-- LOCK
+        |-- LOG
+        |-- MANIFEST-000000
 |-- bootnode.addr
 |-- bootnode.key
 |-- bootnode_data
@@ -86,20 +94,20 @@
 |-- miner_data
     |-- chaindata
         |-- leveldb
-            |-- 000016.log
+            |-- 000020.log
             |-- CURRENT
             |-- CURRENT.bak
             |-- LOCK
             |-- LOG
-            |-- MANIFEST-000017
+            |-- MANIFEST-000021
     |-- nodedata
         |-- leveldb
-            |-- 000030.log
+            |-- 000034.log
             |-- CURRENT
             |-- CURRENT.bak
             |-- LOCK
             |-- LOG
-            |-- MANIFEST-000031
+            |-- MANIFEST-000035
     |-- wallet.json
 |-- my_wallet.json
 |-- node_data

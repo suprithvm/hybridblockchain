@@ -1724,3 +1724,8 @@ func (n *Node) subscribeTopic(topic string, handler func(string, []byte) error) 
 
 	return nil
 }
+
+// Add to Node struct methods
+func (n *Node) SetStreamHandler(protocolID string, handler network.StreamHandler) {
+	n.Host.SetStreamHandler(protocol.ID(protocolID), handler)
+}
