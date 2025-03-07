@@ -21,14 +21,16 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/routing"
+	discovery "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/pion/stun"
-
-	syncpb "blockchain-core/blockchain/sync/proto"
-
-	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// Heartbeat represents a node's heartbeat message
+type Heartbeat struct {
+	Timestamp int64  `json:"timestamp"`
+	NodeID    string `json:"node_id"`
+}
 
 // Constants for blockchain network configuration
 const (
@@ -45,6 +47,12 @@ const (
 
 	// Add constant for heartbeat timeout
 	HeartbeatTimeout = 90 * time.Second // 3x HeartbeatInterval
+
+	MaxPeers          = 100
+	ConnectionTimeout = 30 * time.Second
+	HeartbeatInterval = 10 * time.Second
+	MaxRetries        = 3
+	RetryDelay        = 5 * time.Second
 )
 
 // Store known bootstrap nodes
@@ -1548,468 +1556,169 @@ func (bn *BootstrapNode) IsPeerHealthy(peerID peer.ID) bool {
 	return time.Since(lastBeat) <= HeartbeatTimeout
 }
 
-type BootNode struct {
-	node          *Node
-	blockchain    *Blockchain
-	syncServer    *SyncServer
-	grpcServer    *grpc.Server
-	mu            sync.RWMutex
-	host          host.Host
-	ctx           context.Context
-	cancel        context.CancelFunc
-	dht           *dht.IpfsDHT
-	peers         map[peer.ID]peer.ID
-	peersMutex    sync.RWMutex
-	heartbeatMu   sync.RWMutex
-	lastHeartbeat map[peer.ID]time.Time
+type Bootnode struct {
+	host        host.Host
+	peerManager *PeerManager
+	natManager  *NATManager
+	config      *NetworkConfig
+	ctx         context.Context
+	cancel      context.CancelFunc
+	connected   bool
+	mutex       sync.RWMutex
 }
 
-type SyncServer struct {
-	syncpb.UnimplementedChainSyncServer
-	syncpb.UnimplementedNetworkSyncServer
-	blockchain *Blockchain
-	node       *Node
-}
-
-func NewBootNode(config *NetworkConfig) (*BootNode, error) {
+// NewBootnode creates a new bootnode instance
+func NewBootnode(config *NetworkConfig) (*Bootnode, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Create libp2p host
-	h, err := libp2p.New()
+	h, err := createHost(config)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
+		return nil, fmt.Errorf("failed to create host: %w", err)
 	}
 
-	// Initialize blockchain
-	bc := InitialiseBlockchain(config.Database)
+	// Create peer manager
+	peerManager := NewPeerManager(h)
 
-	// Create node instance
-	node := &Node{
-		Host: h,
-	}
+	// Create NAT manager
+	natManager := NewNATManager(h, config)
 
-	syncServer := &SyncServer{
-		blockchain: bc,
-		node:       node,
-	}
-
-	bootNode := &BootNode{
-		node:       node,
-		host:       h,
-		blockchain: bc,
-		syncServer: syncServer,
-		ctx:        ctx,
-		cancel:     cancel,
-	}
-
-	// Register protocol handlers
-	h.SetStreamHandler("/blockchain/1.0.0/sync", bootNode.handleSync)
-	h.SetStreamHandler("/blockchain/1.0.0/blocks", bootNode.handleBlocks)
-	h.SetStreamHandler("/blockchain/1.0.0/transactions", bootNode.handleTransactions)
-
-	return bootNode, nil
-}
-
-// SyncServer implementations
-func (s *SyncServer) GetChainInfo(ctx context.Context, req *syncpb.ChainInfoRequest) (*syncpb.ChainInfoResponse, error) {
-	latestBlock := s.blockchain.GetLatestBlock()
-	return &syncpb.ChainInfoResponse{
-		Height:          latestBlock.Header.BlockNumber,
-		LastBlockHash:   latestBlock.Hash(),
-		NetworkVersion:  1,
-		ProtocolVersion: 1,
-		MinPeerVersion:  1,
-		Timestamp:       timestamppb.Now(),
+	return &Bootnode{
+		host:        h,
+		peerManager: peerManager,
+		natManager:  natManager,
+		config:      config,
+		ctx:         ctx,
+		cancel:      cancel,
+		connected:   false,
 	}, nil
 }
 
-func (s *SyncServer) StreamBlocks(req *syncpb.BlockRequest, stream syncpb.ChainSync_StreamBlocksServer) error {
-	for height := req.StartHeight; height <= req.EndHeight; height++ {
-		block := s.blockchain.GetBlockByHeight(height)
-		if block == nil {
-			return fmt.Errorf("failed to get block at height %d", height)
-		}
+// Start initializes and starts the bootnode
+func (bn *Bootnode) Start() error {
+	log.Printf("Starting bootnode...")
 
-		resp := &syncpb.BlockResponse{
-			Height:          height,
-			BlockData:       []byte(block.Hash()),
-			TransactionData: convertTransactions(block),
-			MerkleRoot:      block.Header.MerkleRoot,
-			StateRoot:       block.Header.StateRoot,
-			Timestamp:       timestamppb.Now(),
-		}
-
-		if err := stream.Send(resp); err != nil {
-			return fmt.Errorf("failed to send block: %v", err)
-		}
-	}
-	return nil
-}
-
-// Add other required server implementations...
-
-// Add required protocol handlers
-func (bn *BootNode) handleSync(stream network.Stream) {
-	defer stream.Close()
-	ctx := context.Background()
-
-	var req syncpb.ChainInfoRequest
-	if err := json.NewDecoder(stream).Decode(&req); err != nil {
-		log.Printf("Error decoding sync request: %v", err)
-		return
+	// Start NAT traversal
+	if err := bn.natManager.Start(); err != nil {
+		log.Printf("Warning: NAT traversal failed: %v", err)
 	}
 
-	resp, err := bn.syncServer.GetChainInfo(ctx, &req)
-	if err != nil {
-		log.Printf("Error getting chain info: %v", err)
-		return
+	// Start peer discovery
+	if err := bn.startPeerDiscovery(); err != nil {
+		return fmt.Errorf("failed to start peer discovery: %w", err)
 	}
 
-	if err := json.NewEncoder(stream).Encode(resp); err != nil {
-		log.Printf("Error encoding sync response: %v", err)
-	}
-}
-
-func (bn *BootNode) handleBlocks(stream network.Stream) {
-	defer stream.Close()
-
-	// Handle block request
-	var req syncpb.BlockRequest
-	if err := json.NewDecoder(stream).Decode(&req); err != nil {
-		log.Printf("Error decoding block request: %v", err)
-		return
-	}
-
-	// Create block stream
-	blockStream := &blockStreamServer{stream: stream}
-	if err := bn.syncServer.StreamBlocks(&req, blockStream); err != nil {
-		log.Printf("Error streaming blocks: %v", err)
-	}
-}
-
-func (bn *BootNode) handleTransactions(stream network.Stream) {
-	defer stream.Close()
-
-	// Handle transaction request
-	var tx syncpb.Transaction
-	if err := json.NewDecoder(stream).Decode(&tx); err != nil {
-		log.Printf("Error decoding transaction: %v", err)
-		return
-	}
-
-	// Process transaction using background context
-	resp, err := bn.syncServer.PropagateTransaction(context.Background(), &tx)
-	if err != nil {
-		log.Printf("Error processing transaction: %v", err)
-		return
-	}
-
-	// Send response
-	if err := json.NewEncoder(stream).Encode(resp); err != nil {
-		log.Printf("Error encoding transaction response: %v", err)
-	}
-}
-
-func (s *SyncServer) SyncUTXOSet(req *syncpb.UTXORequest, stream syncpb.ChainSync_SyncUTXOSetServer) error {
-	utxos := s.blockchain.GetUTXOSet()
-
-	chunkSize := 1000
-	var chunk []*syncpb.UTXO
-
-	for txID, utxo := range utxos {
-		utxoData := &syncpb.UTXO{
-			TxId:   txID,
-			Amount: utxo.Amount,
-			Owner:  utxo.Owner,
-		}
-		chunk = append(chunk, utxoData)
-
-		if len(chunk) >= chunkSize {
-			resp := &syncpb.UTXOResponse{
-				Utxos: chunk,
-			}
-			if err := stream.Send(resp); err != nil {
-				return fmt.Errorf("failed to send UTXO chunk: %v", err)
-			}
-			chunk = nil
-		}
-	}
-
-	if len(chunk) > 0 {
-		resp := &syncpb.UTXOResponse{
-			Utxos: chunk,
-		}
-		if err := stream.Send(resp); err != nil {
-			return fmt.Errorf("failed to send final UTXO chunk: %v", err)
-		}
-	}
-
-	return nil
-}
-
-func (s *SyncServer) VerifyState(ctx context.Context, req *syncpb.VerifyStateRequest) (*syncpb.VerifyStateResponse, error) {
-	state := s.blockchain.GetState()
-	utxoState := s.blockchain.GetUTXOState()
-
-	return &syncpb.VerifyStateResponse{
-		Valid:        true,
-		StateRoot:    state.Hash(),
-		UtxoRoot:     utxoState.Hash(),
-		ErrorMessage: "",
-	}, nil
-}
-
-// Helper types
-type blockStreamServer struct {
-	stream network.Stream
-	grpc.ServerStream
-}
-
-func (s *blockStreamServer) Send(resp *syncpb.BlockResponse) error {
-	return json.NewEncoder(s.stream).Encode(resp)
-}
-
-// Helper function to convert transactions
-func convertTransactions(block *Block) [][]byte {
-	if block == nil || block.Body == nil || block.Body.Transactions == nil {
-		return nil
-	}
-
-	// Get transactions from block body
-	txs := block.Body.Transactions.GetAllTransactions()
-	result := make([][]byte, len(txs))
-
-	for i, tx := range txs {
-		txBytes, err := json.Marshal(tx)
-		if err != nil {
-			continue
-		}
-		result[i] = txBytes
-	}
-	return result
-}
-
-// Add this type definition in bootnode.go
-type SyncService interface {
-	Start() error
-	Stop()
-}
-
-// Update the syncServer implementation with full functionality
-type syncServer struct {
-	syncpb.UnimplementedChainSyncServer
-	syncpb.UnimplementedNetworkSyncServer
-	blockchain *Blockchain
-	node       *Node
-	server     *grpc.Server
-	listener   net.Listener
-}
-
-func (s *syncServer) Start() error {
-	// Create listener
-	lis, err := net.Listen("tcp", ":50505") // Use configurable port
-	if err != nil {
-		return fmt.Errorf("failed to listen: %v", err)
-	}
-	s.listener = lis
-
-	// Register services
-	syncpb.RegisterChainSyncServer(s.server, s)
-	syncpb.RegisterNetworkSyncServer(s.server, s)
-
-	// Start server
-	log.Printf("Starting sync service on %s", lis.Addr())
-	go func() {
-		if err := s.server.Serve(lis); err != nil {
-			log.Printf("Failed to serve: %v", err)
-		}
-	}()
-
-	return nil
-}
-
-func (s *syncServer) Stop() {
-	if s.server != nil {
-		s.server.GracefulStop()
-	}
-	if s.listener != nil {
-		s.listener.Close()
-	}
-}
-
-// Implement required gRPC methods
-func (s *syncServer) GetChainInfo(ctx context.Context, req *syncpb.ChainInfoRequest) (*syncpb.ChainInfoResponse, error) {
-	latestBlock := s.blockchain.GetLatestBlock()
-	return &syncpb.ChainInfoResponse{
-		Height:          latestBlock.Header.BlockNumber,
-		LastBlockHash:   latestBlock.Hash(),
-		NetworkVersion:  1,
-		ProtocolVersion: 1,
-		MinPeerVersion:  1,
-		Timestamp:       timestamppb.Now(),
-	}, nil
-}
-
-func (s *syncServer) StreamBlocks(req *syncpb.BlockRequest, stream syncpb.ChainSync_StreamBlocksServer) error {
-	for height := req.StartHeight; height <= req.EndHeight; height++ {
-		block := s.blockchain.GetBlockByHeight(height)
-		if block == nil {
-			return fmt.Errorf("block not found at height %d", height)
-		}
-
-		resp := &syncpb.BlockResponse{
-			Height:    height,
-			BlockData: []byte(block.Hash()),
-			Timestamp: timestamppb.Now(),
-		}
-
-		if err := stream.Send(resp); err != nil {
-			return fmt.Errorf("failed to send block: %v", err)
-		}
-	}
-	return nil
-}
-
-func (s *syncServer) PropagateTransaction(ctx context.Context, req *syncpb.Transaction) (*syncpb.PropagateResponse, error) {
-	log.Printf("Received transaction propagation request")
-
-	// Deserialize transaction data
-	var tx Transaction
-	if err := json.Unmarshal(req.TransactionData, &tx); err != nil {
-		return nil, fmt.Errorf("failed to deserialize transaction: %v", err)
-	}
-
-	// Validate gas parameters
-	if err := tx.ValidateGas(); err != nil {
-		return nil, fmt.Errorf("invalid gas parameters: %v", err)
-	}
-
-	// Add transaction to mempool
-	if !s.blockchain.mempool.AddTransaction(tx, s.blockchain.utxoSet) {
-		return nil, fmt.Errorf("failed to add transaction to mempool")
-	}
-
-	// Get connected peers
-	peers := s.node.Host.Network().Peers()
-
-	// Broadcast transaction to all peers
-	s.node.Mempool.BroadcastPendingTransactions(s.node)
-
-	return &syncpb.PropagateResponse{
-		Success:      true,
-		PropagatedTo: uint32(len(peers)),
-	}, nil
-}
-
-// Update constructor with full initialization
-func NewSyncService(node *BootNode) SyncService {
-	return &syncServer{
-		blockchain: node.blockchain,
-		node:       node.node,
-		server:     grpc.NewServer(),
-	}
-}
-
-// StartSync starts the sync service
-func (bn *BootNode) StartSync() error {
-	bn.mu.Lock()
-	defer bn.mu.Unlock()
-
-	log.Printf("Starting sync service...")
-
-	// Create sync server instance
-	bn.syncServer = &SyncServer{
-		blockchain: bn.blockchain,
-		node:       bn.node,
-	}
-
-	// Start peer discovery and heartbeat routines
-	go bn.discoverPeers()
-
-	// Start heartbeat routine
+	// Start heartbeat
 	go bn.startHeartbeat()
 
+	// Start connection monitoring
+	go bn.monitorConnections()
+
+	bn.connected = true
+	log.Printf("Bootnode started successfully")
 	return nil
 }
 
-// Shutdown implements Node interface
-func (bn *BootNode) Shutdown() error {
-	log.Printf("Shutting down node %s", bn.host.ID())
-
-	// Cancel context to stop all goroutines
-	if bn.cancel != nil {
-		bn.cancel()
+// startPeerDiscovery initializes peer discovery mechanisms
+func (bn *Bootnode) startPeerDiscovery() error {
+	// Start DHT
+	dht, err := dht.New(bn.ctx, bn.host)
+	if err != nil {
+		return fmt.Errorf("failed to create DHT: %w", err)
 	}
 
-	// Stop sync service if running
-	if bn.syncServer != nil {
-		bn.syncServer.Stop()
+	// Bootstrap the DHT
+	if err = dht.Bootstrap(bn.ctx); err != nil {
+		return fmt.Errorf("failed to bootstrap DHT: %w", err)
 	}
 
-	// Close all network connections
-	if bn.host != nil {
-		// Close all streams
-		for _, conn := range bn.host.Network().Conns() {
-			for _, stream := range conn.GetStreams() {
-				stream.Close()
+	// Start peer discovery service
+	discovery := discovery.NewRoutingDiscovery(dht)
+	_, err = discovery.Advertise(bn.ctx, "blockchain-bootnode")
+	if err != nil {
+		return fmt.Errorf("failed to advertise bootnode: %w", err)
+	}
+
+	// Start peer discovery
+	go bn.discoverPeers(discovery)
+
+	return nil
+}
+
+// discoverPeers continuously discovers and connects to peers
+func (bn *Bootnode) discoverPeers(discovery *discovery.RoutingDiscovery) {
+	for {
+		select {
+		case <-bn.ctx.Done():
+			return
+		default:
+			peers, err := discovery.FindPeers(bn.ctx, "blockchain-bootnode")
+			if err != nil {
+				log.Printf("Error finding peers: %v", err)
+				time.Sleep(RetryDelay)
+				continue
+			}
+
+			for p := range peers {
+				if p.ID == bn.host.ID() {
+					continue
+				}
+
+				// Attempt connection with retries
+				for i := 0; i < MaxRetries; i++ {
+					err := bn.connectToPeer(p)
+					if err == nil {
+						break
+					}
+					log.Printf("Failed to connect to peer %s (attempt %d/%d): %v",
+						p.ID, i+1, MaxRetries, err)
+					time.Sleep(RetryDelay)
+				}
 			}
 		}
+	}
+}
 
-		// Close host
-		if err := bn.host.Close(); err != nil {
-			log.Printf("Error closing host: %v", err)
-		}
+// connectToPeer attempts to connect to a peer
+func (bn *Bootnode) connectToPeer(p peer.AddrInfo) error {
+	if bn.peerManager.IsBlacklisted(p.ID) {
+		return fmt.Errorf("peer is blacklisted")
 	}
 
-	// Close gRPC server if running
-	if bn.grpcServer != nil {
-		bn.grpcServer.GracefulStop()
+	ctx, cancel := context.WithTimeout(bn.ctx, ConnectionTimeout)
+	defer cancel()
+
+	err := bn.host.Connect(ctx, p)
+	if err != nil {
+		return fmt.Errorf("failed to connect: %w", err)
 	}
 
-	log.Printf("✅ Node shutdown completed")
+	// Verify connection
+	if len(bn.host.Network().ConnsToPeer(p.ID)) == 0 {
+		return fmt.Errorf("connection verification failed")
+	}
+
+	// Add peer to manager
+	bn.peerManager.AddPeer(p.ID)
+	log.Printf("Connected to peer: %s", p.ID)
 	return nil
 }
 
-// Add these types
-type SyncRequest struct {
-	NodeID string `json:"node_id"`
+// sendToPeer sends a message to a specific peer
+func (bn *Bootnode) sendToPeer(peerID peer.ID, message string) error {
+	stream, err := bn.host.NewStream(context.Background(), peerID, "/blockchain/1.0.0")
+	if err != nil {
+		return fmt.Errorf("failed to create stream: %w", err)
+	}
+	defer stream.Close()
+
+	_, err = stream.Write([]byte(message))
+	return err
 }
 
-type SyncResponse struct {
-	Height        uint64 `json:"height"`
-	LastBlockHash string `json:"last_block_hash"`
-	Success       bool   `json:"success"`
-	IsGenesisNode bool   `json:"is_genesis_node,omitempty"`
-}
-
-// Discovery protocol types
-type DiscoveryRequest struct {
-	NodeID      string `json:"node_id"`
-	NodeVersion string `json:"node_version"`
-}
-
-type DiscoveryResponse struct {
-	Peers        []PeerInfo `json:"peers"`
-	NetworkEmpty bool       `json:"network_empty"`
-	Success      bool       `json:"success"`
-}
-
-type PeerStatus int
-
-const (
-	PeerStatusUnknown PeerStatus = iota
-	PeerStatusActive
-	PeerStatusInactive
-)
-
-type Heartbeat struct {
-	Timestamp int64  `json:"timestamp"`
-	NodeID    string `json:"node_id"`
-}
-
-// startHeartbeat starts the heartbeat routine
-func (bn *BootNode) startHeartbeat() {
+// startHeartbeat sends periodic heartbeats to connected peers
+func (bn *Bootnode) startHeartbeat() {
 	ticker := time.NewTicker(HeartbeatInterval)
 	defer ticker.Stop()
 
@@ -2018,61 +1727,24 @@ func (bn *BootNode) startHeartbeat() {
 		case <-bn.ctx.Done():
 			return
 		case <-ticker.C:
-			bn.peersMutex.RLock()
-			for peerID := range bn.peers {
-				// Skip if peer is not connected
-				if bn.host.Network().Connectedness(peerID) != network.Connected {
-					continue
-				}
-
-				// Send heartbeat
-				stream, err := bn.host.NewStream(bn.ctx, peerID, protocol.ID(HeartbeatProtocolID))
-				if err != nil {
-					log.Printf("⚠️ Failed to open heartbeat stream to peer %s: %v", peerID, err)
-					continue
-				}
-
-				if _, err := stream.Write([]byte("ping")); err != nil {
-					log.Printf("⚠️ Failed to send heartbeat to peer %s: %v", peerID, err)
-					stream.Close()
-					continue
-				}
-				stream.Close()
-
-				// Update last heartbeat time
-				bn.heartbeatMu.Lock()
-				bn.lastHeartbeat[peerID] = time.Now()
-				bn.heartbeatMu.Unlock()
-			}
-			bn.peersMutex.RUnlock()
-
-			// Check for stale peers
-			bn.checkStalePeers()
+			bn.sendHeartbeat()
 		}
 	}
 }
 
-// checkStalePeers removes peers that haven't sent a heartbeat in too long
-func (bn *BootNode) checkStalePeers() {
-	bn.heartbeatMu.Lock()
-	defer bn.heartbeatMu.Unlock()
-
-	now := time.Now()
-	for peerID, lastHeartbeat := range bn.lastHeartbeat {
-		if now.Sub(lastHeartbeat) > HeartbeatTimeout {
-			log.Printf("⚠️ Removing stale peer: %s", peerID)
-			bn.host.Network().ClosePeer(peerID)
-			delete(bn.lastHeartbeat, peerID)
-			bn.peersMutex.Lock()
-			delete(bn.peers, peerID)
-			bn.peersMutex.Unlock()
+// sendHeartbeat sends heartbeat messages to all connected peers
+func (bn *Bootnode) sendHeartbeat() {
+	peers := bn.peerManager.GetConnectedPeers()
+	for _, peerID := range peers {
+		if err := bn.sendToPeer(peerID, "HEARTBEAT"); err != nil {
+			log.Printf("Failed to send heartbeat to %s: %v", peerID, err)
 		}
 	}
 }
 
-// discoverPeers discovers new peers from the DHT
-func (bn *BootNode) discoverPeers() {
-	ticker := time.NewTicker(30 * time.Second)
+// monitorConnections monitors and maintains peer connections
+func (bn *Bootnode) monitorConnections() {
+	ticker := time.NewTicker(HeartbeatInterval)
 	defer ticker.Stop()
 
 	for {
@@ -2080,34 +1752,33 @@ func (bn *BootNode) discoverPeers() {
 		case <-bn.ctx.Done():
 			return
 		case <-ticker.C:
-			// Get peers from DHT routing table
-			peers := bn.dht.RoutingTable().ListPeers()
-			for _, peerID := range peers {
-				// Skip if we already know this peer
-				bn.peersMutex.RLock()
-				if _, exists := bn.peers[peerID]; exists {
-					bn.peersMutex.RUnlock()
-					continue
-				}
-				bn.peersMutex.RUnlock()
-
-				// Try to connect to peer
-				if err := bn.node.ConnectToPeer(peerID.String()); err != nil {
-					log.Printf("Failed to connect to peer %s: %v", peerID, err)
-					continue
-				}
-
-				// Add to known peers
-				bn.peersMutex.Lock()
-				bn.peers[peerID] = peerID
-				bn.peersMutex.Unlock()
-				log.Printf("Connected to new peer: %s", peerID)
-			}
+			bn.checkConnections()
 		}
 	}
 }
 
-// Stop stops the sync server
-func (s *SyncServer) Stop() {
-	// No-op since we're using gRPC
+// checkConnections verifies and maintains peer connections
+func (bn *Bootnode) checkConnections() {
+	peers := bn.peerManager.GetConnectedPeers()
+	for _, peerID := range peers {
+		if len(bn.host.Network().ConnsToPeer(peerID)) == 0 {
+			log.Printf("Peer %s disconnected, removing from peer list", peerID)
+			bn.peerManager.RemovePeer(peerID)
+		}
+	}
+}
+
+// Stop gracefully shuts down the bootnode
+func (bn *Bootnode) Stop() error {
+	log.Printf("Stopping bootnode...")
+
+	bn.cancel()
+	bn.connected = false
+
+	if err := bn.host.Close(); err != nil {
+		return fmt.Errorf("failed to close host: %w", err)
+	}
+
+	log.Printf("Bootnode stopped successfully")
+	return nil
 }

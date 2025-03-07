@@ -12,6 +12,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multiaddr"
 )
 
 const (
@@ -44,12 +45,22 @@ const (
 	MaxBlocksPerRequest     = 500
 	MaxHeadersPerRequest    = 2000
 	BlockPropagationTimeout = 30 * time.Second
+	BootnodeRetryDelay      = 5 * time.Second
+	MaxBootnodeRetries      = 5
 )
 
 type SyncProgress struct {
 	Current int
 	Target  int
 }
+
+type PeerStatus string
+
+const (
+	PeerStatusActive    PeerStatus = "active"
+	PeerStatusInactive  PeerStatus = "inactive"
+	PeerStatusBlacklist PeerStatus = "blacklist"
+)
 
 type PeerInfo struct {
 	ID             peer.ID `json:"id"`
@@ -905,4 +916,71 @@ func (pm *PeerManager) CleanupBlacklistedPeers() {
 
 func (pm *PeerManager) blacklistPeer(id peer.ID) {
 	pm.BlacklistPeer(id, 24*time.Hour)
+}
+
+// ConnectToBootnode attempts to connect to the bootnode with retries
+func (pm *PeerManager) ConnectToBootnode(bootnodeAddr string) error {
+	log.Printf("Attempting to connect to bootnode: %s", bootnodeAddr)
+
+	for i := 0; i < MaxBootnodeRetries; i++ {
+		// Parse bootnode address
+		addr, err := multiaddr.NewMultiaddr(bootnodeAddr)
+		if err != nil {
+			log.Printf("Failed to parse bootnode address: %v", err)
+			time.Sleep(BootnodeRetryDelay)
+			continue
+		}
+		addrInfo, err := peer.AddrInfoFromP2pAddr(addr)
+		if err != nil {
+			log.Printf("Failed to parse bootnode address: %v", err)
+			time.Sleep(BootnodeRetryDelay)
+			continue
+		}
+
+		// Attempt connection with timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = pm.host.Connect(ctx, *addrInfo)
+		cancel()
+
+		if err != nil {
+			log.Printf("Bootnode connection attempt %d failed: %v", i+1, err)
+			if i < MaxBootnodeRetries-1 {
+				time.Sleep(BootnodeRetryDelay)
+				continue
+			}
+			return fmt.Errorf("failed to connect to bootnode after %d attempts: %w", MaxBootnodeRetries, err)
+		}
+
+		// Verify connection
+		if len(pm.host.Network().ConnsToPeer(addrInfo.ID)) == 0 {
+			log.Printf("Connection verification failed for bootnode")
+			if i < MaxBootnodeRetries-1 {
+				time.Sleep(BootnodeRetryDelay)
+				continue
+			}
+			return fmt.Errorf("failed to verify bootnode connection after %d attempts", MaxBootnodeRetries)
+		}
+
+		// Add bootnode to peer list
+		pm.AddPeer(addrInfo.ID)
+		log.Printf("Successfully connected to bootnode: %s", addrInfo.ID)
+		return nil
+	}
+
+	return fmt.Errorf("failed to connect to bootnode after %d attempts", MaxBootnodeRetries)
+}
+
+// WaitForBootnodeConnection waits for successful bootnode connection
+func (pm *PeerManager) WaitForBootnodeConnection(bootnodeAddr string) error {
+	log.Printf("Waiting for bootnode connection...")
+
+	for {
+		err := pm.ConnectToBootnode(bootnodeAddr)
+		if err == nil {
+			return nil
+		}
+
+		log.Printf("Bootnode connection failed: %v. Retrying in %v...", err, BootnodeRetryDelay)
+		time.Sleep(BootnodeRetryDelay)
+	}
 }

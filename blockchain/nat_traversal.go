@@ -3,12 +3,14 @@ package blockchain
 import (
 	"context"
 	"fmt"
-	"log"	
+	"log"
 	"sync"
+	"time"
+
+	upnp "github.com/huin/goupnp/dcps/internetgateway2"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/pion/stun"
 	"github.com/pion/turn/v2"
-	upnp "github.com/huin/goupnp/dcps/internetgateway2"
 )
 
 // NATType represents different types of NAT
@@ -51,40 +53,71 @@ func NewNATManager(h host.Host, config *NetworkConfig) *NATManager {
 }
 
 // Start initializes NAT traversal mechanisms
-// In nat_traversal.go
 func (nm *NATManager) Start() error {
-    if !nm.config.NATEnabled {
-        log.Println("NAT traversal disabled")
-        return nil
-    }
+	if !nm.config.NATEnabled {
+		log.Println("NAT traversal disabled")
+		return nil
+	}
 
-    var errs []error
+	var errs []error
+	maxRetries := 3
+	retryDelay := 5 * time.Second
 
-    // STUN initialization
-    if err := nm.initSTUN(); err != nil {
-        errs = append(errs, fmt.Errorf("STUN initialization error: %w", err))
-    }
+	// STUN initialization with retries
+	for i := 0; i < maxRetries; i++ {
+		if err := nm.initSTUN(); err != nil {
+			log.Printf("STUN initialization attempt %d failed: %v", i+1, err)
+			if i < maxRetries-1 {
+				time.Sleep(retryDelay)
+				continue
+			}
+			errs = append(errs, fmt.Errorf("STUN initialization error after %d attempts: %w", maxRetries, err))
+		} else {
+			break
+		}
+	}
 
-    // TURN initialization
-    if len(nm.config.TURNServers) > 0 {
-        if err := nm.initTURN(); err != nil {
-            errs = append(errs, fmt.Errorf("TURN initialization error: %w", err))
-        }
-    }
+	// TURN initialization with retries
+	if len(nm.config.TURNServers) > 0 {
+		for i := 0; i < maxRetries; i++ {
+			if err := nm.initTURN(); err != nil {
+				log.Printf("TURN initialization attempt %d failed: %v", i+1, err)
+				if i < maxRetries-1 {
+					time.Sleep(retryDelay)
+					continue
+				}
+				errs = append(errs, fmt.Errorf("TURN initialization error after %d attempts: %w", maxRetries, err))
+			} else {
+				break
+			}
+		}
+	}
 
-    // UPnP setup
-    if nm.config.UPnPEnabled {
-        if err := nm.setupUPnP(); err != nil {
-            errs = append(errs, fmt.Errorf("UPnP setup error: %w", err))
-        }
-    }
+	// UPnP setup with retries
+	if nm.config.UPnPEnabled {
+		for i := 0; i < maxRetries; i++ {
+			if err := nm.setupUPnP(); err != nil {
+				log.Printf("UPnP setup attempt %d failed: %v", i+1, err)
+				if i < maxRetries-1 {
+					time.Sleep(retryDelay)
+					continue
+				}
+				errs = append(errs, fmt.Errorf("UPnP setup error after %d attempts: %w", maxRetries, err))
+			} else {
+				break
+			}
+		}
+	}
 
-    // Combine errors
-    if len(errs) > 0 {
-        return fmt.Errorf("NAT traversal initialization errors: %v", errs)
-    }
+	// Combine errors
+	if len(errs) > 0 {
+		return fmt.Errorf("NAT traversal initialization errors: %v", errs)
+	}
 
-    return nil
+	// Start NAT type detection
+	go nm.detectNATType()
+
+	return nil
 }
 
 // initSTUN initializes STUN client and discovers external IP
@@ -102,10 +135,10 @@ func (nm *NATManager) initSTUN() error {
 			continue
 		}
 		nm.stunClient = c
-		
+
 		// Create message
 		message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
-		
+
 		// Start transaction
 		err = c.Do(message, func(res stun.Event) {
 			if res.Error != nil {
@@ -143,14 +176,14 @@ func (nm *NATManager) initTURN() error {
 
 	// Use the first configured TURN server
 	turnConfig := nm.config.TURNServers[0]
-	
+
 	// Configure TURN client
 	cfg := &turn.ClientConfig{
 		STUNServerAddr: turnConfig.Address,
 		TURNServerAddr: turnConfig.Address,
 		Username:       turnConfig.Username,
 		Password:       turnConfig.Password,
-		Realm:         "blockchain",
+		Realm:          "blockchain",
 	}
 
 	client, err := turn.NewClient(cfg)
@@ -176,14 +209,14 @@ func (nm *NATManager) setupUPnP() error {
 	// Try to map port on all discovered devices
 	for _, client := range clients {
 		err := client.AddPortMapping(
-			"",                     // remoteHost (empty for all hosts)
-			uint16(nm.config.ListenPort),  // external port
-			"TCP",                  // protocol
-			uint16(nm.config.ListenPort),  // internal port
-			nm.config.ListenHost,   // internal client
-			true,                   // enabled flag
-			"Blockchain P2P",       // description
-			uint32(86400),          // lease duration in seconds (24 hours)
+			"",                           // remoteHost (empty for all hosts)
+			uint16(nm.config.ListenPort), // external port
+			"TCP",                        // protocol
+			uint16(nm.config.ListenPort), // internal port
+			nm.config.ListenHost,         // internal client
+			true,                         // enabled flag
+			"Blockchain P2P",             // description
+			uint32(86400),                // lease duration in seconds (24 hours)
 		)
 
 		if err == nil {
@@ -198,40 +231,64 @@ func (nm *NATManager) setupUPnP() error {
 	return fmt.Errorf("failed to set up UPnP port mapping on any device")
 }
 
-// detectNATType attempts to determine the type of NAT
+// detectNATType attempts to determine the type of NAT with retries
 func (nm *NATManager) detectNATType() {
-	if nm.stunClient == nil {
-		nm.natType = NATUnknown
+	maxRetries := 3
+	retryDelay := 5 * time.Second
+
+	for i := 0; i < maxRetries; i++ {
+		if nm.stunClient == nil {
+			log.Printf("NAT detection attempt %d failed: STUN client not initialized", i+1)
+			if i < maxRetries-1 {
+				time.Sleep(retryDelay)
+				continue
+			}
+			nm.natType = NATUnknown
+			return
+		}
+
+		message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+
+		err := nm.stunClient.Do(message, func(res stun.Event) {
+			if res.Error != nil {
+				log.Printf("NAT detection error: %v", res.Error)
+				nm.natType = NATUnknown
+				return
+			}
+
+			var xorAddr stun.XORMappedAddress
+			if err := xorAddr.GetFrom(res.Message); err != nil {
+				log.Printf("Failed to get XOR mapped address: %v", err)
+				nm.natType = NATUnknown
+				return
+			}
+
+			nm.mutex.Lock()
+			if xorAddr.IP.String() == nm.config.ListenHost {
+				nm.natType = NATOpen
+			} else {
+				nm.natType = NATFull
+			}
+			nm.mutex.Unlock()
+
+			log.Printf("NAT type detected: %v", nm.natType)
+		})
+
+		if err != nil {
+			log.Printf("NAT detection attempt %d failed: %v", i+1, err)
+			if i < maxRetries-1 {
+				time.Sleep(retryDelay)
+				continue
+			}
+			nm.natType = NATUnknown
+			return
+		}
+
+		// If we got here, detection was successful
 		return
 	}
 
-	// Send binding request to STUN server
-	message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
-	
-	err := nm.stunClient.Do(message, func(res stun.Event) {
-		if res.Error != nil {
-			nm.natType = NATUnknown
-			return
-		}
-
-		var xorAddr stun.XORMappedAddress
-		if err := xorAddr.GetFrom(res.Message); err != nil {
-			nm.natType = NATUnknown
-			return
-		}
-
-		// Compare mapped address with local address
-		if xorAddr.IP.String() == nm.config.ListenHost {
-			nm.natType = NATOpen
-		} else {
-			// Additional tests needed to determine exact NAT type
-			nm.natType = NATFull
-		}
-	})
-
-	if err != nil {
-		nm.natType = NATUnknown
-	}
+	nm.natType = NATUnknown
 }
 
 // GetExternalAddress returns the external IP and port
@@ -251,11 +308,11 @@ func (nm *NATManager) GetNATType() NATType {
 // Close cleans up NAT manager resources
 func (nm *NATManager) Close() error {
 	nm.cancel()
-	
+
 	if nm.stunClient != nil {
 		nm.stunClient.Close()
 	}
-	
+
 	if nm.turnClient != nil {
 		nm.turnClient.Close()
 	}

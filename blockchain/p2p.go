@@ -29,7 +29,6 @@ const (
 	BlockProtocolID         = "/blockchain/blocks/1.0.0"
 	TransactionProtocolID   = "/blockchain/txs/1.0.0"
 	HeartbeatProtocolID     = "/blockchain/heartbeat/1.0.0"
-	HeartbeatInterval       = 30 * time.Second
 	ReconnectInterval       = 10 * time.Second
 	MaxReconnectAttempts    = 5
 	ConnectionRetryInterval = 30 * time.Second
