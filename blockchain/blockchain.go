@@ -1024,3 +1024,15 @@ func (up *UTXOPool) GetRootHash() string {
 
 	return hex.EncodeToString(hasher.Sum(nil))
 }
+
+// GetUTXOSet returns the current UTXO set
+func (bc *Blockchain) GetUTXOSet() map[string]UTXO {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.utxoSet
+}
+
+// SetStakePool sets the stake pool for the blockchain
+func (bc *Blockchain) SetStakePool(pool *StakePool) {
+	bc.stakePool = pool
+}

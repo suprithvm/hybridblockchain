@@ -242,18 +242,14 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 	log.Printf("🚀 Starting validator node...")
 
-	// Step 1: Initialize database and wallet
-	_, store = initializeDatabase(config)
+	// Step 1: Initialize wallet
 	wallet, err := setupWallet(config.DataDir)
 	if err != nil {
 		log.Fatalf("❌ Failed to setup wallet: %v", err)
 	}
 
-	// Step 2: Initialize blockchain without genesis
-	bc := &blockchain.Blockchain{
-		Node:       nil,
-		Validators: make(map[string]*blockchain.Validator),
-	}
+	// Step 2: Initialize blockchain with existing store
+	bc := blockchain.InitialiseBlockchainWithStore(store)
 
 	// Step 3: Initialize P2P network
 	networkConfig := &blockchain.NetworkConfig{
@@ -276,7 +272,7 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 
 	// Set node in blockchain and initialize stake pool
 	bc.Node = node
-	bc.Node.StakePool= blockchain.NewStakePool(bc)
+	bc.SetStakePool(blockchain.NewStakePool(bc))
 
 	// Step 5: Connect to bootstrap nodes and discover peers
 	log.Printf("🔄 Connecting to bootstrap nodes...")
