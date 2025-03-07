@@ -700,61 +700,61 @@ func (n *Node) BroadcastMessage(msg string) error {
 
 // ConnectToBootstrapNodes connects to the configured bootstrap nodes
 func (n *Node) ConnectToBootstrapNodes(ctx context.Context) error {
-	log.Printf("🔄 Attempting to connect to bootstrap nodes...")
+	if len(n.config.BootstrapNodes) == 0 {
+		return fmt.Errorf("no bootstrap nodes configured")
+	}
+
+	log.Printf("🔌 Attempting to connect to %d bootstrap nodes", len(n.config.BootstrapNodes))
+
+	var lastErr error
+	connected := false
 
 	for _, addr := range n.config.BootstrapNodes {
-		// Parse the bootstrap node address
-		maddr, err := multiaddr.NewMultiaddr(addr)
+		// Parse the multiaddr
+		multiaddr, err := multiaddr.NewMultiaddr(addr)
 		if err != nil {
-			log.Printf("❌ Failed to parse bootstrap address %s: %v", addr, err)
+			log.Printf("⚠️ Invalid bootstrap node address %s: %v", addr, err)
+			lastErr = err
 			continue
 		}
 
-		// Get peer info from the multiaddr
-		peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+		// Extract peer ID from multiaddr
+		peerInfo, err := peer.AddrInfoFromP2pAddr(multiaddr)
 		if err != nil {
-			log.Printf("❌ Failed to get peer info from %s: %v", addr, err)
+			log.Printf("⚠️ Failed to parse peer info from %s: %v", addr, err)
+			lastErr = err
 			continue
 		}
 
-		// Check if we're already connected
+		// Skip if we're already connected to this peer
 		if n.Host.Network().Connectedness(peerInfo.ID) == network.Connected {
 			log.Printf("✅ Already connected to bootstrap node %s", peerInfo.ID)
+			connected = true
 			continue
 		}
 
 		// Try to connect with timeout
-		connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err = n.Host.Connect(connectCtx, *peerInfo)
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err = n.Host.Connect(ctx, *peerInfo)
 		cancel()
 
 		if err != nil {
-			log.Printf("❌ Failed to connect to bootstrap node %s: %v", addr, err)
+			log.Printf("⚠️ Failed to connect to bootstrap node %s: %v", peerInfo.ID, err)
+			lastErr = err
 			continue
 		}
 
-		log.Printf("✅ Successfully connected to bootstrap node %s", peerInfo.ID)
+		// Verify connection
+		if n.Host.Network().Connectedness(peerInfo.ID) == network.Connected {
+			log.Printf("✅ Successfully connected to bootstrap node %s", peerInfo.ID)
+			connected = true
+			n.bootstrapNodes[peerInfo.ID] = true
+			break
+		}
+	}
 
-		// Add to known bootstrap nodes
-		n.bootstrapNodes[peerInfo.ID] = true
-
-		// Set up stream handler for welcome messages
-		n.Host.SetStreamHandler(protocol.ID("/blockchain/welcome/1.0.0"), func(s network.Stream) {
-			defer s.Close()
-
-			var welcomeMsg struct {
-				PeerID    string   `json:"peer_id"`
-				Addresses []string `json:"addresses"`
-			}
-
-			if err := json.NewDecoder(s).Decode(&welcomeMsg); err != nil {
-				log.Printf("❌ Failed to decode welcome message: %v", err)
-				return
-			}
-
-			log.Printf("📨 Received welcome message from bootstrap node %s", welcomeMsg.PeerID)
-			log.Printf("📝 Bootstrap node addresses: %v", welcomeMsg.Addresses)
-		})
+	if !connected {
+		return fmt.Errorf("failed to connect to any bootstrap nodes: %v", lastErr)
 	}
 
 	return nil

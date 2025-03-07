@@ -197,14 +197,42 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 		log.Fatalf("❌ Failed to start node: %v", err)
 	}
 
-	// Connect to bootstrap nodes and discover peers
-	log.Printf("🔄 Connecting to bootstrap nodes:")
-	if err := node.DiscoverPeers(); err != nil {
-		log.Printf("⚠️ Peer discovery warning: %v", err)
-	}
-
 	// Log node ID
 	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
+
+	// Connect to bootstrap nodes with retries
+	log.Printf("🔄 Connecting to bootstrap nodes...")
+	maxRetries := 5
+	retryDelay := 5 * time.Second
+	connected := false
+
+	for i := 0; i < maxRetries; i++ {
+		if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
+			log.Printf("⚠️ Attempt %d/%d: Failed to connect to bootstrap nodes: %v", i+1, maxRetries, err)
+			if i < maxRetries-1 {
+				log.Printf("⏳ Retrying in %v...", retryDelay)
+				time.Sleep(retryDelay)
+				continue
+			}
+		} else {
+			connected = true
+			log.Printf("✅ Successfully connected to bootstrap nodes")
+			break
+		}
+	}
+
+	if !connected {
+		log.Printf("❌ Failed to connect to any bootstrap nodes after %d attempts", maxRetries)
+		return fmt.Errorf("failed to connect to bootstrap nodes")
+	}
+
+	// Only proceed with peer discovery if connected to bootnode
+	if connected {
+		log.Printf("🔍 Starting peer discovery...")
+		if err := node.DiscoverPeers(); err != nil {
+			log.Printf("⚠️ Peer discovery warning: %v", err)
+		}
+	}
 
 	// Register blockchain handlers
 	if err := node.RegisterBlockchainHandlers(bc); err != nil {
@@ -219,17 +247,24 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 		for {
 			select {
 			case <-ticker.C:
-				// Discover new peers
-				if err := node.DiscoverPeers(); err != nil {
-					log.Printf("⚠️ Peer discovery warning: %v", err)
-				}
+				// Only discover new peers if we have a bootnode connection
+				if len(node.Host.Network().Peers()) > 0 {
+					if err := node.DiscoverPeers(); err != nil {
+						log.Printf("⚠️ Peer discovery warning: %v", err)
+					}
 
-				// Sync with non-bootstrap peers
-				for _, peerID := range node.Host.Network().Peers() {
-					if !node.IsPeerBootstrapNode(peerID) {
-						if err := node.SyncWithPeer(peerID); err != nil {
-							log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
+					// Sync with non-bootstrap peers
+					for _, peerID := range node.Host.Network().Peers() {
+						if !node.IsPeerBootstrapNode(peerID) {
+							if err := node.SyncWithPeer(peerID); err != nil {
+								log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
+							}
 						}
+					}
+				} else {
+					log.Printf("⚠️ No peers connected, attempting to reconnect to bootstrap nodes...")
+					if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
+						log.Printf("❌ Failed to reconnect to bootstrap nodes: %v", err)
 					}
 				}
 			}
