@@ -1,137 +1,196 @@
 package blockchain
 
 import (
-    "context"
-    "log"
-    "sync"
-    "time"
+	"context"
+	"log"
+	"sync"
+	"time"
 )
 
 const (
-    ValidatorHeartbeatInterval = 30 * time.Second
-    ValidatorTimeoutDuration  = 90 * time.Second
-    ValidatorSyncInterval     = 5 * time.Minute
+	ValidatorHeartbeatInterval = 30 * time.Second
+	ValidatorTimeoutDuration   = 90 * time.Second
+	ValidatorSyncInterval      = 5 * time.Minute
 )
 
 // ValidatorProtocol manages validator communication
 type ValidatorProtocol struct {
-    node           *Node
-    validators     map[string]*ValidatorState
-    heartbeats    map[string]time.Time
-    mu            sync.RWMutex
-    ctx           context.Context
-    cancel        context.CancelFunc
+	node       *Node
+	validators map[string]*ValidatorState
+	heartbeats map[string]time.Time
+	mu         sync.RWMutex
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 type ValidatorState struct {
-    Address     string
-    LastSeen    time.Time
-    IsActive    bool
-    Heartbeats  uint64
-    Timeouts    uint64
+	Address    string
+	LastSeen   time.Time
+	IsActive   bool
+	Heartbeats uint64
+	Timeouts   uint64
 }
 
 // NewValidatorProtocol creates a new validator protocol instance
 func NewValidatorProtocol(node *Node) *ValidatorProtocol {
-    ctx, cancel := context.WithCancel(context.Background())
-    return &ValidatorProtocol{
-        node:        node,
-        validators:  make(map[string]*ValidatorState),
-        heartbeats: make(map[string]time.Time),
-        ctx:        ctx,
-        cancel:     cancel,
-    }
+	ctx, cancel := context.WithCancel(context.Background())
+	return &ValidatorProtocol{
+		node:       node,
+		validators: make(map[string]*ValidatorState),
+		heartbeats: make(map[string]time.Time),
+		ctx:        ctx,
+		cancel:     cancel,
+	}
 }
 
 // Start begins the validator protocol
 func (vp *ValidatorProtocol) Start() {
-    go vp.heartbeatMonitor()
-    go vp.validatorSync()
+	go vp.heartbeatMonitor()
+	go vp.validatorSync()
 }
 
 // Stop stops the validator protocol
 func (vp *ValidatorProtocol) Stop() {
-    vp.cancel()
+	vp.cancel()
 }
 
 // Monitor validator heartbeats
 func (vp *ValidatorProtocol) heartbeatMonitor() {
-    ticker := time.NewTicker(ValidatorHeartbeatInterval)
-    defer ticker.Stop()
+	ticker := time.NewTicker(ValidatorHeartbeatInterval)
+	defer ticker.Stop()
 
-    for {
-        select {
-        case <-vp.ctx.Done():
-            return
-        case <-ticker.C:
-            vp.checkValidatorHeartbeats()
-        }
-    }
+	for {
+		select {
+		case <-vp.ctx.Done():
+			return
+		case <-ticker.C:
+			vp.checkValidatorHeartbeats()
+		}
+	}
 }
 
 // Synchronize validator states
 func (vp *ValidatorProtocol) validatorSync() {
-    ticker := time.NewTicker(ValidatorSyncInterval)
-    defer ticker.Stop()
+	ticker := time.NewTicker(ValidatorSyncInterval)
+	defer ticker.Stop()
 
-    for {
-        select {
-        case <-vp.ctx.Done():
-            return
-        case <-ticker.C:
-            vp.syncValidatorStates()
-        }
-    }
+	for {
+		select {
+		case <-vp.ctx.Done():
+			return
+		case <-ticker.C:
+			vp.syncValidatorStates()
+		}
+	}
 }
 
-// Handle validator heartbeat
+// HandleHeartbeat processes a validator heartbeat
 func (vp *ValidatorProtocol) HandleHeartbeat(validatorAddr string) {
-    vp.mu.Lock()
-    defer vp.mu.Unlock()
+	vp.mu.Lock()
+	defer vp.mu.Unlock()
 
-    vp.heartbeats[validatorAddr] = time.Now()
-    if state, exists := vp.validators[validatorAddr]; exists {
-        state.LastSeen = time.Now()
-        state.Heartbeats++
-    }
+	vp.heartbeats[validatorAddr] = time.Now()
+	if state, exists := vp.validators[validatorAddr]; exists {
+		state.LastSeen = time.Now()
+		state.Heartbeats++
+		state.IsActive = true
+	} else {
+		vp.validators[validatorAddr] = &ValidatorState{
+			Address:    validatorAddr,
+			LastSeen:   time.Now(),
+			IsActive:   true,
+			Heartbeats: 1,
+			Timeouts:   0,
+		}
+	}
 }
 
 // Check validator heartbeats and handle timeouts
 func (vp *ValidatorProtocol) checkValidatorHeartbeats() {
-    vp.mu.Lock()
-    defer vp.mu.Unlock()
+	vp.mu.Lock()
+	defer vp.mu.Unlock()
 
-    now := time.Now()
-    for addr, lastBeat := range vp.heartbeats {
-        if now.Sub(lastBeat) > ValidatorTimeoutDuration {
-            vp.handleValidatorTimeout(addr)
-        }
-    }
+	now := time.Now()
+	for addr, lastBeat := range vp.heartbeats {
+		if now.Sub(lastBeat) > ValidatorTimeoutDuration {
+			vp.handleValidatorTimeout(addr)
+		}
+	}
 }
 
 // Handle validator timeout
 func (vp *ValidatorProtocol) handleValidatorTimeout(addr string) {
-    if state, exists := vp.validators[addr]; exists {
-        state.IsActive = false
-        state.Timeouts++
-        log.Printf("⚠️ Validator %s timed out (timeouts: %d)", addr, state.Timeouts)
-        
-        // Notify network of validator timeout
-        vp.node.BroadcastValidatorTimeout(addr)
-    }
+	if state, exists := vp.validators[addr]; exists {
+		state.IsActive = false
+		state.Timeouts++
+		log.Printf("⚠️ Validator %s timed out (timeouts: %d)", addr, state.Timeouts)
+
+		// Notify network of validator timeout
+		vp.node.BroadcastValidatorTimeout(addr)
+
+		// If too many timeouts, consider removing validator
+		if state.Timeouts >= 3 {
+			delete(vp.validators, addr)
+			delete(vp.heartbeats, addr)
+			log.Printf("❌ Validator %s removed due to excessive timeouts", addr)
+		}
+	}
 }
 
 // Sync validator states with network
 func (vp *ValidatorProtocol) syncValidatorStates() {
-    vp.mu.RLock()
-    activeValidators := make([]string, 0)
-    for addr, state := range vp.validators {
-        if state.IsActive {
-            activeValidators = append(activeValidators, addr)
-        }
-    }
-    vp.mu.RUnlock()
+	vp.mu.RLock()
+	activeValidators := make([]string, 0)
+	for addr, state := range vp.validators {
+		if state.IsActive {
+			activeValidators = append(activeValidators, addr)
+		}
+	}
+	vp.mu.RUnlock()
 
-    // Broadcast validator set update
-    vp.node.BroadcastValidatorSetUpdate(activeValidators)
-} 
+	// Broadcast validator set update
+	vp.node.BroadcastValidatorSetUpdate(activeValidators)
+}
+
+// GetActiveValidators returns a list of currently active validators
+func (vp *ValidatorProtocol) GetActiveValidators() []string {
+	vp.mu.RLock()
+	defer vp.mu.RUnlock()
+
+	activeValidators := make([]string, 0)
+	for addr, state := range vp.validators {
+		if state.IsActive {
+			activeValidators = append(activeValidators, addr)
+		}
+	}
+	return activeValidators
+}
+
+// IsValidatorActive checks if a validator is currently active
+func (vp *ValidatorProtocol) IsValidatorActive(addr string) bool {
+	vp.mu.RLock()
+	defer vp.mu.RUnlock()
+
+	if state, exists := vp.validators[addr]; exists {
+		return state.IsActive
+	}
+	return false
+}
+
+// GetValidatorState returns the state of a specific validator
+func (vp *ValidatorProtocol) GetValidatorState(addr string) *ValidatorState {
+	vp.mu.RLock()
+	defer vp.mu.RUnlock()
+
+	return vp.validators[addr]
+}
+
+// RemoveValidator removes a validator from the protocol
+func (vp *ValidatorProtocol) RemoveValidator(addr string) {
+	vp.mu.Lock()
+	defer vp.mu.Unlock()
+
+	delete(vp.validators, addr)
+	delete(vp.heartbeats, addr)
+	log.Printf("🗑️ Validator %s removed from protocol", addr)
+}

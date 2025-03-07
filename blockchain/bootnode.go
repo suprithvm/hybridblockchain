@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -20,9 +21,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/routing"
-	"github.com/pion/stun"
-
 	"github.com/multiformats/go-multiaddr"
+	"github.com/pion/stun"
 
 	syncpb "blockchain-core/blockchain/sync/proto"
 
@@ -437,30 +437,115 @@ func loadOrCreatePrivateKey(dataDir string) (crypto.PrivKey, error) {
 	return priv, nil
 }
 
-// initializeProtocols sets up protocol handlers for different message types
+// initializeProtocols sets up all supported protocols for the bootstrap node
 func (bn *BootstrapNode) initializeProtocols() {
-	// Block announcement protocol
-	bn.protocols["/blockchain/block/1.0.0"] = func(stream network.Stream) {
-		bn.handleBlockAnnouncement(stream)
-	}
+	// Register core blockchain protocols
+	bn.protocols["/blockchain/1.0.0"] = bn.handleBlockAnnouncement
+	bn.protocols["/blockchain/tx/1.0.0"] = bn.handleTransaction
+	bn.protocols["/blockchain/heartbeat/1.0.0"] = bn.handleHeartbeat
+	bn.protocols["/blockchain/sync/1.0.0"] = bn.handleSync
+	bn.protocols["/blockchain/state/1.0.0"] = bn.handleStatus
+	bn.protocols["/blockchain/fork/1.0.0"] = bn.handleForkResolution
+	bn.protocols["/blockchain/mempool/1.0.0"] = bn.handleMempoolSync
+	bn.protocols["/blockchain/validator/1.0.0"] = bn.handleValidatorMessage
 
-	// Transaction propagation protocol
-	bn.protocols["/blockchain/tx/1.0.0"] = func(stream network.Stream) {
-		bn.handleTransaction(stream)
-	}
-
-	// Peer discovery protocol
-	bn.protocols["/blockchain/discovery/1.0.0"] = func(stream network.Stream) {
-		bn.handlePeerDiscovery(stream)
-	}
-	// In initializeProtocols()
-	bn.protocols["/blockchain/relay/1.0.0"] = bn.handleRelay
-	bn.protocols["/blockchain/status/1.0.0"] = bn.handleStatus
-
-	// Register all protocols
+	// Register stream handlers
 	for proto, handler := range bn.protocols {
 		bn.host.SetStreamHandler(protocol.ID(proto), handler)
 	}
+
+	// Start periodic tasks
+	go bn.startPeriodicTasks()
+	go bn.monitorHeartbeats()
+	go bn.runPeerDiscovery()
+
+	log.Printf("✅ Bootstrap node protocols initialized")
+}
+
+// handleValidatorMessage processes validator-related messages
+func (bn *BootstrapNode) handleValidatorMessage(s network.Stream) {
+	peerID := s.Conn().RemotePeer()
+
+	// Read message
+	buf := make([]byte, 1024)
+	_, err := io.ReadFull(s, buf)
+	if err != nil {
+		log.Printf("⚠️ Failed to read validator message from %s: %v", peerID, err)
+		s.Reset()
+		return
+	}
+
+	// Parse message
+	var msg struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(buf, &msg); err != nil {
+		log.Printf("⚠️ Failed to parse validator message from %s: %v", peerID, err)
+		s.Reset()
+		return
+	}
+
+	// Process message based on type
+	switch msg.Type {
+	case "VALIDATOR_HEARTBEAT":
+		var heartbeat ValidatorHeartbeatMessage
+		if err := json.Unmarshal(msg.Payload, &heartbeat); err != nil {
+			log.Printf("⚠️ Failed to parse validator heartbeat from %s: %v", peerID, err)
+			s.Reset()
+			return
+		}
+		bn.updatePeerScore(peerID, "heartbeat", 1)
+
+	case "VALIDATOR_TIMEOUT":
+		var timeout ValidatorTimeoutMessage
+		if err := json.Unmarshal(msg.Payload, &timeout); err != nil {
+			log.Printf("⚠️ Failed to parse validator timeout from %s: %v", peerID, err)
+			s.Reset()
+			return
+		}
+		bn.updatePeerScore(peerID, "timeout", -1)
+
+	case "VALIDATOR_SET_UPDATE":
+		var update ValidatorSetUpdateMessage
+		if err := json.Unmarshal(msg.Payload, &update); err != nil {
+			log.Printf("⚠️ Failed to parse validator set update from %s: %v", peerID, err)
+			s.Reset()
+			return
+		}
+		bn.broadcastToOtherPeers(peerID, "VALIDATOR_SET_UPDATE", update)
+	}
+
+	// Update peer info
+	bn.updatePeerLastSeen(peerID)
+}
+
+// updatePeerLastSeen updates the last seen timestamp for a peer
+func (bn *BootstrapNode) updatePeerLastSeen(peerID peer.ID) {
+	bn.heartbeatMu.Lock()
+	defer bn.heartbeatMu.Unlock()
+	bn.lastHeartbeat[peerID] = time.Now()
+}
+
+// handleMempoolSync processes mempool synchronization requests
+func (bn *BootstrapNode) handleMempoolSync(s network.Stream) {
+	// Implementation for mempool sync
+	log.Printf("📬 Mempool sync request from %s", s.Conn().RemotePeer())
+	s.Close()
+}
+
+// handleSync processes blockchain sync requests
+func (bn *BootstrapNode) handleSync(s network.Stream) {
+	// Implementation for blockchain sync
+	log.Printf("🔄 Sync request from %s", s.Conn().RemotePeer())
+	s.Close()
+}
+
+// handleForkResolution processes fork resolution requests
+func (bn *BootstrapNode) handleForkResolution(s network.Stream) {
+	// Implementation for fork resolution
+	log.Printf("🔀 Fork resolution request from %s", s.Conn().RemotePeer())
+	s.Close()
 }
 
 // updatePeerScore updates the score for a peer based on their behavior
@@ -813,17 +898,37 @@ func (bn *BootstrapNode) runPeerDiscovery() {
 }
 
 func (bn *BootstrapNode) discoverPeers() {
-	// Find peers in the network
-	peerChan := bn.dht.FindProvidersAsync(bn.ctx, cid.NewCidV1(cid.Raw, []byte("blockchain")), 20)
-	var peers []peer.AddrInfo
-	for p := range peerChan {
-		peers = append(peers, p)
-	}
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 
-	// Process discovered peers
-	for _, p := range peers {
-		if err := bn.handleNewPeer(p); err != nil {
-			log.Printf("⚠️ Failed to handle peer %s: %v", p.ID, err)
+	for {
+		select {
+		case <-bn.ctx.Done():
+			return
+		case <-ticker.C:
+			// Get peers from DHT routing table
+			peers := bn.dht.RoutingTable().ListPeers()
+			for _, peerID := range peers {
+				// Skip if we already know this peer
+				bn.peersMutex.RLock()
+				if _, exists := bn.peers[peerID]; exists {
+					bn.peersMutex.RUnlock()
+					continue
+				}
+				bn.peersMutex.RUnlock()
+
+				// Try to connect to peer
+				if err := bn.node.ConnectToPeer(peerID.String()); err != nil {
+					log.Printf("Failed to connect to peer %s: %v", peerID, err)
+					continue
+				}
+
+				// Add to known peers
+				bn.peersMutex.Lock()
+				bn.peers[peerID] = bn.host.Peerstore().PeerInfo(peerID)
+				bn.peersMutex.Unlock()
+				log.Printf("Connected to new peer: %s", peerID)
+			}
 		}
 	}
 }
@@ -1415,14 +1520,19 @@ func (bn *BootstrapNode) IsPeerHealthy(peerID peer.ID) bool {
 }
 
 type BootNode struct {
-	node       *Node
-	blockchain *Blockchain
-	syncServer *SyncServer
-	grpcServer *grpc.Server
-	mu         sync.RWMutex
-	host       host.Host
-	ctx        context.Context
-	cancel     context.CancelFunc
+	node          *Node
+	blockchain    *Blockchain
+	syncServer    *SyncServer
+	grpcServer    *grpc.Server
+	mu            sync.RWMutex
+	host          host.Host
+	ctx           context.Context
+	cancel        context.CancelFunc
+	dht           *dht.IpfsDHT
+	peers         map[peer.ID]peer.AddrInfo
+	peersMutex    sync.RWMutex
+	heartbeatMu   sync.RWMutex
+	lastHeartbeat map[peer.ID]time.Time
 }
 
 type SyncServer struct {
@@ -1732,10 +1842,34 @@ func (s *syncServer) StreamBlocks(req *syncpb.BlockRequest, stream syncpb.ChainS
 	return nil
 }
 
-func (s *syncServer) PropagateTransaction(ctx context.Context, tx *syncpb.Transaction) (*syncpb.PropagateResponse, error) {
-	// Add transaction propagation logic
+func (s *syncServer) PropagateTransaction(ctx context.Context, req *syncpb.Transaction) (*syncpb.PropagateResponse, error) {
+	log.Printf("Received transaction propagation request")
+
+	// Deserialize transaction data
+	var tx Transaction
+	if err := json.Unmarshal(req.TransactionData, &tx); err != nil {
+		return nil, fmt.Errorf("failed to deserialize transaction: %v", err)
+	}
+
+	// Validate gas parameters
+	if err := tx.ValidateGas(); err != nil {
+		return nil, fmt.Errorf("invalid gas parameters: %v", err)
+	}
+
+	// Add transaction to mempool
+	if !s.blockchain.mempool.AddTransaction(tx, s.blockchain.utxoSet) {
+		return nil, fmt.Errorf("failed to add transaction to mempool")
+	}
+
+	// Get connected peers
+	peers := s.node.Host.Network().Peers()
+
+	// Broadcast transaction to all peers
+	s.node.Mempool.BroadcastPendingTransactions(s.node)
+
 	return &syncpb.PropagateResponse{
-		Success: true,
+		Success:      true,
+		PropagatedTo: uint32(len(peers)),
 	}, nil
 }
 
@@ -1748,22 +1882,63 @@ func NewSyncService(node *BootNode) SyncService {
 	}
 }
 
-// Update StartSync to use local NewSyncService
+// StartSync starts the sync service
 func (bn *BootNode) StartSync() error {
-	log.Printf("Starting sync service for node %s", bn.host.ID())
-	syncService := NewSyncService(bn)
-	return syncService.Start()
+	bn.mu.Lock()
+	defer bn.mu.Unlock()
+
+	log.Printf("Starting sync service...")
+
+	// Create sync server instance
+	bn.syncServer = &SyncServer{
+		blockchain: bn.blockchain,
+		node:       bn.node,
+	}
+
+	// Start peer discovery and heartbeat routines
+	go bn.discoverPeers()
+
+	// Start heartbeat routine
+	go bn.startHeartbeat()
+
+	return nil
 }
 
 // Shutdown implements Node interface
 func (bn *BootNode) Shutdown() error {
 	log.Printf("Shutting down node %s", bn.host.ID())
+
+	// Cancel context to stop all goroutines
 	if bn.cancel != nil {
 		bn.cancel()
 	}
-	if bn.host != nil {
-		return bn.host.Close()
+
+	// Stop sync service if running
+	if bn.syncServer != nil {
+		bn.syncServer.Stop()
 	}
+
+	// Close all network connections
+	if bn.host != nil {
+		// Close all streams
+		for _, conn := range bn.host.Network().Conns() {
+			for _, stream := range conn.GetStreams() {
+				stream.Close()
+			}
+		}
+
+		// Close host
+		if err := bn.host.Close(); err != nil {
+			log.Printf("Error closing host: %v", err)
+		}
+	}
+
+	// Close gRPC server if running
+	if bn.grpcServer != nil {
+		bn.grpcServer.GracefulStop()
+	}
+
+	log.Printf("✅ Node shutdown completed")
 	return nil
 }
 
@@ -1798,3 +1973,112 @@ const (
 	PeerStatusActive
 	PeerStatusInactive
 )
+
+type Heartbeat struct {
+	Timestamp int64  `json:"timestamp"`
+	NodeID    string `json:"node_id"`
+}
+
+// startHeartbeat starts the heartbeat routine
+func (bn *BootNode) startHeartbeat() {
+	ticker := time.NewTicker(HeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-bn.ctx.Done():
+			return
+		case <-ticker.C:
+			bn.peersMutex.RLock()
+			for peerID := range bn.peers {
+				// Skip if peer is not connected
+				if bn.host.Network().Connectedness(peerID) != network.Connected {
+					continue
+				}
+
+				// Send heartbeat
+				stream, err := bn.host.NewStream(bn.ctx, peerID, protocol.ID(HeartbeatProtocolID))
+				if err != nil {
+					log.Printf("⚠️ Failed to open heartbeat stream to peer %s: %v", peerID, err)
+					continue
+				}
+
+				if _, err := stream.Write([]byte("ping")); err != nil {
+					log.Printf("⚠️ Failed to send heartbeat to peer %s: %v", peerID, err)
+					stream.Close()
+					continue
+				}
+				stream.Close()
+
+				// Update last heartbeat time
+				bn.heartbeatMu.Lock()
+				bn.lastHeartbeat[peerID] = time.Now()
+				bn.heartbeatMu.Unlock()
+			}
+			bn.peersMutex.RUnlock()
+
+			// Check for stale peers
+			bn.checkStalePeers()
+		}
+	}
+}
+
+// checkStalePeers removes peers that haven't sent a heartbeat in too long
+func (bn *BootNode) checkStalePeers() {
+	bn.heartbeatMu.Lock()
+	defer bn.heartbeatMu.Unlock()
+
+	now := time.Now()
+	for peerID, lastHeartbeat := range bn.lastHeartbeat {
+		if now.Sub(lastHeartbeat) > HeartbeatTimeout {
+			log.Printf("⚠️ Removing stale peer: %s", peerID)
+			bn.host.Network().ClosePeer(peerID)
+			delete(bn.lastHeartbeat, peerID)
+			bn.peersMutex.Lock()
+			delete(bn.peers, peerID)
+			bn.peersMutex.Unlock()
+		}
+	}
+}
+
+// discoverPeers discovers new peers from the DHT
+func (bn *BootNode) discoverPeers() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-bn.ctx.Done():
+			return
+		case <-ticker.C:
+			// Get peers from DHT routing table
+			peers := bn.dht.RoutingTable().ListPeers()
+			for _, peerID := range peers {
+				// Skip if we already know this peer
+				bn.peersMutex.RLock()
+				if _, exists := bn.peers[peerID]; exists {
+					bn.peersMutex.RUnlock()
+					continue
+				}
+				bn.peersMutex.RUnlock()
+
+				// Try to connect to peer
+				if err := bn.node.ConnectToPeer(peerID.String()); err != nil {
+					log.Printf("Failed to connect to peer %s: %v", peerID, err)
+					continue
+				}
+
+				// Add to known peers
+				bn.peersMutex.Lock()
+				bn.peers[peerID] = bn.host.Peerstore().PeerInfo(peerID)
+				bn.peersMutex.Unlock()
+				log.Printf("Connected to new peer: %s", peerID)
+			}
+		}
+	}
+}
+
+// Stop stops the sync server
+func (s *SyncServer) Stop() {
+	// No-op since we're using gRPC
+}

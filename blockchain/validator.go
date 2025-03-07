@@ -56,26 +56,39 @@ type Validator struct {
 
 // NewValidator creates a new validator instance
 func NewValidator(bc *Blockchain, config *ValidatorConfig, walletAddress string) (*Validator, error) {
+	if config == nil {
+		config = &ValidatorConfig{
+			MinStake:     1000,
+			RewardRate:   0.01,
+			SlashingRate: 0.5,
+			BlockTimeout: 30 * time.Second,
+			MaxMissed:    10,
+		}
+	}
+
 	if config.Stake < config.MinStake {
 		return nil, fmt.Errorf("stake amount %f is below minimum required %f",
 			config.Stake, config.MinStake)
 	}
 
-	if config.BlockTimeout == 0 {
-		config.BlockTimeout = 30 * time.Second
+	validator := &Validator{
+		blockchain:  bc,
+		config:      config,
+		Address:     walletAddress,
+		Status:      ValidatorStatusPending,
+		LastActive:  time.Now(),
+		validators:  make(map[string]float64),
+		Performance: &ValidatorPerformance{LastUpdate: time.Now()},
 	}
 
-	if config.MaxMissed == 0 {
-		config.MaxMissed = 10
+	// Register with stake pool
+	if bc != nil && bc.stakePool != nil {
+		if err := bc.stakePool.AddValidator(walletAddress, config.Stake, bc.Node.Host.ID().String()); err != nil {
+			return nil, fmt.Errorf("failed to register validator: %v", err)
+		}
 	}
 
-	return &Validator{
-		blockchain: bc,
-		config:     config,
-		Address:    walletAddress,
-		validators: make(map[string]float64),
-		lastBlock:  bc.GetLatestBlock().Header.BlockNumber,
-	}, nil
+	return validator, nil
 }
 
 // Start begins the validation process
@@ -87,11 +100,19 @@ func (v *Validator) Start() error {
 		return fmt.Errorf("validator is already running")
 	}
 
-	if v.slashed {
+	if v.Status == ValidatorStatusSlashed {
 		return fmt.Errorf("validator has been slashed and cannot participate")
 	}
 
+	// Wait for blockchain sync before starting validation
+	if v.blockchain != nil && v.blockchain.Node != nil {
+		if v.blockchain.Node.IsSyncing() {
+			return fmt.Errorf("cannot start validation while blockchain is syncing")
+		}
+	}
+
 	v.isValidating = true
+	v.Status = ValidatorStatusActive
 	log.Printf("🔐 Validator node activated with stake: %.4f tokens", v.config.Stake)
 	log.Printf("📊 Validation parameters: Min Stake: %.4f, Reward Rate: %.2f%%",
 		v.config.MinStake, v.config.RewardRate*100)
@@ -112,7 +133,7 @@ func (v *Validator) validate() {
 
 	for range ticker.C {
 		if !v.isValidating {
-			log.Printf("�� Validation process terminated")
+			log.Printf("🛑 Validation process terminated")
 			return
 		}
 

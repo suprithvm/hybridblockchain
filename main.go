@@ -240,28 +240,22 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 }
 
 func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
-	log.Printf("🔐 Starting Validator Node")
+	log.Printf("🚀 Starting validator node...")
 
-	// Setup wallet first
+	// Step 1: Initialize database and wallet
+	_, store = initializeDatabase(config)
 	wallet, err := setupWallet(config.DataDir)
 	if err != nil {
 		log.Fatalf("❌ Failed to setup wallet: %v", err)
 	}
-	log.Printf("💼 Validator wallet initialized with address: %s", wallet.Address)
 
-	// Initialize blockchain with store's database
-	dbConfig := &blockchain.DatabaseConfig{
-		Type:         "leveldb",
-		Path:         filepath.Join(config.DataDir, "chaindata"),
-		CacheSize:    256,
-		MaxOpenFiles: 64,
-		Compression:  true,
+	// Step 2: Initialize blockchain without genesis
+	bc := &blockchain.Blockchain{
+		Node:       nil,
+		Validators: make(map[string]*blockchain.Validator),
 	}
 
-	// Initialize blockchain
-	bc := blockchain.InitialiseBlockchain(dbConfig)
-
-	// Create network configuration
+	// Step 3: Initialize P2P network
 	networkConfig := &blockchain.NetworkConfig{
 		P2PPort:        extractPort(config.ListenAddr),
 		RPCPort:        extractPort(config.RPCAddr),
@@ -274,93 +268,84 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		DHTServerMode:  true,
 	}
 
-	// Initialize P2P network
+	// Step 4: Create and start P2P node
 	node, err := blockchain.NewNode(networkConfig)
 	if err != nil {
 		log.Fatalf("❌ Failed to create P2P node: %v", err)
 	}
 
-	// Start the node
-	if err := node.Start(); err != nil {
-		log.Fatalf("❌ Failed to start node: %v", err)
+	// Set node in blockchain and initialize stake pool
+	bc.Node = node
+	bc.Node.StakePool= blockchain.NewStakePool(bc)
+
+	// Step 5: Connect to bootstrap nodes and discover peers
+	log.Printf("🔄 Connecting to bootstrap nodes...")
+	if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
+		log.Printf("⚠️ Bootstrap connection warning: %v", err)
 	}
 
-	// Connect to bootstrap nodes and discover peers
-	log.Printf("🔄 Connecting to bootstrap nodes:")
+	// Step 6: Start peer discovery
+	log.Printf("🔍 Starting peer discovery...")
 	if err := node.DiscoverPeers(); err != nil {
 		log.Printf("⚠️ Peer discovery warning: %v", err)
 	}
 
-	// Log node ID
-	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
+	// Step 7: Wait for minimum peer connections
+	peerCheckTicker := time.NewTicker(5 * time.Second)
+	peerTimeout := time.After(2 * time.Minute)
+	minPeers := 3
 
-	// Register blockchain handlers
-	if err := node.RegisterBlockchainHandlers(bc); err != nil {
-		log.Printf("⚠️ Warning: Failed to register blockchain handlers: %v", err)
-	}
-
-	// Check if blockchain exists and sync if needed
-	if bc.GetHeight() == 0 {
-		log.Printf("🆕 No existing blockchain found. Initializing genesis block...")
-		if err := bc.InitializeChain(); err != nil {
-			log.Fatalf("❌ Failed to initialize genesis block: %v", err)
-		}
-		log.Printf("✅ Genesis block initialized")
-	} else {
-		log.Printf("📥 Existing blockchain found at height %d. Starting sync...", bc.GetHeight())
-		// Start syncing with peers
-		go func() {
-			for {
-				// Sync with non-bootstrap peers
-				for _, peerID := range node.Host.Network().Peers() {
-					if !node.IsPeerBootstrapNode(peerID) {
-						if err := node.SyncWithPeer(peerID); err != nil {
-							log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
-						}
-					}
-				}
-				time.Sleep(30 * time.Second) // Sync every 30 seconds
+peerDiscoveryLoop:
+	for {
+		select {
+		case <-peerCheckTicker.C:
+			if len(node.Host.Network().Peers()) >= minPeers {
+				log.Printf("✅ Connected to %d peers", len(node.Host.Network().Peers()))
+				break peerDiscoveryLoop
 			}
-		}()
+		case <-peerTimeout:
+			log.Printf("⚠️ Peer discovery timeout, continuing with available peers")
+			break peerDiscoveryLoop
+		}
+	}
+	peerCheckTicker.Stop()
+
+	// Step 8: Initialize or sync blockchain
+	log.Printf("🔄 Checking blockchain state...")
+	if err := bc.InitializeChain(); err != nil {
+		log.Fatalf("❌ Failed to initialize blockchain: %v", err)
 	}
 
-	// Create validator config
+	// Step 9: Create validator configuration
 	validatorConfig := &blockchain.ValidatorConfig{
 		Stake:        config.ValidatorStake,
-		MinStake:     0.0,  // Minimum stake requirement
-		RewardRate:   0.05, // 5% reward rate
-		SlashingRate: 0.10, // 10% slashing rate
+		MinStake:     0,
+		RewardRate:   0.01,
+		SlashingRate: 0.5,
+		BlockTimeout: 30 * time.Second,
+		MaxMissed:    10,
 	}
 
-	// Initialize validator
+	// Step 10: Create and start validator
 	validator, err := blockchain.NewValidator(bc, validatorConfig, wallet.Address)
 	if err != nil {
-		log.Fatalf("❌ Failed to initialize validator: %v", err)
+		log.Fatalf("❌ Failed to create validator: %v", err)
 	}
 
-	// Start validation process
-	if err := validator.Start(); err != nil {
-		log.Fatalf("❌ Failed to start validator: %v", err)
+	// Step 11: Register blockchain handlers
+	if err := node.RegisterBlockchainHandlers(bc); err != nil {
+		log.Printf("⚠️ Failed to register blockchain handlers: %v", err)
 	}
 
-	log.Printf("✅ Validator node is running")
-	log.Printf("📝 Validator Address: %s", wallet.Address)
-	log.Printf("💰 Staked Amount: %.2f", config.ValidatorStake)
-
-	// Start periodic peer discovery and blockchain syncing
+	// Step 12: Start periodic sync and validation
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
+		syncTicker := time.NewTicker(30 * time.Second)
+		defer syncTicker.Stop()
 
 		for {
 			select {
-			case <-ticker.C:
-				// Discover new peers
-				if err := node.DiscoverPeers(); err != nil {
-					log.Printf("⚠️ Peer discovery warning: %v", err)
-				}
-
-				// Sync with non-bootstrap peers
+			case <-syncTicker.C:
+				// Only sync with non-bootstrap peers
 				for _, peerID := range node.Host.Network().Peers() {
 					if !node.IsPeerBootstrapNode(peerID) {
 						if err := node.SyncWithPeer(peerID); err != nil {
@@ -371,6 +356,14 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 			}
 		}
 	}()
+
+	// Step 13: Start validator
+	if err := validator.Start(); err != nil {
+		log.Printf("⚠️ Failed to start validator: %v", err)
+	}
+
+	// Keep the node running
+	select {}
 }
 
 func runObserverNode(config *NodeConfig, store *blockchain.Store) {

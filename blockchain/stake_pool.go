@@ -37,10 +37,44 @@ type StakePool struct {
 
 // NewStakePool initializes a new StakePool.
 func NewStakePool(bc interface{}) *StakePool {
-	return &StakePool{
+	sp := &StakePool{
 		Stakes:       make(map[string]*StakeInfo),
 		WalletToHost: make(map[string]string),
 	}
+	return sp
+}
+
+// AddValidator adds a new validator to the stake pool
+func (sp *StakePool) AddValidator(walletAddress string, stake float64, hostID string) error {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	// Validate stake amount
+	if stake <= 0 {
+		return fmt.Errorf("stake amount must be positive")
+	}
+
+	// Create or update stake info
+	if _, exists := sp.Stakes[walletAddress]; !exists {
+		sp.Stakes[walletAddress] = &StakeInfo{
+			Address:    walletAddress,
+			Amount:     uint64(stake),
+			StartTime:  time.Now(),
+			LastActive: time.Now(),
+			Performance: &ValidatorPerformance{
+				LastUpdate: time.Now(),
+			},
+		}
+	} else {
+		sp.Stakes[walletAddress].Amount += uint64(stake)
+		sp.Stakes[walletAddress].LastActive = time.Now()
+	}
+
+	// Update host mapping
+	sp.WalletToHost[walletAddress] = hostID
+
+	log.Printf("✅ Added validator %s with stake %.4f", walletAddress, stake)
+	return nil
 }
 
 // AddStake adds a stake for a wallet address.
@@ -167,53 +201,42 @@ func (sp *StakePool) BroadcastValidator(peerHost host.Host, walletAddress, hostI
 	return nil
 }
 
-// GetValidators returns a specified number of validators
+// GetValidators returns a list of active validators
 func (sp *StakePool) GetValidators(count int) ([]ValidatorNode, error) {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
 	if len(sp.Stakes) == 0 {
-		return nil, errors.New("no validators available in stake pool")
+		return nil, fmt.Errorf("no validators available in stake pool")
 	}
 
-	// If we have fewer validators than requested, return all of them
-	validatorCount := min(count, len(sp.Stakes))
-	validators := make([]ValidatorNode, 0, validatorCount)
-
-	// Sort validators by stake to get the highest staked validators
-	type stakedValidator struct {
-		address string
-		hostID  string
-		stake   float64
-	}
-
-	allValidators := make([]stakedValidator, 0, len(sp.Stakes))
+	validators := make([]ValidatorNode, 0)
 	for addr, stake := range sp.Stakes {
-		hostID := sp.WalletToHost[addr]
-		allValidators = append(allValidators, stakedValidator{
-			address: addr,
-			hostID:  hostID,
-			stake:   float64(stake.Amount),
-		})
+		if stake.Amount > 0 && time.Since(stake.StartTime) >= MinStakeAge {
+			validators = append(validators, ValidatorNode{
+				Address: addr,
+				Stake:   float64(stake.Amount),
+				hostID:  sp.WalletToHost[addr],
+			})
+		}
 	}
 
-	// Sort by stake in descending order
-	sort.Slice(allValidators, func(i, j int) bool {
-		return allValidators[i].stake > allValidators[j].stake
+	if len(validators) == 0 {
+		return nil, fmt.Errorf("no active validators available")
+	}
+
+	// Sort validators by stake
+	sort.Slice(validators, func(i, j int) bool {
+		return validators[i].Stake > validators[j].Stake
 	})
 
-	// Take the top validators
-	for i := 0; i < validatorCount; i++ {
-		v := allValidators[i]
-		validators = append(validators, ValidatorNode{
-			Address: v.address,
-			Stake:   v.stake,
-			hostID:  v.hostID,
-		})
+	// Return requested number of validators
+	if count > len(validators) {
+		count = len(validators)
 	}
 
-	log.Printf("🔍 Selected %d validators from stake pool", len(validators))
-	return validators, nil
+	log.Printf("🔍 Found %d active validators", count)
+	return validators[:count], nil
 }
 
 // Helper function for Go versions before 1.21
@@ -224,6 +247,8 @@ const (
 	MaxStakeAge          = 365 * 24 * time.Hour // Maximum age for stake weight calculation
 	BaseStakeWeight      = 100                  // Base weight for stake calculations
 	WithdrawalLockPeriod = 72 * time.Hour       // Time required before withdrawal
+	MinValidatorStake    = 00.0               // Minimum stake required for validation
+	MaxInactivityPeriod  = 24 * time.Hour       // Maximum allowed inactivity period
 )
 
 // StakeInfo represents staking information
@@ -236,6 +261,7 @@ type StakeInfo struct {
 	WithdrawalReq  *WithdrawalRequest    `json:"withdrawal_req,omitempty"`
 	Violations     int                   `json:"violations"`
 	Performance    *ValidatorPerformance `json:"performance"`
+	SelectionCount uint64                `json:"selection_count"`
 }
 
 // Add these methods to StakePool

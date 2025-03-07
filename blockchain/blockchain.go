@@ -823,54 +823,70 @@ func (b Block) Serialize() ([]byte, error) {
 
 // InitializeChain starts the blockchain
 func (bc *Blockchain) InitializeChain() error {
-	// Initialize genesis block if chain is empty
-	if bc.GetHeight() == 0 {
-		genesis := GenesisBlock()
-		bc.AddBlock(&genesis, bc.mempool, bc.stakePool, bc.utxoSet, bc.p2pHost)
-		log.Printf("🌟 Genesis block created", genesis)
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	// Check if we already have a blockchain
+	if bc.GetHeight() > 0 {
+		return nil
 	}
 
-	// Start block processing
+	// Initialize required components before genesis
+	if bc.mempool == nil {
+		bc.mempool = NewMempool(bc.Node)
+	}
+	if bc.utxoSet == nil {
+		bc.utxoSet = make(map[string]UTXO)
+	}
+	if bc.stakePool == nil {
+		bc.stakePool = NewStakePool(bc)
+	}
+
+	// Create genesis block
+	genesis := GenesisBlock()
+	if err := bc.AddBlockWithoutValidation(&genesis); err != nil {
+		return fmt.Errorf("failed to add genesis block: %v", err)
+	}
+
+	log.Printf("🌟 Genesis block created: %v", genesis)
+
+	// Start block processing only after successful initialization
 	go bc.processBlocks()
 
 	return nil
 }
 
 func (bc *Blockchain) processBlocks() {
+	if bc == nil || bc.mempool == nil || bc.stakePool == nil {
+		log.Printf("❌ Cannot start block processing: blockchain not properly initialized")
+		return
+	}
+
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-bc.ctx.Done():
-			return
 		case <-ticker.C:
-			// Create a new block with pending transactions
-			previousBlock := bc.GetLatestBlock()
+			// Process pending transactions
+			if len(bc.mempool.GetTransactions()) > 0 {
+				// Create new block
+				previousBlock := bc.GetLatestBlock()
+				difficulty := bc.calculateDifficulty(previousBlock)
 
-			// Create transaction trie
-			txTrie := NewPatriciaTrie()
-			for _, tx := range bc.mempool.GetTransactions() {
-				txTrie.Insert(tx)
-			}
+				// Select validator
+				validator := ""
+				if bc.consensus != nil && bc.consensus.state != nil {
+					validator = bc.consensus.state.CurrentValidator
+				}
 
-			newBlock := Block{
-				Header: &BlockHeader{
-					Version:      1,
-					BlockNumber:  previousBlock.Header.BlockNumber + 1,
-					PreviousHash: previousBlock.Hash(),
-					Timestamp:    time.Now().Unix(),
-					Difficulty:   previousBlock.Header.Difficulty,
-					GasLimit:     BaseGasLimit,
-				},
-				Body: &BlockBody{
-					Transactions: txTrie,
-				},
-			}
+				newBlock := NewBlock(previousBlock, bc.mempool, bc.utxoSet, difficulty, validator)
 
-			// Process pending transactions using AddBlock method
-			if err := bc.AddBlock(&newBlock, bc.mempool, bc.stakePool, bc.utxoSet, bc.p2pHost); err != nil {
-				log.Printf("Failed to add block: %v", err)
+				// Try to add the block
+				if err := bc.AddBlock(&newBlock, bc.mempool, bc.stakePool, bc.utxoSet, bc.p2pHost); err != nil {
+					log.Printf("⚠️ Failed to add new block: %v", err)
+					continue
+				}
 			}
 		}
 	}

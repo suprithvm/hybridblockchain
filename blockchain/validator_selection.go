@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -19,17 +20,22 @@ type SelectionProof struct {
 type ValidatorSelector struct {
 	stakePool *StakePool
 	blockHash []byte
+	mu        sync.RWMutex
 }
 
 // NewValidatorSelector creates a new validator selector
 func NewValidatorSelector(stakePool *StakePool) *ValidatorSelector {
 	return &ValidatorSelector{
 		stakePool: stakePool,
+		mu:        sync.RWMutex{},
 	}
 }
 
 // SelectValidator selects a validator based on VRF and stake weight
 func (vs *ValidatorSelector) SelectValidator(blockHeight uint64, previousHash string) (*Validator, *SelectionProof, error) {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
 	// Generate seed from block height and previous hash
 	seed := generateSeed(blockHeight, previousHash)
 
@@ -43,6 +49,17 @@ func (vs *ValidatorSelector) SelectValidator(blockHeight uint64, previousHash st
 	selectedValidator, proof := vs.weightedSelection(validators, seed)
 	if selectedValidator == nil {
 		return nil, nil, fmt.Errorf("validator selection failed")
+	}
+
+	// Update selection state
+	selectedValidator.isSelected = true
+	selectedValidator.selectionProof = proof
+	selectedValidator.LastActive = time.Now()
+
+	// Update stake pool
+	if stakeInfo := vs.stakePool.Stakes[selectedValidator.Address]; stakeInfo != nil {
+		stakeInfo.LastActive = time.Now()
+		stakeInfo.SelectionCount++
 	}
 
 	return selectedValidator, proof, nil
@@ -75,17 +92,6 @@ func (vs *ValidatorSelector) weightedSelection(validators []*Validator, seed []b
 				Weight:    weights[v.Address],
 				Score:     cumulative,
 			}
-
-			// Record selection in validator
-			v.isSelected = true
-			v.selectionProof = proof
-			v.LastActive = time.Now()
-
-			// Update stake pool
-			if stakeInfo := vs.stakePool.Stakes[v.Address]; stakeInfo != nil {
-				stakeInfo.LastActive = time.Now()
-			}
-
 			return v, proof
 		}
 	}
@@ -105,9 +111,23 @@ func (vs *ValidatorSelector) calculateWeight(v *Validator) uint64 {
 	// Factor in validator performance
 	if v.Performance != nil {
 		performanceMultiplier := float64(1)
+
+		// Uptime bonus
 		if v.Performance.UptimePercentage >= 99 {
-			performanceMultiplier = 1.2 // 20% bonus for high uptime
+			performanceMultiplier *= 1.2 // 20% bonus for high uptime
 		}
+
+		// Successful validations bonus
+		validationRatio := float64(v.Performance.BlocksValidated) / float64(v.Performance.BlocksValidated+v.Performance.MissedValidations)
+		if validationRatio >= 0.95 {
+			performanceMultiplier *= 1.1 // 10% bonus for high validation success
+		}
+
+		// Recent activity bonus
+		if time.Since(v.Performance.LastUpdate) < 1*time.Hour {
+			performanceMultiplier *= 1.1 // 10% bonus for recent activity
+		}
+
 		return uint64(float64(baseWeight) * performanceMultiplier)
 	}
 
@@ -116,6 +136,9 @@ func (vs *ValidatorSelector) calculateWeight(v *Validator) uint64 {
 
 // getEligibleValidators returns list of validators eligible for selection
 func (vs *ValidatorSelector) getEligibleValidators() []*Validator {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+
 	var eligible []*Validator
 
 	// Get all active validators from stake pool
@@ -173,9 +196,36 @@ func calculateValidatorScore(stake *StakeInfo) uint64 {
 
 // isEligible checks if a stake/validator is eligible for selection
 func (vs *ValidatorSelector) isEligible(stake *StakeInfo) bool {
-	return time.Since(stake.StartTime) >= MinStakeAge &&
-		stake.Violations < SlashingThreshold &&
-		stake.WithdrawalReq == nil
+	if stake == nil {
+		return false
+	}
+
+	// Check minimum stake age
+	if time.Since(stake.StartTime) < MinStakeAge {
+		return false
+	}
+
+	// Check for slashing violations
+	if stake.Violations >= SlashingThreshold {
+		return false
+	}
+
+	// Check for pending withdrawals
+	if stake.WithdrawalReq != nil {
+		return false
+	}
+
+	// Check minimum stake amount
+	if stake.Amount < MinValidatorStake {
+		return false
+	}
+
+	// Check recent activity
+	if time.Since(stake.LastActive) > MaxInactivityPeriod {
+		return false
+	}
+
+	return true
 }
 
 // Helper functions
@@ -193,6 +243,9 @@ func generateRandomUint64(seed []byte) uint64 {
 
 // UpdateValidatorPerformance updates validator performance metrics
 func (vs *ValidatorSelector) UpdateValidatorPerformance(address string, metrics *ValidatorPerformance) error {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
 	stake, exists := vs.stakePool.Stakes[address]
 	if !exists {
 		return fmt.Errorf("no stake found for validator %s", address)
@@ -205,6 +258,9 @@ func (vs *ValidatorSelector) UpdateValidatorPerformance(address string, metrics 
 
 // GetValidatorInfo returns validator information for selection
 func (vs *ValidatorSelector) GetValidatorInfo(address string) (*Validator, error) {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+
 	stake := vs.stakePool.Stakes[address]
 	if stake == nil {
 		return nil, fmt.Errorf("no stake found for validator %s", address)
@@ -221,6 +277,9 @@ func (vs *ValidatorSelector) GetValidatorInfo(address string) (*Validator, error
 
 // UpdateValidatorActivity updates the last active time for a validator
 func (vs *ValidatorSelector) UpdateValidatorActivity(address string) error {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
 	stake, exists := vs.stakePool.Stakes[address]
 	if !exists {
 		return fmt.Errorf("no stake found for validator %s", address)
