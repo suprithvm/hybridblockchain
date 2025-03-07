@@ -84,8 +84,8 @@ func parseFlags() *NodeConfig {
 	config := &NodeConfig{}
 
 	// Basic node configuration
-	role := flag.String("role", "observer", "Node role (bootstrap, miner, validator, observer)")
-	dataDir := flag.String("datadir", "./node_data", "Data directory for the node")
+	role := flag.String("role", "miner", "Node role (bootstrap, validator, or miner)")
+	dataDir := flag.String("datadir", "./data", "Data directory for the node")
 	listenAddr := flag.String("listen", ":50505", "Listen address for p2p")
 	rpcAddr := flag.String("rpc", ":8545", "RPC server address")
 	networkID := flag.String("network", "testnet", "Network identifier")

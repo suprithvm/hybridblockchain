@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"blockchain-core/blockchain/gas"
+
 	libp2p "github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -701,10 +702,8 @@ func (n *Node) BroadcastMessage(msg string) error {
 // ConnectToBootstrapNodes connects to the configured bootstrap nodes
 func (n *Node) ConnectToBootstrapNodes(ctx context.Context) error {
 	log.Printf("🔄 Attempting to connect to bootstrap nodes...")
-	
+
 	for _, addr := range n.config.BootstrapNodes {
-		log.Printf("  • Trying to connect to: %s", addr)
-		
 		// Parse the bootstrap node address
 		maddr, err := multiaddr.NewMultiaddr(addr)
 		if err != nil {
@@ -712,15 +711,22 @@ func (n *Node) ConnectToBootstrapNodes(ctx context.Context) error {
 			continue
 		}
 
-		addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+		// Get peer info from the multiaddr
+		peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
 		if err != nil {
-			log.Printf("❌ Failed to parse peer info from address %s: %v", addr, err)
+			log.Printf("❌ Failed to get peer info from %s: %v", addr, err)
+			continue
+		}
+
+		// Check if we're already connected
+		if n.Host.Network().Connectedness(peerInfo.ID) == network.Connected {
+			log.Printf("✅ Already connected to bootstrap node %s", peerInfo.ID)
 			continue
 		}
 
 		// Try to connect with timeout
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err = n.Host.Connect(ctx, *addrInfo)
+		connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err = n.Host.Connect(connectCtx, *peerInfo)
 		cancel()
 
 		if err != nil {
@@ -728,28 +734,29 @@ func (n *Node) ConnectToBootstrapNodes(ctx context.Context) error {
 			continue
 		}
 
-		log.Printf("✅ Successfully connected to bootstrap node: %s", addr)
+		log.Printf("✅ Successfully connected to bootstrap node %s", peerInfo.ID)
+
+		// Add to known bootstrap nodes
+		n.bootstrapNodes[peerInfo.ID] = true
+
+		// Set up stream handler for welcome messages
+		n.Host.SetStreamHandler(protocol.ID("/blockchain/welcome/1.0.0"), func(s network.Stream) {
+			defer s.Close()
+
+			var welcomeMsg struct {
+				PeerID    string   `json:"peer_id"`
+				Addresses []string `json:"addresses"`
+			}
+
+			if err := json.NewDecoder(s).Decode(&welcomeMsg); err != nil {
+				log.Printf("❌ Failed to decode welcome message: %v", err)
+				return
+			}
+
+			log.Printf("📨 Received welcome message from bootstrap node %s", welcomeMsg.PeerID)
+			log.Printf("📝 Bootstrap node addresses: %v", welcomeMsg.Addresses)
+		})
 	}
-
-	// Set up stream handler for welcome messages
-	n.Host.SetStreamHandler("/bootstrap/welcome/1.0.0", func(stream network.Stream) {
-		defer stream.Close()
-
-		var welcomeMsg struct {
-			Type      string   `json:"type"`
-			PeerID    string   `json:"peer_id"`
-			Addresses []string `json:"addresses"`
-		}
-
-		if err := json.NewDecoder(stream).Decode(&welcomeMsg); err != nil {
-			log.Printf("❌ Failed to decode welcome message: %v", err)
-			return
-		}
-
-		log.Printf("📥 Received welcome message from bootstrap node:")
-		log.Printf("  • Peer ID: %s", welcomeMsg.PeerID)
-		log.Printf("  • Addresses: %v", welcomeMsg.Addresses)
-	})
 
 	return nil
 }
@@ -1011,21 +1018,21 @@ func (n *Node) setupBlockSyncProtocol() {
 			}
 		}()
 
-	var msg Message
-	if err := json.NewDecoder(s).Decode(&msg); err != nil {
-		log.Printf("Error decoding sync message: %v", err)
-		return
-	}
+		var msg Message
+		if err := json.NewDecoder(s).Decode(&msg); err != nil {
+			log.Printf("Error decoding sync message: %v", err)
+			return
+		}
 
-	switch msg.Type {
-	case "SYNC_REQUEST":
-		n.handleSyncRequest(s)
-	case "FORK_DETECTED":
-		n.handleForkResolution(s)
-	case "CHAIN_VALIDATION":
-		n.handleChainValidation(s)
-	}
-})
+		switch msg.Type {
+		case "SYNC_REQUEST":
+			n.handleSyncRequest(s)
+		case "FORK_DETECTED":
+			n.handleForkResolution(s)
+		case "CHAIN_VALIDATION":
+			n.handleChainValidation(s)
+		}
+	})
 }
 
 func (n *Node) handleForkResolution(s network.Stream) {

@@ -752,36 +752,53 @@ func (bn *BootstrapNode) collectMetrics() {
 
 // Start starts the bootstrap node
 func (bn *BootstrapNode) Start() error {
-	log.Printf("\n🚀 Initializing Bootstrap Node")
-	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-	// Add connection handling
-	bn.host.Network().Notify(&Notifier{
+	// Set up connection handler
+	bn.host.Network().Notify(&network.NotifyBundle{
 		ConnectedF: func(n network.Network, conn network.Conn) {
-			log.Printf("✅ New peer connected: %s", conn.RemotePeer().String())
-			bn.peersMutex.Lock()
-			bn.peers[conn.RemotePeer()] = conn.RemotePeer()
-			bn.peersMutex.Unlock()
+			peerID := conn.RemotePeer()
+			log.Printf("✅ New peer connected: %s", peerID)
+
+			// Add to known peers
+			bn.peers[peerID] = peerID
 
 			// Send welcome message
-			go bn.sendWelcomeMessage(conn.RemotePeer())
+			go bn.sendWelcomeMessage(peerID)
 		},
 		DisconnectedF: func(n network.Network, conn network.Conn) {
-			log.Printf("❌ Peer disconnected: %s", conn.RemotePeer().String())
-			bn.peersMutex.Lock()
-			delete(bn.peers, conn.RemotePeer())
-			bn.peersMutex.Unlock()
+			peerID := conn.RemotePeer()
+			log.Printf("❌ Peer disconnected: %s", peerID)
+			delete(bn.peers, peerID)
 		},
 	})
 
-	// Start periodic peer status updates
-	go bn.startPeerStatusUpdates()
+	// Set up stream handler for welcome protocol
+	bn.host.SetStreamHandler(protocol.ID("/blockchain/welcome/1.0.0"), func(s network.Stream) {
+		defer s.Close()
 
+		var msg struct {
+			Type string `json:"type"`
+		}
+
+		if err := json.NewDecoder(s).Decode(&msg); err != nil {
+			log.Printf("❌ Failed to decode welcome request: %v", err)
+			return
+		}
+
+		if msg.Type == "REQUEST_WELCOME" {
+			bn.sendWelcomeMessage(s.Conn().RemotePeer())
+		}
+	})
+
+	// Start periodic peer status updates
+	go bn.updatePeerStatus()
+
+	log.Printf("✨ Bootstrap node is running on port %d", bn.config.ListenPort)
 	return nil
 }
 
+// sendWelcomeMessage sends a welcome message to a newly connected peer
 func (bn *BootstrapNode) sendWelcomeMessage(peerID peer.ID) {
-	stream, err := bn.host.NewStream(context.Background(), peerID, "/bootstrap/welcome/1.0.0")
+	stream, err := bn.host.NewStream(context.Background(), peerID, "/blockchain/welcome/1.0.0")
 	if err != nil {
 		log.Printf("❌ Failed to create welcome stream: %v", err)
 		return
@@ -796,11 +813,9 @@ func (bn *BootstrapNode) sendWelcomeMessage(peerID peer.ID) {
 	}
 
 	welcomeMsg := struct {
-		Type      string   `json:"type"`
 		PeerID    string   `json:"peer_id"`
 		Addresses []string `json:"addresses"`
 	}{
-		Type:      "welcome",
 		PeerID:    bn.host.ID().String(),
 		Addresses: addrStrings,
 	}
@@ -810,26 +825,25 @@ func (bn *BootstrapNode) sendWelcomeMessage(peerID peer.ID) {
 		return
 	}
 
-	log.Printf("📤 Sent welcome message to peer: %s", peerID.String())
+	log.Printf("📨 Sent welcome message to peer %s", peerID)
 }
 
-func (bn *BootstrapNode) startPeerStatusUpdates() {
+// updatePeerStatus periodically logs the current status of connected peers
+func (bn *BootstrapNode) updatePeerStatus() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
+		case <-bn.ctx.Done():
+			return
 		case <-ticker.C:
-			bn.peersMutex.RLock()
-			peerCount := len(bn.peers)
-			bn.peersMutex.RUnlock()
-
 			log.Printf("\n📊 Bootstrap Node Status:")
 			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			log.Printf("• Connected Peers: %d", peerCount)
+			log.Printf("• Connected Peers: %d", len(bn.peers))
 			log.Printf("• Listening Addresses:")
 			for _, addr := range bn.host.Addrs() {
-				log.Printf("  ‣ %s/p2p/%s", addr.String(), bn.host.ID().String())
+				log.Printf("  ‣ %s/p2p/%s", addr, bn.host.ID())
 			}
 			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		}
