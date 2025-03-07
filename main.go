@@ -173,6 +173,16 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 	// Initialize blockchain
 	bc := blockchain.InitialiseBlockchain(dbConfig)
 
+	// Read bootnode address from file if not provided in config
+	if len(config.BootstrapNodes) == 0 {
+		bootnodeAddr, err := os.ReadFile("bootnode.addr")
+		if err != nil {
+			log.Fatalf("❌ Failed to read bootnode address: %v", err)
+		}
+		config.BootstrapNodes = []string{strings.TrimSpace(string(bootnodeAddr))}
+		log.Printf("📡 Using bootnode address from file: %s", config.BootstrapNodes[0])
+	}
+
 	// Create network configuration
 	networkConfig := &blockchain.NetworkConfig{
 		P2PPort:        extractPort(config.ListenAddr),
@@ -207,6 +217,7 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 	connected := false
 
 	for i := 0; i < maxRetries; i++ {
+		log.Printf("📡 Attempt %d/%d: Connecting to bootstrap nodes: %v", i+1, maxRetries, config.BootstrapNodes)
 		if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
 			log.Printf("⚠️ Attempt %d/%d: Failed to connect to bootstrap nodes: %v", i+1, maxRetries, err)
 			if i < maxRetries-1 {
