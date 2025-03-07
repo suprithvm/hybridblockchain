@@ -85,7 +85,7 @@ type BootstrapNode struct {
 	metrics       *NetworkMetrics
 	rateLimiter   *RateLimiter
 	protocols     map[string]network.StreamHandler
-	peers         map[peer.ID]peer.AddrInfo
+	peers         map[peer.ID]peer.ID
 	peersMutex    sync.RWMutex
 	dataDir       string
 	identity      crypto.PrivKey
@@ -131,16 +131,23 @@ type RateLimiter struct {
 }
 
 // Notifier implements network.Notifiee interface for handling peer events
-type Notifier struct{}
+type Notifier struct {
+	ConnectedF    func(n network.Network, conn network.Conn)
+	DisconnectedF func(n network.Network, conn network.Conn)
+}
 
 // Connected is called when a new peer connects
 func (n *Notifier) Connected(net network.Network, conn network.Conn) {
-	log.Printf("New peer connected: %s", conn.RemotePeer().String())
+	if n.ConnectedF != nil {
+		n.ConnectedF(net, conn)
+	}
 }
 
 // Disconnected is called when a peer disconnects
 func (n *Notifier) Disconnected(net network.Network, conn network.Conn) {
-	log.Printf("Peer disconnected: %s", conn.RemotePeer().String())
+	if n.DisconnectedF != nil {
+		n.DisconnectedF(net, conn)
+	}
 }
 
 // Listen is called when the network starts listening
@@ -319,6 +326,7 @@ func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
 		startTime:     time.Now(),
 		lastHeartbeat: make(map[peer.ID]time.Time),
 		node:          nil,
+		peers:         make(map[peer.ID]peer.ID),
 	}
 
 	// Initialize protocol handlers
@@ -747,78 +755,85 @@ func (bn *BootstrapNode) Start() error {
 	log.Printf("\n🚀 Initializing Bootstrap Node")
 	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	// Print node status periodically
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		for range ticker.C {
-			peers := bn.host.Network().Peers()
-			log.Printf("\n📊 Network Status Update:")
-			log.Printf("   • Connected Peers: %d", len(peers))
-			log.Printf("   • Active Connections: %d", len(bn.host.Network().Conns()))
-			for _, p := range peers {
-				conns := bn.host.Network().ConnsToPeer(p)
-				for _, c := range conns {
-					log.Printf("   • Peer: %s", p.String())
-					log.Printf("     ‣ Address: %s", c.RemoteMultiaddr())
-					log.Printf("     ‣ Direction: %s", c.Stat().Direction)
-				}
-			}
-			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		}
-	}()
+	// Add connection handling
+	bn.host.Network().Notify(&Notifier{
+		ConnectedF: func(n network.Network, conn network.Conn) {
+			log.Printf("✅ New peer connected: %s", conn.RemotePeer().String())
+			bn.peersMutex.Lock()
+			bn.peers[conn.RemotePeer()] = conn.RemotePeer()
+			bn.peersMutex.Unlock()
 
-	// Register peer discovery protocol handler
-	bn.host.SetStreamHandler("/blockchain/1.0.0/discovery", func(stream network.Stream) {
-		defer stream.Close()
-
-		// Handle discovery request
-		var req DiscoveryRequest
-		if err := json.NewDecoder(stream).Decode(&req); err != nil {
-			log.Printf("Error decoding discovery request: %v", err)
-			return
-		}
-
-		// Get list of active peers
-		peers := bn.host.Network().Peers()
-		activePeers := make([]PeerInfo, 0)
-
-		for _, p := range peers {
-			// Skip requesting peer
-			if p == stream.Conn().RemotePeer() {
-				continue
-			}
-
-			// Get peer addresses
-			addrs := bn.host.Peerstore().Addrs(p)
-			if len(addrs) > 0 {
-				activePeers = append(activePeers, PeerInfo{
-					ID:       p,
-					Address:  addrs[0].String(),
-					LastSeen: time.Now(),
-					Version:  "1.0.0",
-					Status:   PeerStatusActive,
-				})
-			}
-		}
-
-		// Create discovery response
-		resp := DiscoveryResponse{
-			Peers:        activePeers,
-			NetworkEmpty: len(activePeers) == 0,
-			Success:      true,
-		}
-
-		// Send response
-		if err := json.NewEncoder(stream).Encode(resp); err != nil {
-			log.Printf("❌ Error encoding discovery response: %v", err)
-			return
-		}
-
-		log.Printf("✅ Sent peer list to: %s (Found %d peers)",
-			stream.Conn().RemotePeer().String(), len(activePeers))
+			// Send welcome message
+			go bn.sendWelcomeMessage(conn.RemotePeer())
+		},
+		DisconnectedF: func(n network.Network, conn network.Conn) {
+			log.Printf("❌ Peer disconnected: %s", conn.RemotePeer().String())
+			bn.peersMutex.Lock()
+			delete(bn.peers, conn.RemotePeer())
+			bn.peersMutex.Unlock()
+		},
 	})
 
+	// Start periodic peer status updates
+	go bn.startPeerStatusUpdates()
+
 	return nil
+}
+
+func (bn *BootstrapNode) sendWelcomeMessage(peerID peer.ID) {
+	stream, err := bn.host.NewStream(context.Background(), peerID, "/bootstrap/welcome/1.0.0")
+	if err != nil {
+		log.Printf("❌ Failed to create welcome stream: %v", err)
+		return
+	}
+	defer stream.Close()
+
+	// Get peer addresses
+	addrs := bn.host.Peerstore().Addrs(peerID)
+	addrStrings := make([]string, len(addrs))
+	for i, addr := range addrs {
+		addrStrings[i] = addr.String()
+	}
+
+	welcomeMsg := struct {
+		Type      string   `json:"type"`
+		PeerID    string   `json:"peer_id"`
+		Addresses []string `json:"addresses"`
+	}{
+		Type:      "welcome",
+		PeerID:    bn.host.ID().String(),
+		Addresses: addrStrings,
+	}
+
+	if err := json.NewEncoder(stream).Encode(welcomeMsg); err != nil {
+		log.Printf("❌ Failed to send welcome message: %v", err)
+		return
+	}
+
+	log.Printf("📤 Sent welcome message to peer: %s", peerID.String())
+}
+
+func (bn *BootstrapNode) startPeerStatusUpdates() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			bn.peersMutex.RLock()
+			peerCount := len(bn.peers)
+			bn.peersMutex.RUnlock()
+
+			log.Printf("\n📊 Bootstrap Node Status:")
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+			log.Printf("• Connected Peers: %d", peerCount)
+			log.Printf("• Listening Addresses:")
+			for _, addr := range bn.host.Addrs() {
+				log.Printf("  ‣ %s/p2p/%s", addr.String(), bn.host.ID().String())
+			}
+			log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		}
+	}
 }
 
 // Helper function to load or create node identity
@@ -925,7 +940,7 @@ func (bn *BootstrapNode) discoverPeers() {
 
 				// Add to known peers
 				bn.peersMutex.Lock()
-				bn.peers[peerID] = bn.host.Peerstore().PeerInfo(peerID)
+				bn.peers[peerID] = peerID
 				bn.peersMutex.Unlock()
 				log.Printf("Connected to new peer: %s", peerID)
 			}
@@ -1529,7 +1544,7 @@ type BootNode struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	dht           *dht.IpfsDHT
-	peers         map[peer.ID]peer.AddrInfo
+	peers         map[peer.ID]peer.ID
 	peersMutex    sync.RWMutex
 	heartbeatMu   sync.RWMutex
 	lastHeartbeat map[peer.ID]time.Time
@@ -2070,7 +2085,7 @@ func (bn *BootNode) discoverPeers() {
 
 				// Add to known peers
 				bn.peersMutex.Lock()
-				bn.peers[peerID] = bn.host.Peerstore().PeerInfo(peerID)
+				bn.peers[peerID] = peerID
 				bn.peersMutex.Unlock()
 				log.Printf("Connected to new peer: %s", peerID)
 			}

@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"blockchain-core/blockchain/gas"
-
-	"github.com/ipfs/go-cid"
 	libp2p "github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -21,6 +19,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/multiformats/go-multiaddr"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -225,44 +224,39 @@ func (n *Node) Close() error {
 
 // DiscoverPeers finds and connects to peers in the network
 func (n *Node) DiscoverPeers() error {
-	// First connect to bootstrap nodes
-	if err := n.ConnectToBootstrapNodes(n.ctx); err != nil {
-		log.Printf("⚠️ Warning: Failed to connect to some bootstrap nodes: %v", err)
+	log.Printf("🔍 Starting peer discovery...")
+
+	// Get connected peers
+	peers := n.Host.Network().Peers()
+	log.Printf("📊 Current connections: %d peers", len(peers))
+
+	// If we have no peers, try to connect to bootstrap nodes again
+	if len(peers) == 0 {
+		log.Printf("⚠️ No peers found, retrying bootstrap connections...")
+		if err := n.ConnectToBootstrapNodes(context.Background()); err != nil {
+			log.Printf("❌ Failed to reconnect to bootstrap nodes: %v", err)
+			return err
+		}
 	}
 
-	// Wait for initial peer discovery
-	time.Sleep(5 * time.Second)
+	// Wait for connections to establish
+	time.Sleep(2 * time.Second)
 
-	// Start periodic peer discovery
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
+	// Check final peer count
+	peers = n.Host.Network().Peers()
+	log.Printf("📊 Final peer count: %d", len(peers))
 
-		for {
-			select {
-			case <-n.ctx.Done():
-				return
-			case <-ticker.C:
-				peers := n.Host.Network().Peers()
-				log.Printf("📊 Current connections: %d peers", len(peers))
-
-				for _, peer := range peers {
-					peerInfo := n.Host.Peerstore().PeerInfo(peer)
-					log.Printf("   • Peer: %s", peer.String())
-					for _, addr := range peerInfo.Addrs {
-						log.Printf("     ‣ Address: %s", addr)
-					}
-					if n.Host.Network().Connectedness(peer) == network.Connected {
-						log.Printf("     ‣ Direction: %s", n.Host.Network().ConnsToPeer(peer)[0].Stat().Direction)
-					}
-				}
-
-				// Try to discover new peers
-				n.findAndConnectPeers()
-				log.Printf("📡 Peer discovery completed")
+	if len(peers) > 0 {
+		log.Printf("✅ Successfully connected to peers:")
+		for _, p := range peers {
+			addrs := n.Host.Peerstore().Addrs(p)
+			if len(addrs) > 0 {
+				log.Printf("  • %s (%s)", p.String(), addrs[0].String())
 			}
 		}
-	}()
+	} else {
+		log.Printf("⚠️ No peers connected after discovery")
+	}
 
 	return nil
 }
@@ -706,27 +700,57 @@ func (n *Node) BroadcastMessage(msg string) error {
 
 // ConnectToBootstrapNodes connects to the configured bootstrap nodes
 func (n *Node) ConnectToBootstrapNodes(ctx context.Context) error {
+	log.Printf("🔄 Attempting to connect to bootstrap nodes...")
+	
 	for _, addr := range n.config.BootstrapNodes {
-		maddr, err := ma.NewMultiaddr(addr)
+		log.Printf("  • Trying to connect to: %s", addr)
+		
+		// Parse the bootstrap node address
+		maddr, err := multiaddr.NewMultiaddr(addr)
 		if err != nil {
-			log.Printf("Invalid bootstrap address: %s", addr)
+			log.Printf("❌ Failed to parse bootstrap address %s: %v", addr, err)
 			continue
 		}
 
-		peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+		addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
 		if err != nil {
-			log.Printf("Failed to parse bootstrap peer info: %s", addr)
+			log.Printf("❌ Failed to parse peer info from address %s: %v", addr, err)
 			continue
 		}
 
-		if err := n.Host.Connect(ctx, *peerInfo); err != nil {
-			log.Printf("Failed to connect to bootstrap node %s: %v", addr, err)
+		// Try to connect with timeout
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err = n.Host.Connect(ctx, *addrInfo)
+		cancel()
+
+		if err != nil {
+			log.Printf("❌ Failed to connect to bootstrap node %s: %v", addr, err)
 			continue
 		}
 
-		n.PeerManager.AddPeer(peerInfo.ID)
-		log.Printf("Connected to bootstrap node: %s", addr)
+		log.Printf("✅ Successfully connected to bootstrap node: %s", addr)
 	}
+
+	// Set up stream handler for welcome messages
+	n.Host.SetStreamHandler("/bootstrap/welcome/1.0.0", func(stream network.Stream) {
+		defer stream.Close()
+
+		var welcomeMsg struct {
+			Type      string   `json:"type"`
+			PeerID    string   `json:"peer_id"`
+			Addresses []string `json:"addresses"`
+		}
+
+		if err := json.NewDecoder(stream).Decode(&welcomeMsg); err != nil {
+			log.Printf("❌ Failed to decode welcome message: %v", err)
+			return
+		}
+
+		log.Printf("📥 Received welcome message from bootstrap node:")
+		log.Printf("  • Peer ID: %s", welcomeMsg.PeerID)
+		log.Printf("  • Addresses: %v", welcomeMsg.Addresses)
+	})
+
 	return nil
 }
 
@@ -987,21 +1011,21 @@ func (n *Node) setupBlockSyncProtocol() {
 			}
 		}()
 
-		var msg Message
-		if err := json.NewDecoder(s).Decode(&msg); err != nil {
-			log.Printf("Error decoding sync message: %v", err)
-			return
-		}
+	var msg Message
+	if err := json.NewDecoder(s).Decode(&msg); err != nil {
+		log.Printf("Error decoding sync message: %v", err)
+		return
+	}
 
-		switch msg.Type {
-		case "SYNC_REQUEST":
-			n.handleSyncRequest(s)
-		case "FORK_DETECTED":
-			n.handleForkResolution(s)
-		case "CHAIN_VALIDATION":
-			n.handleChainValidation(s)
-		}
-	})
+	switch msg.Type {
+	case "SYNC_REQUEST":
+		n.handleSyncRequest(s)
+	case "FORK_DETECTED":
+		n.handleForkResolution(s)
+	case "CHAIN_VALIDATION":
+		n.handleChainValidation(s)
+	}
+})
 }
 
 func (n *Node) handleForkResolution(s network.Stream) {
@@ -1476,10 +1500,18 @@ func (n *Node) IsSyncing() bool {
 	return n.isSyncing
 }
 
-// Start starts the node and its services
+// Start starts the node and initializes all necessary components
 func (n *Node) Start() error {
-	// Start DHT in server mode
-	if err := n.DHT.Bootstrap(n.ctx); err != nil {
+	n.runningMu.Lock()
+	if n.isRunning {
+		n.runningMu.Unlock()
+		return fmt.Errorf("node is already running")
+	}
+	n.isRunning = true
+	n.runningMu.Unlock()
+
+	// Start DHT bootstrap
+	if err := n.bootstrapDHT(n.ctx); err != nil {
 		return fmt.Errorf("failed to bootstrap DHT: %v", err)
 	}
 
@@ -1487,10 +1519,9 @@ func (n *Node) Start() error {
 	go n.discoverPeers()
 
 	// Start blockchain sync
-	if n.config.Blockchain != nil {
-		go n.startBlockchainSync()
-	}
+	go n.startBlockchainSync()
 
+	log.Printf("✅ Node started successfully with ID: %s", n.Host.ID())
 	return nil
 }
 
@@ -1535,32 +1566,25 @@ func (n *Node) discoverPeers() {
 	}
 }
 
-// RegisterBlockchainHandlers registers blockchain handlers for the node
+// RegisterBlockchainHandlers registers all blockchain-related protocol handlers
 func (n *Node) RegisterBlockchainHandlers(bc *Blockchain) error {
-	log.Printf("📝 Registering blockchain handlers for node")
+	// Register block sync protocol
+	n.setupBlockSyncProtocol()
 
-	// The blockchain is already set in the node constructor, but we can update it here if needed
-	n.Blockchain = bc
+	// Register transaction handlers
+	n.Host.SetStreamHandler("/tx/1.0.0", n.handleTransactionStream)
 
-	// Set up protocol handlers for blockchain operations
-	n.Host.SetStreamHandler("/blockchain/blocks/1.0.0", n.handleBlockStream)
-	n.Host.SetStreamHandler("/blockchain/transactions/1.0.0", n.handleTransactionStream)
-	n.Host.SetStreamHandler("/blockchain/sync/1.0.0", n.handleSyncRequest)
+	// Register mempool sync
+	n.Host.SetStreamHandler("/mempool/sync/1.0.0", n.handleMempoolSync)
 
-	// Advertise our node as a provider for this blockchain network
-	h := sha256.New()
-	h.Write([]byte(n.NetworkID))
-	mh := h.Sum(nil)
-	c := cid.NewCidV1(cid.Raw, mh)
+	// Register state sync
+	n.setupStateSync()
 
-	// Provide on the DHT
-	if n.DHT != nil {
-		if err := n.DHT.Provide(n.ctx, c, true); err != nil {
-			log.Printf("⚠️ Failed to announce as provider: %v", err)
-		} else {
-			log.Printf("✅ Successfully announced as blockchain provider on the DHT")
-		}
-	}
+	// Register chain validation
+	n.Host.SetStreamHandler("/chain/validate/1.0.0", n.handleChainValidation)
+
+	// Register state verification
+	n.Host.SetStreamHandler("/state/verify/1.0.0", n.handleStateVerification)
 
 	return nil
 }
@@ -1710,12 +1734,71 @@ func (n *Node) SetStreamHandler(protocolStr string, handler func(network.Stream)
 
 // Add IsPeerBootstrapNode method
 func (n *Node) IsPeerBootstrapNode(peerID peer.ID) bool {
-	n.syncMu.RLock()
-	defer n.syncMu.RUnlock()
+	n.runningMu.RLock()
+	defer n.runningMu.RUnlock()
 	return n.bootstrapNodes[peerID]
 }
 
-// SyncWithPeer synchronizes the blockchain with a specific peer
+// SyncWithPeer synchronizes blockchain state with a peer
 func (n *Node) SyncWithPeer(peerID peer.ID) error {
-	return n.syncWithPeer(peerID)
+	n.syncMu.Lock()
+	if n.isSyncing {
+		n.syncMu.Unlock()
+		return fmt.Errorf("already syncing with another peer")
+	}
+	n.isSyncing = true
+	n.syncMu.Unlock()
+
+	defer func() {
+		n.syncMu.Lock()
+		n.isSyncing = false
+		n.syncMu.Unlock()
+	}()
+
+	// Get peer's chain info
+	stream, err := n.Host.NewStream(n.ctx, peerID, "/chain/sync/1.0.0")
+	if err != nil {
+		return fmt.Errorf("failed to create sync stream: %v", err)
+	}
+	defer stream.Close()
+
+	// Request chain info
+	if err := json.NewEncoder(stream).Encode(map[string]interface{}{
+		"type": "SYNC_REQUEST",
+	}); err != nil {
+		return fmt.Errorf("failed to send sync request: %v", err)
+	}
+
+	// Read response
+	var response struct {
+		Height        uint64 `json:"height"`
+		LastBlockHash string `json:"last_block_hash"`
+		Success       bool   `json:"success"`
+	}
+	if err := json.NewDecoder(stream).Decode(&response); err != nil {
+		return fmt.Errorf("failed to decode sync response: %v", err)
+	}
+
+	if !response.Success {
+		return fmt.Errorf("sync request failed")
+	}
+
+	// Compare chain heights
+	localHeight := n.Blockchain.GetHeight()
+	if response.Height <= localHeight {
+		return nil // Already up to date
+	}
+
+	// Request missing blocks
+	blocks, err := n.RequestChain(int(localHeight+1), int(response.Height))
+	if err != nil {
+		return fmt.Errorf("failed to request blocks: %v", err)
+	}
+
+	// Validate and update chain
+	if !n.ValidateAndUpdateChain(blocks) {
+		return fmt.Errorf("chain validation failed")
+	}
+
+	return nil
 }
