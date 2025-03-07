@@ -297,6 +297,16 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 	// Step 2: Initialize blockchain with existing store
 	bc := blockchain.InitialiseBlockchainWithStore(store)
 
+	// Read bootnode address from file if not provided in config
+	if len(config.BootstrapNodes) == 0 {
+		bootnodeAddr, err := os.ReadFile("bootnode.addr")
+		if err != nil {
+			log.Fatalf("❌ Failed to read bootnode address: %v", err)
+		}
+		config.BootstrapNodes = []string{strings.TrimSpace(string(bootnodeAddr))}
+		log.Printf("📡 Using bootnode address from file: %s", config.BootstrapNodes[0])
+	}
+
 	// Step 3: Initialize P2P network
 	networkConfig := &blockchain.NetworkConfig{
 		P2PPort:        extractPort(config.ListenAddr),
@@ -320,10 +330,31 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 	bc.Node = node
 	bc.SetStakePool(blockchain.NewStakePool(bc))
 
-	// Step 5: Connect to bootstrap nodes and discover peers
+	// Step 5: Connect to bootstrap nodes with retries
 	log.Printf("🔄 Connecting to bootstrap nodes...")
-	if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
-		log.Printf("⚠️ Bootstrap connection warning: %v", err)
+	maxRetries := 5
+	retryDelay := 5 * time.Second
+	connected := false
+
+	for i := 0; i < maxRetries; i++ {
+		log.Printf("📡 Attempt %d/%d: Connecting to bootstrap nodes: %v", i+1, maxRetries, config.BootstrapNodes)
+		if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
+			log.Printf("⚠️ Attempt %d/%d: Failed to connect to bootstrap nodes: %v", i+1, maxRetries, err)
+			if i < maxRetries-1 {
+				log.Printf("⏳ Retrying in %v...", retryDelay)
+				time.Sleep(retryDelay)
+				continue
+			}
+		} else {
+			connected = true
+			log.Printf("✅ Successfully connected to bootstrap nodes")
+			break
+		}
+	}
+
+	if !connected {
+		log.Printf("❌ Failed to connect to any bootstrap nodes after %d attempts", maxRetries)
+		return
 	}
 
 	// Step 6: Start peer discovery
