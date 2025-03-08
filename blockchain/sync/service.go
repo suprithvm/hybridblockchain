@@ -17,6 +17,11 @@ import (
 	"google.golang.org/grpc/status"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
 type SyncService struct {
@@ -30,9 +35,10 @@ type SyncService struct {
 	ctx        context.Context
 	mu         sync.RWMutex
 	listener   net.Listener
+	host       host.Host
 }
 
-func NewSyncService(config *SyncConfig, bc *blockchain.Blockchain, store *blockchain.Store) *SyncService {
+func NewSyncService(config *SyncConfig, bc *blockchain.Blockchain, store *blockchain.Store, h host.Host) *SyncService {
 	if config == nil {
 		config = DefaultSyncConfig()
 	}
@@ -44,27 +50,15 @@ func NewSyncService(config *SyncConfig, bc *blockchain.Blockchain, store *blockc
 		state:      &SyncState{},
 		ctx:        context.Background(),
 		mu:         sync.RWMutex{},
+		host:       h,
 	}
 }
 
 // Start starts the sync service
 func (s *SyncService) Start(listenAddr string) error {
-	lis, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return fmt.Errorf("failed to listen: %v", err)
-	}
-
-	s.server = grpc.NewServer()
-	pb.RegisterChainSyncServer(s.server, s)
-	pb.RegisterNetworkSyncServer(s.server, s)
-
-	log.Printf("Starting sync service on %s", listenAddr)
-	go func() {
-		if err := s.server.Serve(lis); err != nil {
-			log.Printf("failed to serve: %v", err)
-		}
-	}()
-
+	// Register sync protocol handler
+	s.host.SetStreamHandler("/blockchain/sync/1.0.0", s.handleSyncRequest)
+	log.Printf("✅ Sync protocol registered on %s", listenAddr)
 	return nil
 }
 
@@ -348,4 +342,56 @@ func (s *SyncService) RecoverValidator(ctx context.Context, req *pb.ValidatorRec
 		NewStatus: int32(validator.Status),
 		Message:   "Validator recovered successfully",
 	}, nil
+}
+
+// handleSyncRequest handles incoming sync requests over libp2p
+func (s *SyncService) handleSyncRequest(stream network.Stream) {
+	defer stream.Close()
+
+	// Read sync request
+	var req pb.ChainInfoRequest
+	if err := json.NewDecoder(stream).Decode(&req); err != nil {
+		log.Printf("Error decoding sync request: %v", err)
+		return
+	}
+
+	// Get current blockchain state
+	height := s.blockchain.GetHeight()
+	latestBlock := s.blockchain.GetLatestBlock()
+	state, err := s.store.GetState()
+	if err != nil {
+		log.Printf("Error getting state: %v", err)
+		return
+	}
+
+	// Prepare response
+	resp := pb.ChainInfoResponse{
+		Height:          height,
+		LastBlockHash:   latestBlock.Hash(),
+		StateRoot:       state.StateRoot,
+		UtxoRoot:        state.UTXOSetRoot,
+		NetworkVersion:  1,
+		ProtocolVersion: 1,
+		MinPeerVersion:  1,
+		Timestamp:       timestamppb.Now(),
+	}
+
+	// Send response
+	if err := json.NewEncoder(stream).Encode(resp); err != nil {
+		log.Printf("Error encoding sync response: %v", err)
+		return
+	}
+
+	log.Printf("✅ Responded to sync request from: %s", stream.Conn().RemotePeer().String())
+}
+
+func (s *SyncService) syncWithPeer(peerID peer.ID) error {
+	// Open sync stream
+	stream, err := s.host.NewStream(s.ctx, peerID, protocol.ID("/blockchain/sync/1.0.0"))
+	if err != nil {
+		return fmt.Errorf("failed to open sync stream: %w", err)
+	}
+	defer stream.Close()
+	// Implementation of syncWithPeer method
+	return nil
 }

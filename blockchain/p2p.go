@@ -1028,29 +1028,9 @@ func sendError(s network.Stream, errMsg string) {
 
 // setupBlockSyncProtocol sets up the block sync protocol handlers
 func (n *Node) setupBlockSyncProtocol() {
-	// Enhance existing protocol
-	n.Host.SetStreamHandler("/block/sync/1.0.0", func(s network.Stream) {
-		defer func() {
-			if err := s.Close(); err != nil {
-				log.Printf("Error closing stream: %v", err)
-			}
-		}()
-
-		var msg Message
-		if err := json.NewDecoder(s).Decode(&msg); err != nil {
-			log.Printf("Error decoding sync message: %v", err)
-			return
-		}
-
-		switch msg.Type {
-		case "SYNC_REQUEST":
-			n.handleSyncRequest(s)
-		case "FORK_DETECTED":
-			n.handleForkResolution(s)
-		case "CHAIN_VALIDATION":
-			n.handleChainValidation(s)
-		}
-	})
+	// Register sync protocol handler
+	n.SetStreamHandler("/blockchain/sync/1.0.0", n.handleBlockSync)
+	log.Printf("✅ Block sync protocol registered")
 }
 
 func (n *Node) handleForkResolution(s network.Stream) {
@@ -1674,14 +1654,8 @@ func (n *Node) startBlockchainSync() {
 }
 
 func (n *Node) syncWithPeer(peerID peer.ID) error {
-	// Skip sync if this is a bootstrap node
-	if n.IsPeerBootstrapNode(peerID) {
-		return nil
-	}
-
-	log.Printf("Syncing blockchain with peer: %s", peerID)
-
-	stream, err := n.Host.NewStream(n.ctx, peerID, protocol.ID("/blockchain/1.0.0/sync"))
+	// Open sync stream
+	stream, err := n.Host.NewStream(n.ctx, peerID, protocol.ID("/blockchain/sync/1.0.0"))
 	if err != nil {
 		return fmt.Errorf("failed to open sync stream: %v", err)
 	}
@@ -1775,7 +1749,7 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 	log.Printf("🔄 Attempting to sync with peer %s", peerID)
 
 	// Open sync stream
-	stream, err := n.Host.NewStream(n.ctx, peerID, BlockchainSyncProtocol)
+	stream, err := n.Host.NewStream(n.ctx, peerID, protocol.ID("/blockchain/sync/1.0.0"))
 	if err != nil {
 		return fmt.Errorf("failed to open sync stream: %w", err)
 	}
@@ -1818,10 +1792,10 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 func (n *Node) syncBlocks(peerID peer.ID, startHeight, endHeight uint64) error {
 	log.Printf("📦 Syncing blocks %d to %d from peer %s", startHeight, endHeight, peerID)
 
-	// Create a stream to the peer
-	stream, err := n.Host.NewStream(context.Background(), peerID, "/blockchain/sync/1.0.0")
+	// Open sync stream
+	stream, err := n.Host.NewStream(n.ctx, peerID, "/blockchain/sync/1.0.0")
 	if err != nil {
-		return fmt.Errorf("failed to create sync stream: %w", err)
+		return fmt.Errorf("failed to open sync stream: %w", err)
 	}
 	defer stream.Close()
 

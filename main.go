@@ -597,20 +597,24 @@ func initializeDatabase(config *NodeConfig) (db.Database, *blockchain.Store) {
 }
 
 func startSyncService(config *NodeConfig, bc *blockchain.Blockchain, store *blockchain.Store) {
-	// Create sync config from node config
-	syncConfig := &sync.SyncConfig{
+	// Get the host from the blockchain's node
+	host := bc.Node.Host
+	log.Printf("🔄 Sync Service: Running on %s", config.ListenAddr)
+	// Create sync service with the host
+	syncService := sync.NewSyncService(&sync.SyncConfig{
 		ListenAddr:     config.ListenAddr,
 		BootstrapNodes: config.BootstrapNodes,
 		NetworkID:      config.NetworkID,
 		EnableMetrics:  config.EnableMetrics,
-	}
+	}, bc, store, host)
 
-	syncService := sync.NewSyncService(syncConfig, bc, store)
+	// Start the sync service
 	if err := syncService.Start(config.ListenAddr); err != nil {
-		log.Fatalf("❌ Failed to start sync service: %v", err)
+		log.Printf("⚠️ Failed to start sync service: %v", err)
+		return
 	}
 
-	log.Printf("🔄 Sync Service: Running on %s", config.ListenAddr)
+	log.Printf("✅ Sync service started on %s", config.ListenAddr)
 }
 
 func parseRole(role string) NodeRole {

@@ -363,7 +363,7 @@ func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
 	log.Printf("✨ Bootstrap node initialization complete\n")
 
 	// Set up protocol handlers
-	bn.host.SetStreamHandler("/blockchain/1.0.0/sync", func(stream network.Stream) {
+	bn.host.SetStreamHandler("/blockchain/sync/1.0.0", func(stream network.Stream) {
 		defer stream.Close()
 
 		// Handle sync request
@@ -454,7 +454,7 @@ func loadOrCreatePrivateKey(dataDir string) (crypto.PrivKey, error) {
 }
 
 // initializeProtocols sets up all supported protocols for the bootstrap node
-func (bn *BootstrapNode) initializeProtocols() {
+func (bn *BootstrapNode) initializeProtocols() error {
 	// Register core protocols
 	bn.protocols = make(map[string]network.StreamHandler)
 	bn.protocols["/blockchain/sync/1.0.0"] = bn.handleSync
@@ -469,6 +469,7 @@ func (bn *BootstrapNode) initializeProtocols() {
 	}
 
 	log.Printf("✅ Registered protocols: %v", getProtocolNames(bn.protocols))
+	return nil
 }
 
 func getProtocolNames(protocols map[string]network.StreamHandler) []string {
