@@ -1036,3 +1036,10 @@ func (bc *Blockchain) GetUTXOSet() map[string]UTXO {
 func (bc *Blockchain) SetStakePool(pool *StakePool) {
 	bc.stakePool = pool
 }
+
+// GetStakePool returns the blockchain's stake pool
+func (bc *Blockchain) GetStakePool() *StakePool {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.stakePool
+}

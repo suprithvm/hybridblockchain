@@ -152,6 +152,32 @@ type ChainInfo struct {
 	Timestamp       *timestamppb.Timestamp
 }
 
+// SyncRequest represents a request to sync blocks
+type SyncRequest struct {
+	StartHeight uint64
+	EndHeight   uint64
+}
+
+// SyncResponse represents a response to a sync request
+type SyncResponse struct {
+	Success bool
+	Error   string
+	Height  uint64
+}
+
+// BlockRequest represents a request for a batch of blocks
+type BlockRequest struct {
+	StartHeight uint64
+	EndHeight   uint64
+}
+
+// BlockResponse represents a response containing a batch of blocks
+type BlockResponse struct {
+	Success bool
+	Error   string
+	Blocks  []Block
+}
+
 // GetBlock retrieves a block at the specified height
 func (c *ChainState) GetBlock(height uint64) (*Block, error) {
 	c.mu.RLock()

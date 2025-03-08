@@ -357,83 +357,123 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		return
 	}
 
-	// Step 6: Start peer discovery
-	log.Printf("🔍 Starting peer discovery...")
+	// Step 6: Start peer discovery and sync
+	log.Printf("🔍 Starting peer discovery and blockchain sync...")
+
+	// First, discover peers
+	log.Printf("👥 Starting peer discovery...")
 	if err := node.DiscoverPeers(); err != nil {
 		log.Printf("⚠️ Peer discovery warning: %v", err)
 	}
 
-	// Step 7: Wait for minimum peer connections
+	// Wait for minimum peer connections
 	peerCheckTicker := time.NewTicker(5 * time.Second)
 	peerTimeout := time.After(2 * time.Minute)
-	minPeers := 3
+	minPeers := 1
+	peerDiscoveryComplete := false
+
+	log.Printf("⏳ Waiting for peer connections (minimum %d peers)...", minPeers)
 
 peerDiscoveryLoop:
-	for {
+	for !peerDiscoveryComplete {
 		select {
+		case <-peerTimeout:
+			log.Printf("⚠️ Peer discovery timed out after 2 minutes")
+			break peerDiscoveryLoop
+
 		case <-peerCheckTicker.C:
-			if len(node.Host.Network().Peers()) >= minPeers {
-				log.Printf("✅ Connected to %d peers", len(node.Host.Network().Peers()))
+			currentPeers := node.Host.Network().Peers()
+			log.Printf("📊 Current peer count: %d", len(currentPeers))
+
+			if len(currentPeers) >= minPeers {
+				log.Printf("✅ Connected to sufficient peers: %d", len(currentPeers))
+				peerDiscoveryComplete = true
 				break peerDiscoveryLoop
 			}
-		case <-peerTimeout:
-			log.Printf("⚠️ Peer discovery timeout, continuing with available peers")
-			break peerDiscoveryLoop
+
+			// Try to discover more peers
+			if err := node.DiscoverPeers(); err != nil {
+				log.Printf("⚠️ Peer discovery attempt failed: %v", err)
+			}
 		}
 	}
+
 	peerCheckTicker.Stop()
 
-	// Step 8: Initialize or sync blockchain
-	log.Printf("🔄 Checking blockchain state...")
-	if err := bc.InitializeChain(); err != nil {
-		log.Fatalf("❌ Failed to initialize blockchain: %v", err)
+	// Now proceed with blockchain sync
+	log.Printf("🔄 Starting blockchain synchronization...")
+
+	// Initialize sync state
+	syncComplete := false
+	syncTimeout := time.After(5 * time.Minute)
+	syncTicker := time.NewTicker(5 * time.Second)
+	defer syncTicker.Stop()
+
+syncLoop:
+	for !syncComplete {
+		select {
+		case <-syncTimeout:
+			log.Printf("⚠️ Blockchain sync timed out after 5 minutes")
+			break syncLoop
+
+		case <-syncTicker.C:
+			// Try to sync with each peer
+			peers := node.Host.Network().Peers()
+			log.Printf("🔄 Attempting to sync with %d peers...", len(peers))
+
+			for _, peerID := range peers {
+				if err := node.SyncWithPeer(peerID); err != nil {
+					log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
+					continue
+				}
+
+				// Check if we have a genesis block
+				if bc.GetHeight() > 0 {
+					log.Printf("✅ Successfully synced blockchain. Current height: %d", bc.GetHeight())
+					syncComplete = true
+					break
+				}
+			}
+
+			// If no peers have a blockchain yet, initialize genesis
+			if !syncComplete && bc.GetHeight() == 0 {
+				log.Printf("🌟 No existing blockchain found. Initializing genesis block...")
+				genesisBlock := blockchain.GenesisBlock()
+				if err := bc.AddBlock(&genesisBlock, node.Mempool, bc.GetStakePool(), bc.GetUTXOSet(), node.Host); err != nil {
+					log.Printf("❌ Failed to add genesis block: %v", err)
+					continue
+				}
+				log.Printf("✅ Genesis block created and added to chain")
+				syncComplete = true
+			}
+		}
 	}
 
-	// Step 9: Create validator configuration
+	// Step 7: Initialize and start validator
 	validatorConfig := &blockchain.ValidatorConfig{
 		Stake:        config.ValidatorStake,
 		MinStake:     0,
 		RewardRate:   0.01,
-		SlashingRate: 0.5,
+		SlashingRate: 0.05,
 		BlockTimeout: 30 * time.Second,
-		MaxMissed:    10,
+		MaxMissed:    5,
 	}
 
-	// Step 10: Create and start validator
 	validator, err := blockchain.NewValidator(bc, validatorConfig, wallet.Address)
 	if err != nil {
 		log.Fatalf("❌ Failed to create validator: %v", err)
 	}
 
-	// Step 11: Register blockchain handlers
-	if err := node.RegisterBlockchainHandlers(bc); err != nil {
-		log.Printf("⚠️ Failed to register blockchain handlers: %v", err)
-	}
+	// Step 8: Start validator protocol
+	validatorProtocol := blockchain.NewValidatorProtocol(node)
+	validatorProtocol.Start()
 
-	// Step 12: Start periodic sync and validation
-	go func() {
-		syncTicker := time.NewTicker(30 * time.Second)
-		defer syncTicker.Stop()
-
-		for {
-			select {
-			case <-syncTicker.C:
-				// Only sync with non-bootstrap peers
-				for _, peerID := range node.Host.Network().Peers() {
-					if !node.IsPeerBootstrapNode(peerID) {
-						if err := node.SyncWithPeer(peerID); err != nil {
-							log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
-						}
-					}
-				}
-			}
-		}
-	}()
-
-	// Step 13: Start validator
+	// Step 9: Start validator
 	if err := validator.Start(); err != nil {
-		log.Printf("⚠️ Failed to start validator: %v", err)
+		log.Fatalf("❌ Failed to start validator: %v", err)
 	}
+
+	log.Printf("✅ Validator node started successfully")
 
 	// Keep the node running
 	select {}

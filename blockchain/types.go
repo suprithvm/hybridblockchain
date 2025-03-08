@@ -156,4 +156,7 @@ type SyncResponse struct {
 	Height        uint64  `json:"height"`
 	LastBlockHash string  `json:"last_block_hash"`
 	IsGenesisNode bool    `json:"is_genesis_node"`
+	LatestHash  string `json:"latest_hash"`
+	GenesisHash string `json:"genesis_hash"`
+	HasChain    bool   `json:"has_chain"`
 }
