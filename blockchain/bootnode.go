@@ -455,27 +455,28 @@ func loadOrCreatePrivateKey(dataDir string) (crypto.PrivKey, error) {
 
 // initializeProtocols sets up all supported protocols for the bootstrap node
 func (bn *BootstrapNode) initializeProtocols() {
-	// Register core blockchain protocols
-	bn.protocols["/blockchain/1.0.0"] = bn.handleBlockAnnouncement
-	bn.protocols["/blockchain/tx/1.0.0"] = bn.handleTransaction
-	bn.protocols["/blockchain/heartbeat/1.0.0"] = bn.handleHeartbeat
+	// Register core protocols
+	bn.protocols = make(map[string]network.StreamHandler)
 	bn.protocols["/blockchain/sync/1.0.0"] = bn.handleSync
-	bn.protocols["/blockchain/state/1.0.0"] = bn.handleStatus
-	bn.protocols["/blockchain/fork/1.0.0"] = bn.handleForkResolution
-	bn.protocols["/blockchain/mempool/1.0.0"] = bn.handleMempoolSync
+	bn.protocols["/blockchain/peer/1.0.0"] = bn.handlePeerDiscovery
+	bn.protocols["/blockchain/block/1.0.0"] = bn.handleBlockAnnouncement
+	bn.protocols["/blockchain/tx/1.0.0"] = bn.handleTransaction
 	bn.protocols["/blockchain/validator/1.0.0"] = bn.handleValidatorMessage
 
-	// Register stream handlers
+	// Register protocol handlers
 	for proto, handler := range bn.protocols {
 		bn.host.SetStreamHandler(protocol.ID(proto), handler)
 	}
 
-	// Start periodic tasks
-	go bn.startPeriodicTasks()
-	go bn.monitorHeartbeats()
-	go bn.runPeerDiscovery()
+	log.Printf("✅ Registered protocols: %v", getProtocolNames(bn.protocols))
+}
 
-	log.Printf("✅ Bootstrap node protocols initialized")
+func getProtocolNames(protocols map[string]network.StreamHandler) []string {
+	names := make([]string, 0, len(protocols))
+	for name := range protocols {
+		names = append(names, name)
+	}
+	return names
 }
 
 // handleValidatorMessage processes validator-related messages

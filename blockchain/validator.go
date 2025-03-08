@@ -58,17 +58,12 @@ type Validator struct {
 func NewValidator(bc *Blockchain, config *ValidatorConfig, walletAddress string) (*Validator, error) {
 	if config == nil {
 		config = &ValidatorConfig{
-			MinStake:     1000,
+			MinStake:     0,
 			RewardRate:   0.01,
 			SlashingRate: 0.5,
 			BlockTimeout: 30 * time.Second,
 			MaxMissed:    10,
 		}
-	}
-
-	if config.Stake < config.MinStake {
-		return nil, fmt.Errorf("stake amount %f is below minimum required %f",
-			config.Stake, config.MinStake)
 	}
 
 	validator := &Validator{
