@@ -16,8 +16,6 @@ import (
 	"blockchain-core/blockchain"
 	"blockchain-core/blockchain/db"
 	"blockchain-core/blockchain/sync"
-
-	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 type NodeRole int
@@ -157,7 +155,7 @@ func runBootstrapNode(config *NodeConfig) {
 func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 	log.Printf("⛏️ Starting Miner Node")
 
-	// Handle wallet setup
+	// Initialize wallet
 	wallet, err := setupWallet(config.DataDir)
 	if err != nil {
 		log.Fatalf("❌ Failed to setup wallet: %v", err)
@@ -239,88 +237,49 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 		return fmt.Errorf("failed to connect to bootstrap nodes")
 	}
 
-	// Only proceed with peer discovery if connected to bootnode
-	if connected {
-		log.Printf("🔍 Starting peer discovery...")
+	// Try peer discovery a few times to find validator
+	maxPeerDiscoveryAttempts := 4
+	validatorFound := false
+	for i := 0; i < maxPeerDiscoveryAttempts; i++ {
+		log.Printf("👥 Peer discovery attempt %d/%d", i+1, maxPeerDiscoveryAttempts)
 		if err := node.DiscoverPeers(); err != nil {
-			log.Printf("⚠️ Peer discovery warning: %v", err)
+			log.Printf("⚠️ Peer discovery attempt failed: %v", err)
 		}
-	}
 
-	// Register blockchain handlers
-	if err := node.RegisterBlockchainHandlers(bc); err != nil {
-		log.Printf("⚠️ Warning: Failed to register blockchain handlers: %v", err)
-	}
-
-	// Start periodic peer discovery and blockchain syncing
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-
-		syncRetryCount := make(map[peer.ID]int)
-		maxSyncRetries := 3
-		syncRetryDelay := 5 * time.Second
-
-		for {
-			select {
-			case <-ticker.C:
-				// Only discover new peers if we have no peers or all peers failed sync
-				if len(node.Host.Network().Peers()) == 0 {
-					log.Printf("⚠️ No peers connected, attempting to reconnect to bootstrap nodes...")
-					if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
-						log.Printf("❌ Failed to reconnect to bootstrap nodes: %v", err)
-					}
+		// Check for validator peer
+		for _, peer := range node.Host.Network().Peers() {
+			if !node.IsPeerBootstrapNode(peer) {
+				// Try to sync with this peer
+				if err := node.SyncWithPeer(peer); err != nil {
+					log.Printf("⚠️ Failed to sync with peer %s: %v", peer, err)
 					continue
 				}
-
-				// First try to sync with existing peers
-				allPeersFailed := true
-				for _, peerID := range node.Host.Network().Peers() {
-					if node.IsPeerBootstrapNode(peerID) {
-						continue
-					}
-
-					// Check if we've exceeded retry limit for this peer
-					if syncRetryCount[peerID] >= maxSyncRetries {
-						log.Printf("⚠️ Max sync retries reached for peer %s, removing from sync attempts", peerID)
-						continue
-					}
-
-					// Try to sync with the peer
-					if err := node.SyncWithPeer(peerID); err != nil {
-						syncRetryCount[peerID]++
-						log.Printf("⚠️ Failed to sync with peer %s (attempt %d/%d): %v",
-							peerID, syncRetryCount[peerID], maxSyncRetries, err)
-
-						// If we've hit max retries, consider peer discovery
-						if syncRetryCount[peerID] >= maxSyncRetries {
-							log.Printf("🔄 All sync attempts failed for peer %s, will consider peer discovery", peerID)
-						}
-					} else {
-						// Reset retry count on successful sync
-						syncRetryCount[peerID] = 0
-						allPeersFailed = false
-						log.Printf("✅ Successfully synced with peer %s", peerID)
-					}
-				}
-
-				// Only run peer discovery if all peers failed sync
-				if allPeersFailed {
-					log.Printf("⚠️ All peers failed sync, attempting peer discovery...")
-					if err := node.DiscoverPeers(); err != nil {
-						log.Printf("❌ Peer discovery failed: %v", err)
-					} else {
-						// Reset retry counts for new peers
-						syncRetryCount = make(map[peer.ID]int)
-					}
-				}
-
-				// Add delay between sync attempts
-				time.Sleep(syncRetryDelay)
+				validatorFound = true
+				log.Printf("✅ Successfully synced with validator peer %s", peer)
+				break
 			}
 		}
-	}()
 
+		if validatorFound {
+			break
+		}
+
+		if i < maxPeerDiscoveryAttempts-1 {
+			log.Printf("⏳ No validator found, waiting before next attempt...")
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	if !validatorFound {
+		return fmt.Errorf("no validator peer found after %d attempts", maxPeerDiscoveryAttempts)
+	}
+
+	// Start mining
+	log.Printf("⛏️ Starting mining process...")
+	go startMining(bc, wallet.Address)
+
+	// Keep node running
+	select {}
 	return nil
 }
 
@@ -406,137 +365,46 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		return
 	}
 
-	// Step 7: Start peer discovery and sync
-	log.Printf("🔍 Starting peer discovery and blockchain sync...")
+	// Step 7: Try peer discovery a few times
+	maxPeerDiscoveryAttempts := 4
+	for i := 0; i < maxPeerDiscoveryAttempts; i++ {
+		log.Printf("👥 Peer discovery attempt %d/%d", i+1, maxPeerDiscoveryAttempts)
+		if err := node.DiscoverPeers(); err != nil {
+			log.Printf("⚠️ Peer discovery attempt failed: %v", err)
+		}
 
-	// First, discover peers
-	log.Printf("👥 Starting peer discovery...")
-	if err := node.DiscoverPeers(); err != nil {
-		log.Printf("⚠️ Peer discovery warning: %v", err)
-	}
-
-	// Wait for minimum peer connections (excluding bootnode)
-	peerCheckTicker := time.NewTicker(5 * time.Second)
-	peerTimeout := time.After(2 * time.Minute)
-	minPeers := 1
-	peerDiscoveryComplete := false
-
-	log.Printf("⏳ Waiting for peer connections (minimum %d non-bootnode peers)...", minPeers)
-
-peerDiscoveryLoop:
-	for !peerDiscoveryComplete {
-		select {
-		case <-peerTimeout:
-			log.Printf("⚠️ Peer discovery timed out after 2 minutes")
-			break peerDiscoveryLoop
-
-		case <-peerCheckTicker.C:
-			peers := node.Host.Network().Peers()
-			nonBootnodePeers := 0
-			for _, peer := range peers {
-				if !node.IsPeerBootstrapNode(peer) {
-					nonBootnodePeers++
-				}
+		// Check for non-bootnode peers
+		nonBootnodePeers := 0
+		for _, peer := range node.Host.Network().Peers() {
+			if !node.IsPeerBootstrapNode(peer) {
+				nonBootnodePeers++
 			}
-			log.Printf("📊 Current peer count: %d (non-bootnode peers: %d)", len(peers), nonBootnodePeers)
+		}
 
-			if nonBootnodePeers >= minPeers {
-				log.Printf("✅ Connected to sufficient non-bootnode peers: %d", nonBootnodePeers)
-				peerDiscoveryComplete = true
-				break peerDiscoveryLoop
-			}
+		if nonBootnodePeers > 0 {
+			log.Printf("✅ Found %d non-bootnode peers", nonBootnodePeers)
+			break
+		}
 
-			// Try to discover more peers
-			if err := node.DiscoverPeers(); err != nil {
-				log.Printf("⚠️ Peer discovery attempt failed: %v", err)
-			}
+		if i < maxPeerDiscoveryAttempts-1 {
+			log.Printf("⏳ No peers found, waiting before next attempt...")
+			time.Sleep(5 * time.Second)
 		}
 	}
 
-	peerCheckTicker.Stop()
-
-	// Now proceed with blockchain sync only with non-bootnode peers
-	log.Printf("🔄 Starting blockchain synchronization with non-bootnode peers...")
-
-	// Initialize sync state
-	syncComplete := false
-	syncTimeout := time.After(5 * time.Minute)
-	syncTicker := time.NewTicker(5 * time.Second)
-	defer syncTicker.Stop()
-
-syncLoop:
-	for !syncComplete {
-		select {
-		case <-syncTimeout:
-			log.Printf("⚠️ Blockchain sync timed out after 5 minutes")
-			break syncLoop
-
-		case <-syncTicker.C:
-			// Try to sync with non-bootnode peers
-			peers := node.Host.Network().Peers()
-			log.Printf("🔄 Attempting to sync with non-bootnode peers...")
-
-			syncSuccess := false
-			for _, peerID := range peers {
-				// Skip bootnode for sync
-				if node.IsPeerBootstrapNode(peerID) {
-					log.Printf("⏭️ Skipping sync with bootnode peer: %s", peerID)
-					continue
-				}
-
-				log.Printf("🔄 Syncing with non-bootnode peer %s...", peerID)
-				if err := node.SyncWithPeer(peerID); err != nil {
-					log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
-					continue
-				}
-
-				// Check if we have a genesis block
-				if bc.GetHeight() > 0 {
-					log.Printf("✅ Successfully synced blockchain. Current height: %d", bc.GetHeight())
-					syncSuccess = true
-					syncComplete = true
-					break syncLoop // Break out of both loops
-				}
-			}
-
-			if syncSuccess {
-				break syncLoop // Ensure we break out if sync was successful
-			}
-
-			// If no peers have a blockchain yet and we're the first validator
-			if !syncComplete && bc.GetHeight() == 0 {
-				log.Printf("🌟 No existing blockchain found. Checking if we should create genesis block...")
-
-				// Check if we're the first validator
-				isFirstValidator := true
-				for _, peer := range peers {
-					if !node.IsPeerBootstrapNode(peer) {
-						isFirstValidator = false
-						break
-					}
-				}
-
-				if isFirstValidator {
-					log.Printf("🌟 We appear to be the first validator. Initializing genesis block...")
-					genesisBlock := blockchain.GenesisBlock()
-					if err := bc.AddBlock(&genesisBlock, node.Mempool, bc.GetStakePool(), bc.GetUTXOSet(), node.Host); err != nil {
-						log.Printf("❌ Failed to add genesis block: %v", err)
-						continue
-					}
-					log.Printf("✅ Genesis block created and added to chain")
-					syncComplete = true
-					break syncLoop // Break out after creating genesis block
-				} else {
-					log.Printf("⏳ Waiting for blockchain sync from other validators...")
-				}
-			}
+	// Step 8: Initialize chain if we're the first validator
+	if bc.GetHeight() == 0 {
+		log.Printf("🌟 No existing blockchain found. Initializing as first validator...")
+		if err := bc.InitializeChain(); err != nil {
+			log.Fatalf("❌ Failed to initialize chain: %v", err)
 		}
+		log.Printf("✅ Genesis block created and initialized")
 	}
 
-	// Step 8: Initialize validator
+	// Step 9: Initialize validator
 	log.Printf("🔐 Initializing validator...")
 	validatorConfig := &blockchain.ValidatorConfig{
-		MinStake:     0.0, // Set to 0 for genesis validators
+		MinStake:     0.0,
 		RewardRate:   0.01,
 		SlashingRate: 0.5,
 		BlockTimeout: 30 * time.Second,
