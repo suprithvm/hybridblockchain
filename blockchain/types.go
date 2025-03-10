@@ -136,27 +136,3 @@ type WithdrawalRequest struct {
 	Amount      uint64    `json:"amount"`
 	Status      string    `json:"status"` // "pending", "processed", "cancelled"
 }
-
-// SyncRequest represents a request to sync blockchain data
-type SyncRequest struct {
-	StartHeight uint64   `json:"start_height"`
-	EndHeight   uint64   `json:"end_height"`
-	BlockHashes []string `json:"block_hashes"`
-	Timestamp   int64    `json:"timestamp"`
-}
-
-// SyncResponse represents a response to a sync request
-type SyncResponse struct {
-	Success       bool    `json:"success"`
-	Blocks        []Block `json:"blocks"`
-	Error         string  `json:"error,omitempty"`
-	Timestamp     int64   `json:"timestamp"`
-	StateRoot     string  `json:"state_root"`
-	UTXORoot      string  `json:"utxo_root"`
-	Height        uint64  `json:"height"`
-	LastBlockHash string  `json:"last_block_hash"`
-	IsGenesisNode bool    `json:"is_genesis_node"`
-	LatestHash    string  `json:"latest_hash"`
-	GenesisHash   string  `json:"genesis_hash"`
-	HasChain      bool    `json:"has_chain"`
-}

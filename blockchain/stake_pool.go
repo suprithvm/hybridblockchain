@@ -49,13 +49,22 @@ func (sp *StakePool) AddValidator(walletAddress string, stake float64, hostID st
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
-	// Validate stake amount
-	if stake <= 0 {
-		return fmt.Errorf("stake amount must be positive")
+	log.Printf("🔐 Adding validator %s with stake %.4f", walletAddress, stake)
+
+	// Validate inputs
+	if walletAddress == "" {
+		return fmt.Errorf("wallet address cannot be empty")
+	}
+	if hostID == "" {
+		return fmt.Errorf("host ID cannot be empty")
+	}
+	if stake < 0 {
+		return fmt.Errorf("stake amount cannot be negative")
 	}
 
 	// Create or update stake info
 	if _, exists := sp.Stakes[walletAddress]; !exists {
+		log.Printf("📝 Creating new stake entry for validator %s", walletAddress)
 		sp.Stakes[walletAddress] = &StakeInfo{
 			Address:    walletAddress,
 			Amount:     uint64(stake),
@@ -66,14 +75,15 @@ func (sp *StakePool) AddValidator(walletAddress string, stake float64, hostID st
 			},
 		}
 	} else {
+		log.Printf("📝 Updating existing stake entry for validator %s", walletAddress)
 		sp.Stakes[walletAddress].Amount += uint64(stake)
 		sp.Stakes[walletAddress].LastActive = time.Now()
 	}
 
 	// Update host mapping
 	sp.WalletToHost[walletAddress] = hostID
+	log.Printf("✅ Successfully registered validator %s with host ID %s", walletAddress, hostID)
 
-	log.Printf("✅ Added validator %s with stake %.4f", walletAddress, stake)
 	return nil
 }
 
@@ -247,7 +257,7 @@ const (
 	MaxStakeAge          = 365 * 24 * time.Hour // Maximum age for stake weight calculation
 	BaseStakeWeight      = 100                  // Base weight for stake calculations
 	WithdrawalLockPeriod = 72 * time.Hour       // Time required before withdrawal
-	MinValidatorStake    = 00.0               // Minimum stake required for validation
+	MinValidatorStake    = 0.0                  // Minimum stake required for validation (0 for genesis validators)
 	MaxInactivityPeriod  = 24 * time.Hour       // Maximum allowed inactivity period
 )
 

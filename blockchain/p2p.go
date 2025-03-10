@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"blockchain-core/blockchain/gas"
-	syncprotocol "blockchain-core/blockchain/protocol"
 
 	libp2p "github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
@@ -64,6 +63,17 @@ type blankValidator struct{}
 
 func (v blankValidator) Validate(_ string, _ []byte) error        { return nil }
 func (v blankValidator) Select(_ string, _ [][]byte) (int, error) { return 0, nil }
+
+// SyncRequest represents a request to sync blockchain state
+type SyncRequest struct {
+	Height uint64 `json:"height"`
+}
+
+// SyncResponse represents a response to a sync request
+type SyncResponse struct {
+	Height   uint64 `json:"height"`
+	HasChain bool   `json:"has_chain"`
+}
 
 // Node represents a blockchain network node
 type Node struct {
@@ -1255,27 +1265,33 @@ func (n *Node) setupStateSync() {
 }
 
 func (n *Node) handleSyncRequest(s network.Stream) {
-	var request struct {
-		StartHeight int
-		EndHeight   int
-	}
+	log.Printf("📥 Received sync request from peer %s", s.Conn().RemotePeer())
 
+	// Read request
+	var request SyncRequest
 	if err := json.NewDecoder(s).Decode(&request); err != nil {
-		log.Printf("Error decoding sync request: %v", err)
+		log.Printf("❌ Error decoding sync request: %v", err)
+		sendError(s, "invalid sync request")
 		return
 	}
 
-	// Validate request range
-	if request.StartHeight < 0 || request.EndHeight > len(n.Blockchain.Chain) || request.StartHeight >= request.EndHeight {
-		log.Printf("Invalid sync range requested: %d to %d", request.StartHeight, request.EndHeight)
+	log.Printf("📦 Processing sync request from peer %s for height %d",
+		s.Conn().RemotePeer(), request.Height)
+
+	// Create response
+	response := SyncResponse{
+		Height:   n.Blockchain.GetHeight(),
+		HasChain: n.Blockchain.GetHeight() > 0,
+	}
+
+	// Send response
+	if err := json.NewEncoder(s).Encode(response); err != nil {
+		log.Printf("❌ Error sending sync response: %v", err)
 		return
 	}
 
-	// Send requested blocks
-	chainSegment := n.Blockchain.Chain[request.StartHeight:request.EndHeight]
-	if err := json.NewEncoder(s).Encode(chainSegment); err != nil {
-		log.Printf("Error sending chain segment: %v", err)
-	}
+	log.Printf("📤 Sent sync response to peer %s - Height: %d, HasChain: %v",
+		s.Conn().RemotePeer(), response.Height, response.HasChain)
 }
 
 func (n *Node) handleChainValidation(s network.Stream) {
@@ -1676,6 +1692,7 @@ func (n *Node) startBlockchainSync() {
 func (n *Node) SyncWithPeer(peerID peer.ID) error {
 	// Skip bootnode peers
 	if n.IsPeerBootstrapNode(peerID) {
+		log.Printf("⏭️ Skipping sync with bootnode peer %s", peerID)
 		return fmt.Errorf("skipping sync with bootnode peer %s", peerID)
 	}
 
@@ -1684,42 +1701,51 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 	// Open sync stream
 	stream, err := n.Host.NewStream(n.ctx, peerID, protocol.ID("/blockchain/sync/1.0.0"))
 	if err != nil {
-		return fmt.Errorf("failed to open sync stream: %w", err)
+		return fmt.Errorf("failed to open sync stream: %v", err)
 	}
 	defer stream.Close()
 
-	// Send sync request
-	if _, err := stream.Write([]byte("sync")); err != nil {
-		return fmt.Errorf("failed to send sync request: %w", err)
+	// Create sync request
+	request := &SyncRequest{
+		Height: uint64(n.Blockchain.GetHeight()),
 	}
+
+	// Encode and send request
+	if err := json.NewEncoder(stream).Encode(request); err != nil {
+		return fmt.Errorf("failed to send sync request: %v", err)
+	}
+	log.Printf("📤 Sent sync request to peer %s for height %d", peerID, request.Height)
 
 	// Read response
 	var response SyncResponse
 	if err := json.NewDecoder(stream).Decode(&response); err != nil {
-		return fmt.Errorf("failed to receive blocks: %w", err)
+		return fmt.Errorf("failed to receive sync response: %v", err)
 	}
 
-	// Check if peer is a bootnode from response
-	if response.Error == "bootnode does not maintain blockchain" {
-		return fmt.Errorf("peer %s is a bootnode", peerID)
-	}
+	log.Printf("📥 Received sync response from peer %s - Height: %d, HasChain: %v",
+		peerID, response.Height, response.HasChain)
 
-	// Handle sync based on response
+	// If peer doesn't have a chain, nothing to sync
 	if !response.HasChain {
-		log.Printf("ℹ️ Peer %s has no blockchain initialized yet", peerID)
+		log.Printf("ℹ️ Peer %s does not have a blockchain", peerID)
 		return nil
 	}
 
-	// Compare heights
-	ourHeight := n.Blockchain.GetHeight()
-	if ourHeight >= response.Height {
-		log.Printf("✅ Our chain is up to date (height: %d)", ourHeight)
-		return nil
+	// If peer's height is greater, sync blocks
+	if response.Height > n.Blockchain.GetHeight() {
+		log.Printf("📈 Peer %s has higher blockchain height (%d > %d), initiating block sync",
+			peerID, response.Height, n.Blockchain.GetHeight())
+
+		if err := n.syncBlocks(peerID, n.Blockchain.GetHeight(), response.Height); err != nil {
+			return fmt.Errorf("failed to sync blocks: %v", err)
+		}
+		log.Printf("✅ Successfully synced blocks from peer %s", peerID)
+	} else {
+		log.Printf("✓ Our blockchain height (%d) is up to date with peer %s (%d)",
+			n.Blockchain.GetHeight(), peerID, response.Height)
 	}
 
-	// Start block sync
-	log.Printf("🔄 Starting block sync from height %d to %d", ourHeight, response.Height)
-	return n.syncBlocks(peerID, ourHeight, response.Height)
+	return nil
 }
 
 func (n *Node) syncBlocks(peerID peer.ID, startHeight, endHeight uint64) error {
@@ -1733,9 +1759,8 @@ func (n *Node) syncBlocks(peerID peer.ID, startHeight, endHeight uint64) error {
 	defer stream.Close()
 
 	// Create sync request
-	request := &syncprotocol.SyncRequest{
-		StartHeight: startHeight,
-		EndHeight:   endHeight,
+	request := &SyncRequest{
+		Height: endHeight,
 	}
 
 	// Send request
@@ -1744,98 +1769,29 @@ func (n *Node) syncBlocks(peerID peer.ID, startHeight, endHeight uint64) error {
 	}
 
 	// Read response
-	var response syncprotocol.SyncResponse
+	var response SyncResponse
 	if err := json.NewDecoder(stream).Decode(&response); err != nil {
 		return fmt.Errorf("failed to read sync response: %w", err)
 	}
 
-	if !response.Success {
-		return fmt.Errorf("peer reported sync error: %s", response.Error)
+	if !response.HasChain {
+		log.Printf("ℹ️ Peer %s does not have a blockchain", peerID)
+		return nil
 	}
 
-	// Process blocks in batches to avoid memory issues
-	batchSize := uint64(100)
-	var processedBlocks uint64
-	var lastProcessedHeight uint64 = startHeight
+	if response.Height > n.Blockchain.GetHeight() {
+		log.Printf("📈 Peer %s has higher blockchain height (%d > %d), initiating block sync",
+			peerID, response.Height, n.Blockchain.GetHeight())
 
-	for lastProcessedHeight < endHeight {
-		batchEnd := lastProcessedHeight + batchSize
-		if batchEnd > endHeight {
-			batchEnd = endHeight
+		if err := n.syncBlocks(peerID, n.Blockchain.GetHeight(), response.Height); err != nil {
+			return fmt.Errorf("failed to sync blocks: %v", err)
 		}
-
-		log.Printf("🔄 Processing block batch %d to %d", lastProcessedHeight, batchEnd)
-
-		// Request batch of blocks
-		blockRequest := &syncprotocol.BlockRequest{
-			StartHeight: lastProcessedHeight,
-			EndHeight:   batchEnd,
-		}
-
-		if err := json.NewEncoder(stream).Encode(blockRequest); err != nil {
-			return fmt.Errorf("failed to send block request: %w", err)
-		}
-
-		// Read and process blocks
-		var blockResponse syncprotocol.BlockResponse
-		if err := json.NewDecoder(stream).Decode(&blockResponse); err != nil {
-			return fmt.Errorf("failed to read block response: %w", err)
-		}
-
-		if !blockResponse.Success {
-			return fmt.Errorf("peer reported block retrieval error: %s", blockResponse.Error)
-		}
-
-		// Validate and add blocks
-		for _, protoBlock := range blockResponse.Blocks {
-			// Validate block structure
-			if err := syncprotocol.ValidateBlock(&protoBlock); err != nil {
-				return fmt.Errorf("invalid block structure at height %d: %w", protoBlock.Height, err)
-			}
-
-			// Convert protocol block to blockchain block
-			block := &Block{
-				Header: &BlockHeader{
-					Version:      1,
-					BlockNumber:  protoBlock.Height,
-					PreviousHash: protoBlock.PrevHash,
-					Timestamp:    protoBlock.Timestamp.Unix(),
-					MerkleRoot:   protoBlock.MerkleRoot,
-					StateRoot:    protoBlock.StateRoot,
-					GasLimit:     BaseGasLimit,
-				},
-				Body: &BlockBody{
-					Transactions: NewPatriciaTrie(),
-					Receipts:     make([]*TxReceipt, 0),
-				},
-			}
-
-			// If there's transaction data, add it to the trie
-			if len(protoBlock.Data) > 0 {
-				// Assuming the data is a serialized transaction
-				var tx Transaction
-				if err := json.Unmarshal(protoBlock.Data, &tx); err == nil {
-					block.Body.Transactions.Insert(tx)
-				}
-			}
-
-			// Add block to chain
-			if err := n.Blockchain.AddBlock(block, n.Mempool, n.Blockchain.GetStakePool(), n.Blockchain.GetUTXOSet(), n.Host); err != nil {
-				return fmt.Errorf("failed to add block at height %d: %w", block.Header.BlockNumber, err)
-			}
-
-			processedBlocks++
-			lastProcessedHeight = block.Header.BlockNumber
-
-			log.Printf("✅ Processed block #%d (%d/%d)", block.Header.BlockNumber, processedBlocks, endHeight-startHeight)
-		}
-
-		// Update sync progress
-		progress := float64(processedBlocks) / float64(endHeight-startHeight) * 100
-		log.Printf("📊 Sync progress: %.2f%% (%d/%d blocks)", progress, processedBlocks, endHeight-startHeight)
+		log.Printf("✅ Successfully synced blocks from peer %s", peerID)
+	} else {
+		log.Printf("✓ Our blockchain height (%d) is up to date with peer %s (%d)",
+			n.Blockchain.GetHeight(), peerID, response.Height)
 	}
 
-	log.Printf("✨ Successfully synced %d blocks from peer %s", processedBlocks, peerID)
 	return nil
 }
 

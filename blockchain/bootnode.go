@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	syncprotocol "blockchain-core/blockchain/protocol"
+
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
@@ -378,7 +380,7 @@ func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
 		}
 
 		// Create response indicating this is a bootnode
-		response := &SyncResponse{
+		response := &syncprotocol.SyncResponse{
 			Success:  false,
 			Error:    "bootnode does not maintain blockchain",
 			HasChain: false,
@@ -549,7 +551,7 @@ func (bn *BootstrapNode) handleSync(s network.Stream) {
 	defer s.Close()
 
 	// Create response indicating this is a bootnode
-	response := &SyncResponse{
+	response := &syncprotocol.SyncResponse{
 		Success:  false,
 		Error:    "bootnode does not maintain blockchain",
 		HasChain: false,
