@@ -1896,3 +1896,28 @@ func (n *Node) IsPeerBootstrapNode(peerID peer.ID) bool {
 	bootnodeID := parts[1]
 	return peerID.String() == bootnodeID
 }
+
+// CountNonBootnodePeers returns the number of connected peers that are not bootstrap nodes
+func (n *Node) CountNonBootnodePeers() int {
+	count := 0
+	for _, peer := range n.Host.Network().Peers() {
+		if !n.IsPeerBootstrapNode(peer) {
+			count++
+		}
+	}
+	return count
+}
+
+// SyncBlockchain syncs the blockchain with connected peers
+func (n *Node) SyncBlockchain() error {
+	for _, peer := range n.Host.Network().Peers() {
+		if !n.IsPeerBootstrapNode(peer) {
+			if err := n.SyncWithPeer(peer); err != nil {
+				log.Printf("⚠️ Failed to sync with peer %s: %v", peer, err)
+				continue
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("no suitable peers found for sync")
+}

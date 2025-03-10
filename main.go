@@ -365,22 +365,20 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		return
 	}
 
-	// Step 7: Try peer discovery a few times
+	// Step 7: Attempt peer discovery
 	maxPeerDiscoveryAttempts := 4
+	var nonBootnodePeers int
+
+	log.Printf("👥 Attempting to discover peers...")
 	for i := 0; i < maxPeerDiscoveryAttempts; i++ {
-		log.Printf("👥 Peer discovery attempt %d/%d", i+1, maxPeerDiscoveryAttempts)
+		log.Printf("🔍 Peer discovery attempt %d/%d", i+1, maxPeerDiscoveryAttempts)
+
 		if err := node.DiscoverPeers(); err != nil {
-			log.Printf("⚠️ Peer discovery attempt failed: %v", err)
+			log.Printf("⚠️ Peer discovery error: %v", err)
+			continue
 		}
 
-		// Check for non-bootnode peers
-		nonBootnodePeers := 0
-		for _, peer := range node.Host.Network().Peers() {
-			if !node.IsPeerBootstrapNode(peer) {
-				nonBootnodePeers++
-			}
-		}
-
+		nonBootnodePeers = node.CountNonBootnodePeers()
 		if nonBootnodePeers > 0 {
 			log.Printf("✅ Found %d non-bootnode peers", nonBootnodePeers)
 			break
@@ -394,23 +392,32 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 
 	// Step 8: Initialize chain if we're the first validator
 	if bc.GetHeight() == 0 {
-		log.Printf("🌟 No existing blockchain found. Initializing as first validator...")
-		if err := bc.InitializeChain(); err != nil {
-			log.Fatalf("❌ Failed to initialize chain: %v", err)
-		}
-		log.Printf("✅ Genesis block created and initialized")
+		// If no peers found after max attempts, we're the first validator
+		if nonBootnodePeers == 0 {
+			log.Printf("🌟 No existing blockchain found. Initializing as first validator...")
+			if err := bc.InitializeChain(); err != nil {
+				log.Fatalf("❌ Failed to initialize chain: %v", err)
+			}
+			log.Printf("✅ Genesis block created and initialized")
 
-		// Broadcast the genesis block to network
-		genesisBlock := bc.GetLatestBlock()
-		if err := node.BroadcastBlock(genesisBlock); err != nil {
-			log.Printf("⚠️ Warning: Failed to broadcast genesis block: %v", err)
+			// Broadcast the genesis block to network
+			genesisBlock := bc.GetLatestBlock()
+			if err := node.BroadcastBlock(genesisBlock); err != nil {
+				log.Printf("⚠️ Warning: Failed to broadcast genesis block: %v", err)
+			} else {
+				log.Printf("📢 Genesis block broadcasted to network")
+			}
+
+			// Wait for a while to let the network process the genesis block
+			log.Printf("⏳ Waiting for network to process genesis block...")
+			time.Sleep(10 * time.Second)
 		} else {
-			log.Printf("📢 Genesis block broadcasted to network")
+			// We found peers, so we should sync from them
+			log.Printf("🔄 Found existing peers, attempting to sync blockchain...")
+			if err := node.SyncBlockchain(); err != nil {
+				log.Fatalf("❌ Failed to sync blockchain: %v", err)
+			}
 		}
-
-		// Wait for a while to let the network process the genesis block
-		log.Printf("⏳ Waiting for network to process genesis block...")
-		time.Sleep(10 * time.Second)
 	}
 
 	// Step 9: Initialize validator
