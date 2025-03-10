@@ -65,27 +65,27 @@ func TestAddManualPeer(t *testing.T) {
 		{
 			name: "Basic Validation - Successful Addition",
 			config: &PeerAdditionConfig{
-				MaxTrustedPeers:     50,
-				ConnectionTimeout:   10 * time.Second,
-				ValidationStrategy:  BasicValidation,
+				MaxTrustedPeers:    50,
+				ConnectionTimeout:  10 * time.Second,
+				ValidationStrategy: BasicValidation,
 			},
 			expectedResult: true,
 		},
 		{
 			name: "Strict Validation - Successful Addition",
 			config: &PeerAdditionConfig{
-				MaxTrustedPeers:     50,
-				ConnectionTimeout:   10 * time.Second,
-				ValidationStrategy:  StrictValidation,
+				MaxTrustedPeers:    50,
+				ConnectionTimeout:  10 * time.Second,
+				ValidationStrategy: StrictValidation,
 			},
 			expectedResult: true,
 		},
 		{
 			name: "Peer Limit Exceeded",
 			config: &PeerAdditionConfig{
-				MaxTrustedPeers:     0,
-				ConnectionTimeout:   10 * time.Second,
-				ValidationStrategy:  BasicValidation,
+				MaxTrustedPeers:    0,
+				ConnectionTimeout:  10 * time.Second,
+				ValidationStrategy: BasicValidation,
 			},
 			expectedResult: false,
 		},
@@ -166,9 +166,9 @@ func TestPeerValidation(t *testing.T) {
 	for _, vs := range validationStrategies {
 		t.Run(fmt.Sprintf("Validation Strategy: %s", vs.name), func(t *testing.T) {
 			config := &PeerAdditionConfig{
-				MaxTrustedPeers:     50,
-				ConnectionTimeout:   10 * time.Second,
-				ValidationStrategy:  vs.strategy,
+				MaxTrustedPeers:    50,
+				ConnectionTimeout:  10 * time.Second,
+				ValidationStrategy: vs.strategy,
 			}
 
 			err := peerManager1.AddManualPeer(peerInfo2, config)

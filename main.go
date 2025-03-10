@@ -411,8 +411,8 @@ peerDiscoveryLoop:
 
 	peerCheckTicker.Stop()
 
-	// Now proceed with blockchain sync
-	log.Printf("🔄 Starting blockchain synchronization...")
+	// Now proceed with blockchain sync only with non-bootnode peers
+	log.Printf("🔄 Starting blockchain synchronization with non-bootnode peers...")
 
 	// Initialize sync state
 	syncComplete := false
@@ -435,10 +435,11 @@ syncLoop:
 			for _, peerID := range peers {
 				// Skip bootnode for sync
 				if node.IsPeerBootstrapNode(peerID) {
+					log.Printf("⏭️ Skipping sync with bootnode peer: %s", peerID)
 					continue
 				}
 
-				log.Printf("🔄 Syncing with peer %s...", peerID)
+				log.Printf("🔄 Syncing with non-bootnode peer %s...", peerID)
 				if err := node.SyncWithPeer(peerID); err != nil {
 					log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
 					continue

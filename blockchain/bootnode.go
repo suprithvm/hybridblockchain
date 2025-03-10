@@ -377,21 +377,22 @@ func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
 			return
 		}
 
-		// Bootnode doesn't maintain blockchain, send empty response
-		resp := struct {
-			Blocks []interface{} `json:"blocks"`
-			Error  string        `json:"error,omitempty"`
-		}{
-			Blocks: make([]interface{}, 0),
-			Error:  "bootnode does not maintain blockchain",
+		// Create response indicating this is a bootnode
+		response := &SyncResponse{
+			Success:  false,
+			Error:    "bootnode does not maintain blockchain",
+			HasChain: false,
+			Height:   0,
 		}
 
-		if err := json.NewEncoder(stream).Encode(resp); err != nil {
-			log.Printf("Error encoding sync response: %v", err)
+		// Send response
+		if err := json.NewEncoder(stream).Encode(response); err != nil {
+			log.Printf("❌ Failed to send sync response: %v", err)
 			return
 		}
 
-		log.Printf("✅ Responded to sync request from: %s", stream.Conn().RemotePeer().String())
+		log.Printf("✅ Responded to sync request from: %s", stream.Conn().RemotePeer())
+		log.Printf("✅ Responsded with this response message: %+v", response)
 	})
 
 	// Start heartbeat monitor
@@ -547,32 +548,22 @@ func (bn *BootstrapNode) handleMempoolSync(s network.Stream) {
 func (bn *BootstrapNode) handleSync(s network.Stream) {
 	defer s.Close()
 
-	// Read sync request
-	var req struct {
-		StartHeight uint64 `json:"start_height"`
-		EndHeight   uint64 `json:"end_height"`
+	// Create response indicating this is a bootnode
+	response := &SyncResponse{
+		Success:  false,
+		Error:    "bootnode does not maintain blockchain",
+		HasChain: false,
+		Height:   0,
 	}
 
-	if err := json.NewDecoder(s).Decode(&req); err != nil {
-		log.Printf("Error decoding sync request: %v", err)
+	// Send response
+	if err := json.NewEncoder(s).Encode(response); err != nil {
+		log.Printf("❌ Failed to send sync response: %v", err)
 		return
 	}
 
-	// Bootnode doesn't maintain blockchain, send empty response
-	resp := struct {
-		Blocks []interface{} `json:"blocks"`
-		Error  string        `json:"error,omitempty"`
-	}{
-		Blocks: make([]interface{}, 0),
-		Error:  "bootnode does not maintain blockchain",
-	}
-
-	if err := json.NewEncoder(s).Encode(resp); err != nil {
-		log.Printf("Error encoding sync response: %v", err)
-		return
-	}
-
-	log.Printf("✅ Responded to sync request from: %s", s.Conn().RemotePeer().String())
+	log.Printf("✅ Responded to sync request from: %s", s.Conn().RemotePeer())
+	log.Printf("✅ Responsded with this response message: %+v", response)
 }
 
 // handleForkResolution processes fork resolution requests

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -1662,7 +1664,7 @@ func (n *Node) startBlockchainSync() {
 		case <-ticker.C:
 			// Get latest block from peers
 			for _, peer := range n.Host.Network().Peers() {
-				if err := n.syncWithPeer(peer); err != nil {
+				if err := n.SyncWithPeer(peer); err != nil {
 					log.Printf("⚠️ Failed to sync with peer %s: %v", peer.String(), err)
 				}
 			}
@@ -1670,99 +1672,13 @@ func (n *Node) startBlockchainSync() {
 	}
 }
 
-func (n *Node) syncWithPeer(peerID peer.ID) error {
-	// Open sync stream
-	stream, err := n.Host.NewStream(n.ctx, peerID, protocol.ID("/blockchain/sync/1.0.0"))
-	if err != nil {
-		return fmt.Errorf("failed to open sync stream: %v", err)
-	}
-	defer stream.Close()
-
-	// Send sync request
-	request := struct {
-		StartHeight int
-		EndHeight   int
-	}{
-		StartHeight: 0,
-		EndHeight:   -1,
-	}
-
-	if err := json.NewEncoder(stream).Encode(request); err != nil {
-		return fmt.Errorf("failed to send sync request: %v", err)
-	}
-
-	// Receive and process blocks
-	var blocks []Block
-	if err := json.NewDecoder(stream).Decode(&blocks); err != nil {
-		return fmt.Errorf("failed to receive blocks: %v", err)
-	}
-
-	// Validate and add blocks
-	for _, block := range blocks {
-		if err := validateBlockStructure(&block); err != nil {
-			return fmt.Errorf("invalid block structure at height %d: %v", block.Header.BlockNumber, err)
-		}
-
-		// Add block to blockchain
-		if err := n.Blockchain.AddBlock(&block, n.Mempool, n.StakePool, n.UTXOSet.GetAllUTXOs(), n.Host); err != nil {
-			return fmt.Errorf("failed to add block at height %d: %v", block.Header.BlockNumber, err)
-		}
-	}
-
-	return nil
-}
-
-// createHost initializes and returns a new libp2p host
-func createHost(config *NetworkConfig) (host.Host, error) {
-	// Setup P2P host options
-	opts := []libp2p.Option{
-		libp2p.ListenAddrStrings(
-			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.P2PPort),
-			fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", config.P2PPort),
-		),
-		libp2p.EnableRelay(),
-		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}),
-		libp2p.EnableHolePunching(),
-		libp2p.NATPortMap(),       // Enable NAT port mapping
-		libp2p.EnableNATService(), // Enable NAT service
-	}
-
-	// Create libp2p host
-	host, err := libp2p.New(opts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create host: %w", err)
-	}
-
-	// Add connection logging
-	host.Network().Notify(&network.NotifyBundle{
-		ConnectedF: func(n network.Network, conn network.Conn) {
-			remotePeer := conn.RemotePeer()
-			remoteAddr := conn.RemoteMultiaddr()
-			log.Printf("✅ Connected to peer: %s", remotePeer.String())
-			log.Printf("   • Address: %s", remoteAddr)
-			log.Printf("   • Direction: %s", conn.Stat().Direction)
-		},
-		DisconnectedF: func(n network.Network, conn network.Conn) {
-			log.Printf("❌ Disconnected from peer: %s", conn.RemotePeer().String())
-		},
-	})
-
-	return host, nil
-}
-
-func (n *Node) SetStreamHandler(protocolStr string, handler func(network.Stream)) {
-	n.Host.SetStreamHandler(protocol.ID(protocolStr), handler)
-}
-
-// Add IsPeerBootstrapNode method
-func (n *Node) IsPeerBootstrapNode(peerID peer.ID) bool {
-	n.runningMu.RLock()
-	defer n.runningMu.RUnlock()
-	return n.bootstrapNodes[peerID]
-}
-
 // SyncWithPeer synchronizes blockchain state with a peer
 func (n *Node) SyncWithPeer(peerID peer.ID) error {
+	// Skip bootnode peers
+	if n.IsPeerBootstrapNode(peerID) {
+		return fmt.Errorf("skipping sync with bootnode peer %s", peerID)
+	}
+
 	log.Printf("🔄 Attempting to sync with peer %s", peerID)
 
 	// Open sync stream
@@ -1780,13 +1696,13 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 	// Read response
 	var response SyncResponse
 	if err := json.NewDecoder(stream).Decode(&response); err != nil {
-		return fmt.Errorf("failed to read sync response: %w", err)
+		return fmt.Errorf("failed to receive blocks: %w", err)
 	}
 
-	log.Printf("📥 Received sync response from peer %s:", peerID)
-	log.Printf("   • Height: %d", response.Height)
-	log.Printf("   • Has Chain: %v", response.HasChain)
-	log.Printf("   • Latest Hash: %s", response.LatestHash)
+	// Check if peer is a bootnode from response
+	if response.Error == "bootnode does not maintain blockchain" {
+		return fmt.Errorf("peer %s is a bootnode", peerID)
+	}
 
 	// Handle sync based on response
 	if !response.HasChain {
@@ -1950,4 +1866,77 @@ func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, er
 	}
 
 	return peers, nil
+}
+
+// createHost initializes and returns a new libp2p host
+func createHost(config *NetworkConfig) (host.Host, error) {
+	// Setup P2P host options
+	opts := []libp2p.Option{
+		libp2p.ListenAddrStrings(
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.P2PPort),
+			fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", config.P2PPort),
+		),
+		libp2p.EnableRelay(),
+		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}),
+		libp2p.EnableHolePunching(),
+		libp2p.NATPortMap(),       // Enable NAT port mapping
+		libp2p.EnableNATService(), // Enable NAT service
+	}
+
+	// Create libp2p host
+	host, err := libp2p.New(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create host: %w", err)
+	}
+
+	// Add connection logging
+	host.Network().Notify(&network.NotifyBundle{
+		ConnectedF: func(n network.Network, conn network.Conn) {
+			remotePeer := conn.RemotePeer()
+			remoteAddr := conn.RemoteMultiaddr()
+			log.Printf("✅ Connected to peer: %s", remotePeer.String())
+			log.Printf("   • Address: %s", remoteAddr)
+			log.Printf("   • Direction: %s", conn.Stat().Direction)
+		},
+		DisconnectedF: func(n network.Network, conn network.Conn) {
+			log.Printf("❌ Disconnected from peer: %s", conn.RemotePeer().String())
+		},
+	})
+
+	return host, nil
+}
+
+// SetStreamHandler sets a handler for a specific protocol
+func (n *Node) SetStreamHandler(protocolStr string, handler func(network.Stream)) {
+	n.Host.SetStreamHandler(protocol.ID(protocolStr), handler)
+}
+
+// IsPeerBootstrapNode checks if a peer is a bootstrap node
+func (n *Node) IsPeerBootstrapNode(peerID peer.ID) bool {
+	// First check the bootstrapNodes map
+	n.runningMu.RLock()
+	if isBootNode := n.bootstrapNodes[peerID]; isBootNode {
+		n.runningMu.RUnlock()
+		return true
+	}
+	n.runningMu.RUnlock()
+
+	// Read bootnode.addr file
+	bootnodeAddr, err := os.ReadFile("bootnode.addr")
+	if err != nil {
+		log.Printf("⚠️ Failed to read bootnode.addr: %v", err)
+		return false
+	}
+
+	// Extract peer ID from bootnode address
+	// Format: /ip4/<ip>/tcp/<port>/p2p/<peerID>
+	addrStr := strings.TrimSpace(string(bootnodeAddr))
+	parts := strings.Split(addrStr, "/p2p/")
+	if len(parts) != 2 {
+		log.Printf("⚠️ Invalid bootnode address format")
+		return false
+	}
+
+	bootnodeID := parts[1]
+	return peerID.String() == bootnodeID
 }
