@@ -367,36 +367,27 @@ func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
 		defer stream.Close()
 
 		// Handle sync request
-		var req SyncRequest
+		var req struct {
+			StartHeight uint64 `json:"start_height"`
+			EndHeight   uint64 `json:"end_height"`
+		}
+
 		if err := json.NewDecoder(stream).Decode(&req); err != nil {
 			log.Printf("Error decoding sync request: %v", err)
 			return
 		}
 
-		// Initialize response
-		resp := SyncResponse{
-			Success: true,
+		// Bootnode doesn't maintain blockchain, send empty response
+		resp := struct {
+			Blocks []interface{} `json:"blocks"`
+			Error  string        `json:"error,omitempty"`
+		}{
+			Blocks: make([]interface{}, 0),
+			Error:  "bootnode does not maintain blockchain",
 		}
 
-		// Check if blockchain is initialized
-		if bn.blockchain != nil {
-			// Get actual blockchain data
-			latestBlock := bn.blockchain.GetLatestBlock()
-			resp.Height = latestBlock.Header.BlockNumber
-			resp.LastBlockHash = latestBlock.Hash()
-			log.Printf("📊 Syncing peer with blockchain height %d, hash %s",
-				resp.Height, resp.LastBlockHash)
-		} else {
-			// No blockchain available - this is a fresh network
-			resp.Height = 0
-			resp.LastBlockHash = ""
-			resp.IsGenesisNode = true
-			log.Printf("🆕 No blockchain available for sync - informing peer this is a fresh network")
-		}
-
-		// Send response
 		if err := json.NewEncoder(stream).Encode(resp); err != nil {
-			log.Printf("❌ Error encoding sync response: %v", err)
+			log.Printf("Error encoding sync response: %v", err)
 			return
 		}
 
@@ -554,9 +545,34 @@ func (bn *BootstrapNode) handleMempoolSync(s network.Stream) {
 
 // handleSync processes blockchain sync requests
 func (bn *BootstrapNode) handleSync(s network.Stream) {
-	// Implementation for blockchain sync
-	log.Printf("🔄 Sync request from %s", s.Conn().RemotePeer())
-	s.Close()
+	defer s.Close()
+
+	// Read sync request
+	var req struct {
+		StartHeight uint64 `json:"start_height"`
+		EndHeight   uint64 `json:"end_height"`
+	}
+
+	if err := json.NewDecoder(s).Decode(&req); err != nil {
+		log.Printf("Error decoding sync request: %v", err)
+		return
+	}
+
+	// Bootnode doesn't maintain blockchain, send empty response
+	resp := struct {
+		Blocks []interface{} `json:"blocks"`
+		Error  string        `json:"error,omitempty"`
+	}{
+		Blocks: make([]interface{}, 0),
+		Error:  "bootnode does not maintain blockchain",
+	}
+
+	if err := json.NewEncoder(s).Encode(resp); err != nil {
+		log.Printf("Error encoding sync response: %v", err)
+		return
+	}
+
+	log.Printf("✅ Responded to sync request from: %s", s.Conn().RemotePeer().String())
 }
 
 // handleForkResolution processes fork resolution requests

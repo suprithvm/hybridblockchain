@@ -349,40 +349,65 @@ func (s *SyncService) handleSyncRequest(stream network.Stream) {
 	defer stream.Close()
 
 	// Read sync request
-	var req pb.ChainInfoRequest
+	var req struct {
+		StartHeight uint64 `json:"start_height"`
+		EndHeight   uint64 `json:"end_height"`
+	}
+
 	if err := json.NewDecoder(stream).Decode(&req); err != nil {
 		log.Printf("Error decoding sync request: %v", err)
 		return
 	}
 
-	// Get current blockchain state
-	height := s.blockchain.GetHeight()
-	latestBlock := s.blockchain.GetLatestBlock()
-	state, err := s.store.GetState()
-	if err != nil {
-		log.Printf("Error getting state: %v", err)
+	// If blockchain is not initialized, send empty response
+	if s.blockchain == nil {
+		resp := struct {
+			Blocks []interface{} `json:"blocks"`
+			Error  string        `json:"error,omitempty"`
+		}{
+			Blocks: make([]interface{}, 0),
+			Error:  "blockchain not initialized",
+		}
+		json.NewEncoder(stream).Encode(resp)
 		return
 	}
 
-	// Prepare response
-	resp := pb.ChainInfoResponse{
-		Height:          height,
-		LastBlockHash:   latestBlock.Hash(),
-		StateRoot:       state.StateRoot,
-		UtxoRoot:        state.UTXOSetRoot,
-		NetworkVersion:  1,
-		ProtocolVersion: 1,
-		MinPeerVersion:  1,
-		Timestamp:       timestamppb.Now(),
+	// Get blocks
+	var blocks []blockchain.Block
+	currentHeight := s.blockchain.GetHeight()
+
+	// If requesting blocks beyond our height, adjust endHeight
+	if req.EndHeight == 0 || req.EndHeight > currentHeight {
+		req.EndHeight = currentHeight
+	}
+
+	// Collect blocks
+	for height := req.StartHeight; height <= req.EndHeight; height++ {
+		block := s.blockchain.GetBlockByHeight(height)
+		if block != nil {
+			blocks = append(blocks, *block)
+		}
 	}
 
 	// Send response
+	resp := struct {
+		Blocks []blockchain.Block `json:"blocks"`
+		Error  string             `json:"error,omitempty"`
+	}{
+		Blocks: blocks,
+	}
+
 	if err := json.NewEncoder(stream).Encode(resp); err != nil {
 		log.Printf("Error encoding sync response: %v", err)
 		return
 	}
 
-	log.Printf("✅ Responded to sync request from: %s", stream.Conn().RemotePeer().String())
+	log.Printf("✅ Sent %d blocks to peer %s", len(blocks), stream.Conn().RemotePeer().String())
+}
+
+// SyncWithPeer initiates blockchain synchronization with a specific peer
+func (s *SyncService) SyncWithPeer(peerID peer.ID) error {
+	return s.syncWithPeer(peerID)
 }
 
 func (s *SyncService) syncWithPeer(peerID peer.ID) error {
@@ -392,6 +417,52 @@ func (s *SyncService) syncWithPeer(peerID peer.ID) error {
 		return fmt.Errorf("failed to open sync stream: %w", err)
 	}
 	defer stream.Close()
-	// Implementation of syncWithPeer method
+
+	// Send sync request
+	currentHeight := uint64(0)
+	if s.blockchain != nil {
+		currentHeight = s.blockchain.GetHeight()
+	}
+
+	req := struct {
+		StartHeight uint64 `json:"start_height"`
+		EndHeight   uint64 `json:"end_height"`
+	}{
+		StartHeight: currentHeight,
+		EndHeight:   0, // 0 means get all available blocks
+	}
+
+	if err := json.NewEncoder(stream).Encode(req); err != nil {
+		return fmt.Errorf("failed to send sync request: %w", err)
+	}
+
+	// Read response
+	var resp struct {
+		Blocks []blockchain.Block `json:"blocks"`
+		Error  string             `json:"error,omitempty"`
+	}
+
+	if err := json.NewDecoder(stream).Decode(&resp); err != nil {
+		return fmt.Errorf("failed to receive blocks: %w", err)
+	}
+
+	if resp.Error != "" {
+		if resp.Error == "bootnode does not maintain blockchain" {
+			// This is expected for bootnodes
+			return nil
+		}
+		log.Printf("⚠️ Sync response error: %s", resp.Error)
+		return nil
+	}
+
+	// Process received blocks
+	for _, block := range resp.Blocks {
+		if err := s.blockchain.AddBlockWithoutValidation(&block); err != nil {
+			log.Printf("⚠️ Failed to add block: %v", err)
+			continue
+		}
+	}
+
+	log.Printf("✅ Successfully synced %d blocks from peer %s", len(resp.Blocks), peerID.String())
 	return nil
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	discovery "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/multiformats/go-multiaddr"
 	ma "github.com/multiformats/go-multiaddr"
 )
@@ -1537,44 +1538,60 @@ func (n *Node) Start() error {
 }
 
 func (n *Node) discoverPeers() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	// Only discover if we don't have enough non-bootnode peers
+	if n.hasEnoughPeers() {
+		return
+	}
 
-	for {
-		select {
-		case <-n.ctx.Done():
-			return
-		case <-ticker.C:
-			peers := n.Host.Network().Peers()
-			for _, peerID := range peers {
-				// Skip if we already know this peer
-				if n.knownPeers[peerID] {
-					continue
-				}
+	log.Printf("🔍 Starting peer discovery...")
+	log.Printf("📊 Current connections: %d peers", len(n.Host.Network().Peers()))
 
-				// Add to known peers
-				n.knownPeers[peerID] = true
+	// Find peers through DHT
+	ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
+	defer cancel()
 
-				// Get peer info
-				addrs := n.Host.Peerstore().Addrs(peerID)
-				if len(addrs) == 0 {
-					continue
-				}
+	peers, err := n.findPeersWithRendezvous(ctx)
+	if err != nil {
+		log.Printf("⚠️ Peer discovery error: %v", err)
+		return
+	}
 
-				// Notify about new peer
-				log.Printf("📡 Discovered new peer: %s at %s", peerID.String(), addrs[0])
+	// Connect to discovered peers
+	for _, peerInfo := range peers {
+		// Skip if it's a bootnode
+		if n.IsPeerBootstrapNode(peerInfo.ID) {
+			continue
+		}
 
-				// Try to connect
-				peerInfo := peer.AddrInfo{
-					ID:    peerID,
-					Addrs: addrs,
-				}
-				if err := n.Host.Connect(n.ctx, peerInfo); err != nil {
-					log.Printf("⚠️ Failed to connect to discovered peer: %v", err)
-				}
-			}
+		// Skip if we're already connected
+		if n.Host.Network().Connectedness(peerInfo.ID) == network.Connected {
+			continue
+		}
+
+		if err := n.Host.Connect(ctx, peerInfo); err != nil {
+			continue
 		}
 	}
+
+	// Log final peer count
+	nonBootnodePeers := n.countNonBootnodePeers()
+	log.Printf("📊 Final peer count: %d (non-bootnode peers: %d)",
+		len(n.Host.Network().Peers()), nonBootnodePeers)
+}
+
+func (n *Node) hasEnoughPeers() bool {
+	nonBootnodePeers := n.countNonBootnodePeers()
+	return nonBootnodePeers >= 1
+}
+
+func (n *Node) countNonBootnodePeers() int {
+	count := 0
+	for _, peerID := range n.Host.Network().Peers() {
+		if !n.IsPeerBootstrapNode(peerID) {
+			count++
+		}
+	}
+	return count
 }
 
 // RegisterBlockchainHandlers registers all blockchain-related protocol handlers
@@ -1904,4 +1921,33 @@ func (n *Node) syncBlocks(peerID peer.ID, startHeight, endHeight uint64) error {
 
 	log.Printf("✨ Successfully synced %d blocks from peer %s", processedBlocks, peerID)
 	return nil
+}
+
+func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, error) {
+	routingDiscovery := discovery.NewRoutingDiscovery(n.DHT)
+	discoveryTag := fmt.Sprintf("blockchain/%s", n.NetworkID)
+
+	// Advertise ourselves
+	ttl, err := routingDiscovery.Advertise(ctx, discoveryTag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to advertise: %v", err)
+	}
+	log.Printf("Advertising with TTL: %v", ttl)
+
+	// Find peers
+	peerChan, err := routingDiscovery.FindPeers(ctx, discoveryTag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find peers: %v", err)
+	}
+
+	// Collect peers from channel
+	var peers []peer.AddrInfo
+	for p := range peerChan {
+		if p.ID == n.Host.ID() {
+			continue // Skip ourselves
+		}
+		peers = append(peers, p)
+	}
+
+	return peers, nil
 }
