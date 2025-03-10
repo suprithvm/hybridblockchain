@@ -84,6 +84,11 @@ func (sp *StakePool) AddValidator(walletAddress string, stake float64, hostID st
 	sp.WalletToHost[walletAddress] = hostID
 	log.Printf("✅ Successfully registered validator %s with host ID %s", walletAddress, hostID)
 
+	// For genesis validators, ensure they're immediately available
+	if len(sp.Stakes) == 1 {
+		log.Printf("🌟 First validator registered - ready for genesis block")
+	}
+
 	return nil
 }
 
@@ -144,27 +149,21 @@ func (sp *StakePool) SelectValidator(peerHost host.Host) (string, string, error)
 		return "", "", errors.New("no validators available")
 	}
 
-	// For testing with a single validator, return it directly
+	// For genesis block, select the first validator
 	if len(sp.Stakes) == 1 {
 		for walletAddr := range sp.Stakes {
 			hostID := sp.WalletToHost[walletAddr]
-			// Skip broadcasting during testing
-			if peerHost != nil {
-				if err := sp.BroadcastValidator(peerHost, walletAddr, hostID); err != nil {
-					return "", "", err
-				}
-			}
+			log.Printf("🎯 Selected genesis validator: %s", walletAddr)
 			return walletAddr, hostID, nil
 		}
 	}
 
-	// Calculate total stake
+	// For non-genesis blocks, use weighted selection
 	var totalStake float64
 	for _, stake := range sp.Stakes {
 		totalStake += float64(stake.Amount)
 	}
 
-	// Select validator based on weighted probability
 	r := rand.Float64() * totalStake
 	var cumulativeStake float64
 
@@ -172,7 +171,6 @@ func (sp *StakePool) SelectValidator(peerHost host.Host) (string, string, error)
 		cumulativeStake += float64(stake.Amount)
 		if cumulativeStake >= r {
 			hostID := sp.WalletToHost[walletAddr]
-			// Skip broadcasting during testing (when peerHost is nil)
 			if peerHost != nil {
 				if err := sp.BroadcastValidator(peerHost, walletAddr, hostID); err != nil {
 					return "", "", err

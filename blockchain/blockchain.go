@@ -162,8 +162,13 @@ func (bc *Blockchain) AddBlock(block *Block, mempool *Mempool, stakePool *StakeP
 	return nil
 }
 
-// GetLatestBlock retrieves the most recent block in the chain
+// GetLatestBlock returns the latest block in the chain
 func (bc *Blockchain) GetLatestBlock() Block {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	if len(bc.Chain) == 0 {
+		return Block{}
+	}
 	return bc.Chain[len(bc.Chain)-1]
 }
 
@@ -826,33 +831,57 @@ func (bc *Blockchain) InitializeChain() error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
-	// Check if we already have a blockchain
+	// Check if chain is already initialized
 	if bc.GetHeight() > 0 {
 		return nil
 	}
 
-	// Initialize required components before genesis
-	if bc.mempool == nil {
-		bc.mempool = NewMempool(bc.Node)
-	}
-	if bc.utxoSet == nil {
-		bc.utxoSet = make(map[string]UTXO)
-	}
-	if bc.stakePool == nil {
-		bc.stakePool = NewStakePool(bc)
+	// Create genesis block
+	genesisBlock := GenesisBlock()
+
+	// For genesis block, we need to ensure validator is registered first
+	if bc.stakePool != nil {
+		// Get the first validator (genesis validator)
+		genesisValidator := bc.GetGenesisValidator()
+		if genesisValidator != nil {
+			genesisBlock.Header.ValidatedBy = genesisValidator.Address
+			genesisBlock.Header.ValidatorAddress = genesisValidator.Address
+		}
 	}
 
-	// Create genesis block
-	genesis := GenesisBlock()
-	if err := bc.AddBlockWithoutValidation(&genesis); err != nil {
+	// Add genesis block to chain
+	if err := bc.AddBlockWithoutValidation(&genesisBlock); err != nil {
 		return fmt.Errorf("failed to add genesis block: %v", err)
 	}
 
-	log.Printf("🌟 Genesis block created: %v", genesis)
+	// Initialize UTXO set
+	bc.utxoSet = make(map[string]UTXO)
 
-	// Start block processing only after successful initialization
-	go bc.processBlocks()
+	// Initialize other state
+	bc.currentHash = genesisBlock.Hash()
+	bc.Chain = []Block{genesisBlock}
 
+	// Save initial state
+	if err := bc.saveBlock(genesisBlock); err != nil {
+		return fmt.Errorf("failed to save genesis block: %v", err)
+	}
+
+	log.Printf("✅ Genesis block created and initialized")
+	return nil
+}
+
+// GetGenesisValidator returns the first registered validator (genesis validator)
+func (bc *Blockchain) GetGenesisValidator() *Validator {
+	if bc.stakePool == nil {
+		return nil
+	}
+
+	// Find the first active validator
+	for _, validator := range bc.Validators {
+		if validator.Status == ValidatorStatusActive {
+			return validator
+		}
+	}
 	return nil
 }
 

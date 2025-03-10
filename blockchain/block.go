@@ -131,8 +131,8 @@ func NewBlock(previousBlock Block, mempool *Mempool, utxoSet map[string]UTXO, di
 	}
 }
 
-// Helper methods for API and utilities
-func (b *Block) Hash() string {
+// Hash calculates the hash of the block
+func (b Block) Hash() string {
 	if b.hash != "" {
 		return b.hash
 	}
@@ -170,7 +170,7 @@ func (b *Block) GasInfo() (uint64, uint64) {
 
 func (b *Block) Size() uint64 {
 	if b.size == 0 {
-		b.size = calculateBlockSize(b)
+		b.size = calculateBlockSize(*b)
 	}
 	return b.size
 }
@@ -410,7 +410,7 @@ func (b *Block) CreateCheckpoint() *Checkpoint {
 }
 
 // calculateBlockSize returns the approximate size of the block in bytes
-func calculateBlockSize(b *Block) uint64 {
+func calculateBlockSize(b Block) uint64 {
 	size := uint64(0)
 	// Add header size
 	size += uint64(len(b.Header.PreviousHash) + len(b.Hash()) + 16) // 16 for timestamp and nonce

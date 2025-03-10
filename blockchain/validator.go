@@ -78,8 +78,29 @@ func NewValidator(bc *Blockchain, config *ValidatorConfig, walletAddress string)
 
 	// Register with stake pool
 	if bc != nil && bc.stakePool != nil {
-		if err := bc.stakePool.AddValidator(walletAddress, config.Stake, bc.Node.Host.ID().String()); err != nil {
-			return nil, fmt.Errorf("failed to register validator: %v", err)
+		// For genesis validators, we need to ensure they're registered before genesis block
+		if bc.GetHeight() == 0 {
+			log.Printf("🔐 Registering genesis validator %s with stake %.4f", walletAddress, config.Stake)
+			if err := bc.stakePool.AddValidator(walletAddress, config.Stake, bc.Node.Host.ID().String()); err != nil {
+				return nil, fmt.Errorf("failed to register genesis validator: %v", err)
+			}
+			// Set validator as active for genesis
+			validator.Status = ValidatorStatusActive
+			validator.isValidating = true
+
+			// Add to blockchain's validator set
+			if bc.Validators == nil {
+				bc.Validators = make(map[string]*Validator)
+			}
+			bc.Validators[walletAddress] = validator
+
+			log.Printf("✅ Genesis validator %s registered and activated", walletAddress)
+		} else {
+			// For non-genesis validators, register normally
+			if err := bc.stakePool.AddValidator(walletAddress, config.Stake, bc.Node.Host.ID().String()); err != nil {
+				return nil, fmt.Errorf("failed to register validator: %v", err)
+			}
+			log.Printf("✅ Validator %s registered with stake %.4f", walletAddress, config.Stake)
 		}
 	}
 

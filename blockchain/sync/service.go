@@ -349,60 +349,118 @@ func (s *SyncService) handleSyncRequest(stream network.Stream) {
 	defer stream.Close()
 
 	// Read sync request
-	var req struct {
-		StartHeight uint64 `json:"start_height"`
-		EndHeight   uint64 `json:"end_height"`
-	}
-
+	var req SyncRequest
 	if err := json.NewDecoder(stream).Decode(&req); err != nil {
-		log.Printf("Error decoding sync request: %v", err)
+		log.Printf("❌ Failed to decode sync request: %v", err)
 		return
 	}
 
-	// If blockchain is not initialized, send empty response
-	if s.blockchain == nil {
-		resp := struct {
-			Blocks []interface{} `json:"blocks"`
-			Error  string        `json:"error,omitempty"`
-		}{
-			Blocks: make([]interface{}, 0),
-			Error:  "blockchain not initialized",
-		}
-		json.NewEncoder(stream).Encode(resp)
-		return
-	}
-
-	// Get blocks
-	var blocks []blockchain.Block
+	// Get our current height
 	currentHeight := s.blockchain.GetHeight()
 
-	// If requesting blocks beyond our height, adjust endHeight
-	if req.EndHeight == 0 || req.EndHeight > currentHeight {
-		req.EndHeight = currentHeight
-	}
-
-	// Collect blocks
-	for height := req.StartHeight; height <= req.EndHeight; height++ {
-		block := s.blockchain.GetBlockByHeight(height)
-		if block != nil {
-			blocks = append(blocks, *block)
+	// Special handling for genesis block
+	if currentHeight == 0 {
+		// Check if we are the genesis validator
+		genesisValidator := s.blockchain.GetGenesisValidator()
+		if genesisValidator != nil && genesisValidator.Address == s.blockchain.Node.Host.ID().String() {
+			// We are the genesis validator, create and broadcast genesis block
+			if err := s.blockchain.InitializeChain(); err != nil {
+				log.Printf("❌ Failed to initialize chain: %v", err)
+				return
+			}
+			// Broadcast genesis block
+			if err := s.broadcastGenesisBlock(); err != nil {
+				log.Printf("❌ Failed to broadcast genesis block: %v", err)
+				return
+			}
+		} else {
+			// We are not the genesis validator, wait for genesis block
+			log.Printf("⏳ Waiting for genesis block from validator...")
+			return
 		}
 	}
 
-	// Send response
-	resp := struct {
-		Blocks []blockchain.Block `json:"blocks"`
-		Error  string             `json:"error,omitempty"`
-	}{
-		Blocks: blocks,
-	}
-
-	if err := json.NewEncoder(stream).Encode(resp); err != nil {
-		log.Printf("Error encoding sync response: %v", err)
+	// Normal sync handling for non-genesis blocks
+	if req.Height > currentHeight {
+		log.Printf("📥 Peer height %d is higher than our height %d, initiating sync", req.Height, currentHeight)
+		go s.SyncWithPeer(stream.Conn().RemotePeer())
 		return
 	}
 
-	log.Printf("✅ Sent %d blocks to peer %s", len(blocks), stream.Conn().RemotePeer().String())
+	if currentHeight > req.Height {
+		log.Printf("📤 Our height %d is higher than peer's height %d, sending chain", currentHeight, req.Height)
+		if err := s.sendChainToPeer(stream, req.Height, currentHeight); err != nil {
+			log.Printf("❌ Failed to send chain to peer: %v", err)
+		}
+	}
+}
+
+func (s *SyncService) broadcastGenesisBlock() error {
+	genesisBlock := s.blockchain.GetBlockByHeight(0)
+	if genesisBlock == nil {
+		return fmt.Errorf("genesis block not found")
+	}
+
+	// Broadcast to all peers
+	peers := s.host.Network().Peers()
+	for _, peerID := range peers {
+		if s.host.ID() == peerID {
+			continue
+		}
+
+		stream, err := s.host.NewStream(s.ctx, peerID, protocol.ID("/blockchain/sync/1.0.0"))
+		if err != nil {
+			log.Printf("⚠️ Failed to open stream to peer %s: %v", peerID, err)
+			continue
+		}
+		defer stream.Close()
+
+		// Send genesis block
+		if err := json.NewEncoder(stream).Encode(genesisBlock); err != nil {
+			log.Printf("⚠️ Failed to send genesis block to peer %s: %v", peerID, err)
+			continue
+		}
+	}
+
+	log.Printf("✅ Genesis block broadcasted to %d peers", len(peers))
+	return nil
+}
+
+func (s *SyncService) sendChainToPeer(stream network.Stream, startHeight, endHeight uint64) error {
+	// Send chain info first
+	chainInfo := &ChainInfo{
+		Height:        endHeight,
+		LastBlockHash: s.blockchain.GetLatestBlock().Hash(),
+		StateRoot:     s.blockchain.CalculateStateHash(),
+	}
+
+	if err := json.NewEncoder(stream).Encode(chainInfo); err != nil {
+		return fmt.Errorf("failed to send chain info: %w", err)
+	}
+
+	// Send blocks in batches
+	batchSize := 10
+	for height := startHeight + 1; height <= endHeight; height += uint64(batchSize) {
+		batchEnd := height + uint64(batchSize) - 1
+		if batchEnd > endHeight {
+			batchEnd = endHeight
+		}
+
+		blocks := make([]*blockchain.Block, 0)
+		for h := height; h <= batchEnd; h++ {
+			block := s.blockchain.GetBlockByHeight(h)
+			if block == nil {
+				return fmt.Errorf("failed to get block at height %d", h)
+			}
+			blocks = append(blocks, block)
+		}
+
+		if err := json.NewEncoder(stream).Encode(blocks); err != nil {
+			return fmt.Errorf("failed to send block batch: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // SyncWithPeer initiates blockchain synchronization with a specific peer

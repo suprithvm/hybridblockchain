@@ -154,8 +154,7 @@ type ChainInfo struct {
 
 // SyncRequest represents a request to sync blocks
 type SyncRequest struct {
-	StartHeight uint64
-	EndHeight   uint64
+	Height uint64 `json:"height"`
 }
 
 // SyncResponse represents a response to a sync request
@@ -163,6 +162,7 @@ type SyncResponse struct {
 	Success bool
 	Error   string
 	Height  uint64
+	Blocks  []*blockchain.Block
 }
 
 // BlockRequest represents a request for a batch of blocks

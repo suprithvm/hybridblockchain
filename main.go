@@ -16,6 +16,8 @@ import (
 	"blockchain-core/blockchain"
 	"blockchain-core/blockchain/db"
 	"blockchain-core/blockchain/sync"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 type NodeRole int
@@ -255,29 +257,66 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
+		syncRetryCount := make(map[peer.ID]int)
+		maxSyncRetries := 3
+		syncRetryDelay := 5 * time.Second
+
 		for {
 			select {
 			case <-ticker.C:
-				// Only discover new peers if we have a bootnode connection
-				if len(node.Host.Network().Peers()) > 0 {
-					if err := node.DiscoverPeers(); err != nil {
-						log.Printf("⚠️ Peer discovery warning: %v", err)
-					}
-
-					// Sync with non-bootstrap peers
-					for _, peerID := range node.Host.Network().Peers() {
-						if !node.IsPeerBootstrapNode(peerID) {
-							if err := node.SyncWithPeer(peerID); err != nil {
-								log.Printf("⚠️ Failed to sync with peer %s: %v", peerID, err)
-							}
-						}
-					}
-				} else {
+				// Only discover new peers if we have no peers or all peers failed sync
+				if len(node.Host.Network().Peers()) == 0 {
 					log.Printf("⚠️ No peers connected, attempting to reconnect to bootstrap nodes...")
 					if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
 						log.Printf("❌ Failed to reconnect to bootstrap nodes: %v", err)
 					}
+					continue
 				}
+
+				// First try to sync with existing peers
+				allPeersFailed := true
+				for _, peerID := range node.Host.Network().Peers() {
+					if node.IsPeerBootstrapNode(peerID) {
+						continue
+					}
+
+					// Check if we've exceeded retry limit for this peer
+					if syncRetryCount[peerID] >= maxSyncRetries {
+						log.Printf("⚠️ Max sync retries reached for peer %s, removing from sync attempts", peerID)
+						continue
+					}
+
+					// Try to sync with the peer
+					if err := node.SyncWithPeer(peerID); err != nil {
+						syncRetryCount[peerID]++
+						log.Printf("⚠️ Failed to sync with peer %s (attempt %d/%d): %v",
+							peerID, syncRetryCount[peerID], maxSyncRetries, err)
+
+						// If we've hit max retries, consider peer discovery
+						if syncRetryCount[peerID] >= maxSyncRetries {
+							log.Printf("🔄 All sync attempts failed for peer %s, will consider peer discovery", peerID)
+						}
+					} else {
+						// Reset retry count on successful sync
+						syncRetryCount[peerID] = 0
+						allPeersFailed = false
+						log.Printf("✅ Successfully synced with peer %s", peerID)
+					}
+				}
+
+				// Only run peer discovery if all peers failed sync
+				if allPeersFailed {
+					log.Printf("⚠️ All peers failed sync, attempting peer discovery...")
+					if err := node.DiscoverPeers(); err != nil {
+						log.Printf("❌ Peer discovery failed: %v", err)
+					} else {
+						// Reset retry counts for new peers
+						syncRetryCount = make(map[peer.ID]int)
+					}
+				}
+
+				// Add delay between sync attempts
+				time.Sleep(syncRetryDelay)
 			}
 		}
 	}()
