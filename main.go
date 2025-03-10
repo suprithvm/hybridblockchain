@@ -399,6 +399,18 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 			log.Fatalf("❌ Failed to initialize chain: %v", err)
 		}
 		log.Printf("✅ Genesis block created and initialized")
+
+		// Broadcast the genesis block to network
+		genesisBlock := bc.GetLatestBlock()
+		if err := node.BroadcastBlock(genesisBlock); err != nil {
+			log.Printf("⚠️ Warning: Failed to broadcast genesis block: %v", err)
+		} else {
+			log.Printf("📢 Genesis block broadcasted to network")
+		}
+
+		// Wait for a while to let the network process the genesis block
+		log.Printf("⏳ Waiting for network to process genesis block...")
+		time.Sleep(10 * time.Second)
 	}
 
 	// Step 9: Initialize validator
@@ -427,6 +439,33 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 	}
 
 	log.Printf("🎉 Validator node started successfully")
+
+	// Keep the node running and periodically check for new peers
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// Only discover peers if we're not already connected to non-bootnode peers
+				nonBootnodePeers := 0
+				for _, peer := range node.Host.Network().Peers() {
+					if !node.IsPeerBootstrapNode(peer) {
+						nonBootnodePeers++
+					}
+				}
+
+				if nonBootnodePeers == 0 {
+					log.Printf("🔍 Checking for new peers...")
+					if err := node.DiscoverPeers(); err != nil {
+						log.Printf("⚠️ Peer discovery error: %v", err)
+					}
+				}
+			}
+		}
+	}()
+
 	select {}
 }
 
