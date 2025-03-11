@@ -836,6 +836,8 @@ func (bc *Blockchain) InitializeChain() error {
 		return nil
 	}
 
+	log.Printf("🌟 Creating genesis block...")
+
 	// Create genesis block
 	genesisBlock := GenesisBlock()
 
@@ -846,27 +848,37 @@ func (bc *Blockchain) InitializeChain() error {
 		if genesisValidator != nil {
 			genesisBlock.Header.ValidatedBy = genesisValidator.Address
 			genesisBlock.Header.ValidatorAddress = genesisValidator.Address
+			log.Printf("✅ Genesis validator set: %s", genesisValidator.Address)
 		}
 	}
 
 	// Add genesis block to chain
-	if err := bc.AddBlockWithoutValidation(&genesisBlock); err != nil {
-		return fmt.Errorf("failed to add genesis block: %v", err)
-	}
-
-	// Initialize UTXO set
-	bc.utxoSet = make(map[string]UTXO)
-
-	// Initialize other state
+	bc.Chain = append(bc.Chain, genesisBlock)
 	bc.currentHash = genesisBlock.Hash()
-	bc.Chain = []Block{genesisBlock}
 
-	// Save initial state
+	// Save genesis block to database
 	if err := bc.saveBlock(genesisBlock); err != nil {
 		return fmt.Errorf("failed to save genesis block: %v", err)
 	}
 
-	log.Printf("✅ Genesis block created and initialized")
+	// Initialize UTXO set and other state
+	bc.utxoSet = make(map[string]UTXO)
+	if bc.balances == nil {
+		bc.balances = make(map[string]float64)
+	}
+
+	log.Printf("🎉 Genesis block created with hash: %s", genesisBlock.Hash())
+	log.Printf("✅ Blockchain initialized successfully")
+
+	// Broadcast genesis block if we have a node
+	if bc.Node != nil {
+		if err := bc.Node.BroadcastBlock(genesisBlock); err != nil {
+			log.Printf("⚠️ Warning: Failed to broadcast genesis block: %v", err)
+		} else {
+			log.Printf("📢 Genesis block broadcasted to network")
+		}
+	}
+
 	return nil
 }
 

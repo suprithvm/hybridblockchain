@@ -365,11 +365,12 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		return
 	}
 
-	// Step 7: Attempt peer discovery
+	// Step 7: Attempt peer discovery with a fixed number of attempts
 	maxPeerDiscoveryAttempts := 4
 	var nonBootnodePeers int
+	var foundPeers bool
 
-	log.Printf("👥 Attempting to discover peers...")
+	log.Printf("👥 Starting peer discovery (max %d attempts)...", maxPeerDiscoveryAttempts)
 	for i := 0; i < maxPeerDiscoveryAttempts; i++ {
 		log.Printf("🔍 Peer discovery attempt %d/%d", i+1, maxPeerDiscoveryAttempts)
 
@@ -381,6 +382,7 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		nonBootnodePeers = node.CountNonBootnodePeers()
 		if nonBootnodePeers > 0 {
 			log.Printf("✅ Found %d non-bootnode peers", nonBootnodePeers)
+			foundPeers = true
 			break
 		}
 
@@ -392,20 +394,12 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 
 	// Step 8: Initialize chain if we're the first validator
 	if bc.GetHeight() == 0 {
-		// If no peers found after max attempts, we're the first validator
-		if nonBootnodePeers == 0 {
+		if !foundPeers {
 			log.Printf("🌟 No existing blockchain found. Initializing as first validator...")
+
+			// Initialize the chain (this will create the genesis block)
 			if err := bc.InitializeChain(); err != nil {
 				log.Fatalf("❌ Failed to initialize chain: %v", err)
-			}
-			log.Printf("✅ Genesis block created and initialized")
-
-			// Broadcast the genesis block to network
-			genesisBlock := bc.GetLatestBlock()
-			if err := node.BroadcastBlock(genesisBlock); err != nil {
-				log.Printf("⚠️ Warning: Failed to broadcast genesis block: %v", err)
-			} else {
-				log.Printf("📢 Genesis block broadcasted to network")
 			}
 
 			// Wait for a while to let the network process the genesis block
@@ -420,8 +414,8 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		}
 	}
 
-	// Step 9: Initialize validator
-	log.Printf("🔐 Initializing validator...")
+	// Step 9: Start the validator
+	log.Printf("🔐 Starting validator node...")
 	validatorConfig := &blockchain.ValidatorConfig{
 		MinStake:     0.0,
 		RewardRate:   0.01,
