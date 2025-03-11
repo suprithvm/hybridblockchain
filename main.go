@@ -392,7 +392,22 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		}
 	}
 
-	// Step 8: Initialize chain if we're the first validator
+	// Step 8: Initialize chain and validator
+	validatorConfig := &blockchain.ValidatorConfig{
+		MinStake:     0.0,
+		RewardRate:   0.01,
+		SlashingRate: 0.5,
+		BlockTimeout: 30 * time.Second,
+		MaxMissed:    10,
+	}
+
+	// Create validator instance
+	validator, err := blockchain.NewValidator(bc, validatorConfig, wallet.Address)
+	if err != nil {
+		log.Fatalf("❌ Failed to create validator: %v", err)
+	}
+
+	// Step 9: Initialize chain if we're the first validator
 	if bc.GetHeight() == 0 {
 		if !foundPeers {
 			log.Printf("🌟 No existing blockchain found. Initializing as first validator...")
@@ -401,6 +416,9 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 			if err := bc.InitializeChain(); err != nil {
 				log.Fatalf("❌ Failed to initialize chain: %v", err)
 			}
+
+			// Display genesis block details
+			displayGenesisBlock(bc)
 
 			// Wait for a while to let the network process the genesis block
 			log.Printf("⏳ Waiting for network to process genesis block...")
@@ -414,59 +432,18 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		}
 	}
 
-	// Step 9: Start the validator
-	log.Printf("🔐 Starting validator node...")
-	validatorConfig := &blockchain.ValidatorConfig{
-		MinStake:     0.0,
-		RewardRate:   0.01,
-		SlashingRate: 0.5,
-		BlockTimeout: 30 * time.Second,
-		MaxMissed:    10,
-	}
-
-	validator, err := blockchain.NewValidator(bc, validatorConfig, wallet.Address)
-	if err != nil {
-		log.Fatalf("❌ Failed to create validator: %v", err)
-	}
-
-	// Start the node
+	// Step 10: Start the node and validator
 	if err := node.Start(); err != nil {
 		log.Fatalf("❌ Failed to start node: %v", err)
 	}
 
-	// Start the validator
 	if err := validator.Start(); err != nil {
 		log.Fatalf("❌ Failed to start validator: %v", err)
 	}
 
 	log.Printf("🎉 Validator node started successfully")
 
-	// Keep the node running and periodically check for new peers
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				// Only discover peers if we're not already connected to non-bootnode peers
-				nonBootnodePeers := 0
-				for _, peer := range node.Host.Network().Peers() {
-					if !node.IsPeerBootstrapNode(peer) {
-						nonBootnodePeers++
-					}
-				}
-
-				if nonBootnodePeers == 0 {
-					log.Printf("🔍 Checking for new peers...")
-					if err := node.DiscoverPeers(); err != nil {
-						log.Printf("⚠️ Peer discovery error: %v", err)
-					}
-				}
-			}
-		}
-	}()
-
+	// Keep the node running
 	select {}
 }
 
@@ -908,4 +885,19 @@ func initP2PNetwork(config *NodeConfig, bc *blockchain.Blockchain, wallet *block
 	}
 
 	return node, nil
+}
+
+// Add this function after runValidatorNode
+func displayGenesisBlock(bc *blockchain.Blockchain) {
+	genesisBlock := bc.GetBlockByHeight(0)
+	if genesisBlock != nil {
+		log.Printf("📖 Genesis Block Details:")
+		log.Printf("• Hash: %s", genesisBlock.Hash())
+		log.Printf("• Previous Hash: %s", genesisBlock.Header.PreviousHash)
+		log.Printf("• Validator: %s", genesisBlock.Header.ValidatedBy)
+		log.Printf("• Timestamp: %s", time.Unix(genesisBlock.Header.Timestamp, 0).Format(time.RFC3339))
+		log.Printf("• State Root: %s", genesisBlock.Header.StateRoot)
+	} else {
+		log.Printf("❌ Genesis block not found in database")
+	}
 }
