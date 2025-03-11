@@ -852,6 +852,17 @@ func (bc *Blockchain) InitializeChain() error {
 		}
 	}
 
+	// Calculate state root
+	hasher := sha256.New()
+	hasher.Write([]byte(fmt.Sprintf("%d", genesisBlock.Header.BlockNumber)))
+	hasher.Write([]byte(genesisBlock.Header.PreviousHash))
+	hasher.Write([]byte(genesisBlock.Header.ValidatedBy))
+	hasher.Write([]byte(fmt.Sprintf("%d", genesisBlock.Header.Timestamp)))
+	for _, tx := range genesisBlock.Body.Transactions.GetAllTransactions() {
+		hasher.Write([]byte(tx.TransactionID))
+	}
+	genesisBlock.Header.StateRoot = fmt.Sprintf("%x", hasher.Sum(nil))
+
 	// Add genesis block to chain
 	bc.Chain = append(bc.Chain, genesisBlock)
 	bc.currentHash = genesisBlock.Hash()

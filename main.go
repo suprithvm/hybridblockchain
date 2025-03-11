@@ -286,162 +286,87 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 	log.Printf("🚀 Starting validator node...")
 
-	// Step 1: Initialize wallet
+	// Load or create wallet
 	wallet, err := setupWallet(config.DataDir)
 	if err != nil {
 		log.Fatalf("❌ Failed to setup wallet: %v", err)
 	}
+	log.Printf("�� Wallet address: %s", wallet.Address)
 
 	// Step 2: Initialize blockchain with existing store
 	bc := blockchain.InitialiseBlockchainWithStore(store)
-
-	// Step 3: Initialize stake pool
-	stakePool := blockchain.NewStakePool(bc)
-	bc.SetStakePool(stakePool)
-
-	// Read bootnode address from file if not provided in config
-	if len(config.BootstrapNodes) == 0 {
-		bootnodeAddr, err := os.ReadFile("bootnode.addr")
-		if err != nil {
-			log.Fatalf("❌ Failed to read bootnode address: %v", err)
-		}
-		config.BootstrapNodes = []string{strings.TrimSpace(string(bootnodeAddr))}
-		log.Printf("📡 Using bootnode address from file: %s", config.BootstrapNodes[0])
+	if bc == nil {
+		log.Fatal("❌ Failed to initialize blockchain")
 	}
 
-	// Step 4: Initialize P2P network
-	networkConfig := &blockchain.NetworkConfig{
-		P2PPort:        extractPort(config.ListenAddr),
-		RPCPort:        extractPort(config.RPCAddr),
-		BootstrapNodes: config.BootstrapNodes,
-		NetworkID:      config.NetworkID,
-		ChainID:        parseChainID(config.NetworkID),
-		NetworkPath:    config.DataDir,
-		Blockchain:     bc,
-		Wallet:         wallet,
-		DHTServerMode:  true,
-	}
-
-	node, err := blockchain.NewNode(networkConfig)
+	// Initialize P2P network
+	node, err := initP2PNetwork(config, bc, wallet)
 	if err != nil {
-		log.Fatalf("❌ Failed to create P2P node: %v", err)
+		log.Fatalf("❌ Failed to initialize P2P network: %v", err)
 	}
 
-	// Step 5: Register as validator in stake pool
-	log.Printf("🔐 Registering as validator with wallet address: %s", wallet.Address)
-	if err := stakePool.AddValidator(wallet.Address, 0.0, node.Host.ID().String()); err != nil {
-		log.Fatalf("❌ Failed to register as validator: %v", err)
-	}
-	log.Printf("✅ Successfully registered as validator")
-
-	// Set node in blockchain and initialize stake pool
-	bc.Node = node
-	bc.SetStakePool(blockchain.NewStakePool(bc))
-
-	// Step 6: Connect to bootstrap nodes with retries
+	// Connect to bootstrap nodes
 	log.Printf("🔄 Connecting to bootstrap nodes...")
-	maxRetries := 5
-	retryDelay := 5 * time.Second
-	connected := false
-
-	for i := 0; i < maxRetries; i++ {
-		log.Printf("📡 Attempt %d/%d: Connecting to bootstrap nodes: %v", i+1, maxRetries, config.BootstrapNodes)
-		if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
-			log.Printf("⚠️ Attempt %d/%d: Failed to connect to bootstrap nodes: %v", i+1, maxRetries, err)
-			if i < maxRetries-1 {
-				log.Printf("⏳ Retrying in %v...", retryDelay)
-				time.Sleep(retryDelay)
-				continue
-			}
-		} else {
-			connected = true
-			log.Printf("✅ Successfully connected to bootstrap nodes")
-			break
-		}
+	if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
+		log.Printf("⚠️ Failed to connect to bootstrap nodes: %v", err)
 	}
 
-	if !connected {
-		log.Printf("❌ Failed to connect to any bootstrap nodes after %d attempts", maxRetries)
-		return
-	}
-
-	// Step 7: Attempt peer discovery with a fixed number of attempts
-	maxPeerDiscoveryAttempts := 4
-	var nonBootnodePeers int
-	var foundPeers bool
-
-	log.Printf("👥 Starting peer discovery (max %d attempts)...", maxPeerDiscoveryAttempts)
-	for i := 0; i < maxPeerDiscoveryAttempts; i++ {
-		log.Printf("🔍 Peer discovery attempt %d/%d", i+1, maxPeerDiscoveryAttempts)
-
+	// Attempt peer discovery
+	log.Printf("👥 Starting peer discovery (max 4 attempts)...")
+	nonBootnodePeers := 0
+	for attempt := 1; attempt <= 4; attempt++ {
+		log.Printf("🔍 Peer discovery attempt %d/4", attempt)
 		if err := node.DiscoverPeers(); err != nil {
-			log.Printf("⚠️ Peer discovery error: %v", err)
-			continue
+			log.Printf("⚠️ Peer discovery attempt %d failed: %v", attempt, err)
 		}
 
+		// Count non-bootnode peers
 		nonBootnodePeers = node.CountNonBootnodePeers()
 		if nonBootnodePeers > 0 {
 			log.Printf("✅ Found %d non-bootnode peers", nonBootnodePeers)
-			foundPeers = true
 			break
 		}
 
-		if i < maxPeerDiscoveryAttempts-1 {
+		if attempt < 4 {
 			log.Printf("⏳ No peers found, waiting before next attempt...")
 			time.Sleep(5 * time.Second)
 		}
 	}
 
-	// Step 8: Initialize chain and validator
-	validatorConfig := &blockchain.ValidatorConfig{
-		MinStake:     0.0,
-		RewardRate:   0.01,
-		SlashingRate: 0.5,
-		BlockTimeout: 30 * time.Second,
-		MaxMissed:    10,
-	}
+	// Initialize chain if no peers found
+	if nonBootnodePeers == 0 {
+		log.Printf("🌟 No existing blockchain found. Initializing as first validator...")
 
-	// Create validator instance
-	validator, err := blockchain.NewValidator(bc, validatorConfig, wallet.Address)
-	if err != nil {
-		log.Fatalf("❌ Failed to create validator: %v", err)
-	}
+		// Create validator instance
+		validator, err := blockchain.NewValidator(bc, &blockchain.ValidatorConfig{
+			Stake:      config.ValidatorStake,
+			MinStake:   0,
+			RewardRate: 0.01,
+		}, wallet.Address)
+		if err != nil {
+			log.Fatalf("❌ Failed to create validator: %v", err)
+		}
 
-	// Step 9: Initialize chain if we're the first validator
-	if bc.GetHeight() == 0 {
-		if !foundPeers {
-			log.Printf("🌟 No existing blockchain found. Initializing as first validator...")
+		// Initialize chain with genesis block
+		if err := bc.InitializeChain(); err != nil {
+			log.Fatalf("❌ Failed to initialize chain: %v", err)
+		}
 
-			// Initialize the chain (this will create the genesis block)
-			if err := bc.InitializeChain(); err != nil {
-				log.Fatalf("❌ Failed to initialize chain: %v", err)
-			}
+		// Display genesis block details
+		displayGenesisBlock(bc)
 
-			// Display genesis block details
-			displayGenesisBlock(bc)
-
-			// Wait for a while to let the network process the genesis block
-			log.Printf("⏳ Waiting for network to process genesis block...")
-			time.Sleep(10 * time.Second)
-		} else {
-			// We found peers, so we should sync from them
-			log.Printf("🔄 Found existing peers, attempting to sync blockchain...")
-			if err := node.SyncBlockchain(); err != nil {
-				log.Fatalf("❌ Failed to sync blockchain: %v", err)
-			}
+		// Start validator
+		if err := validator.Start(); err != nil {
+			log.Printf("⚠️ Failed to start validator: %v", err)
+		}
+	} else {
+		// Sync blockchain from peers
+		if err := node.SyncBlockchain(); err != nil {
+			log.Printf("⚠️ Failed to sync blockchain: %v", err)
 		}
 	}
 
-	// Step 10: Start the node and validator
-	if err := node.Start(); err != nil {
-		log.Fatalf("❌ Failed to start node: %v", err)
-	}
-
-	if err := validator.Start(); err != nil {
-		log.Fatalf("❌ Failed to start validator: %v", err)
-	}
-
-	log.Printf("🎉 Validator node started successfully")
+	log.Printf("✅ Node started successfully with ID: %s", node.Host.ID().String())
 
 	// Keep the node running
 	select {}
@@ -889,15 +814,11 @@ func initP2PNetwork(config *NodeConfig, bc *blockchain.Blockchain, wallet *block
 
 // Add this function after runValidatorNode
 func displayGenesisBlock(bc *blockchain.Blockchain) {
-	genesisBlock := bc.GetBlockByHeight(0)
-	if genesisBlock != nil {
-		log.Printf("📖 Genesis Block Details:")
-		log.Printf("• Hash: %s", genesisBlock.Hash())
-		log.Printf("• Previous Hash: %s", genesisBlock.Header.PreviousHash)
-		log.Printf("• Validator: %s", genesisBlock.Header.ValidatedBy)
-		log.Printf("• Timestamp: %s", time.Unix(genesisBlock.Header.Timestamp, 0).Format(time.RFC3339))
-		log.Printf("• State Root: %s", genesisBlock.Header.StateRoot)
-	} else {
-		log.Printf("❌ Genesis block not found in database")
-	}
+	genesis := bc.GetLatestBlock()
+	log.Printf("📖 Genesis Block Details:")
+	log.Printf("• Hash: %s", genesis.Hash())
+	log.Printf("• Previous Hash: %s", genesis.Header.PreviousHash)
+	log.Printf("• Validator: %s", genesis.Header.ValidatedBy)
+	log.Printf("• Timestamp: %s", time.Unix(genesis.Header.Timestamp, 0).Format(time.RFC3339))
+	log.Printf("• State Root: %s", genesis.Header.StateRoot)
 }

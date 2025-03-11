@@ -66,6 +66,14 @@ func NewValidator(bc *Blockchain, config *ValidatorConfig, walletAddress string)
 		}
 	}
 
+	// Check if validator already exists
+	if bc != nil && bc.Validators != nil {
+		if existingValidator, exists := bc.Validators[walletAddress]; exists {
+			log.Printf("ℹ️ Validator %s already registered", walletAddress)
+			return existingValidator, nil
+		}
+	}
+
 	validator := &Validator{
 		blockchain:  bc,
 		config:      config,
@@ -76,7 +84,7 @@ func NewValidator(bc *Blockchain, config *ValidatorConfig, walletAddress string)
 		Performance: &ValidatorPerformance{LastUpdate: time.Now()},
 	}
 
-	// Register with stake pool
+	// Register with stake pool only if this is a new validator
 	if bc != nil && bc.stakePool != nil {
 		// For genesis validators, we need to ensure they're registered before genesis block
 		if bc.GetHeight() == 0 {
@@ -112,8 +120,10 @@ func (v *Validator) Start() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
+	// Check if already running
 	if v.isValidating {
-		return fmt.Errorf("validator is already running")
+		log.Printf("ℹ️ Validator is already running")
+		return nil
 	}
 
 	if v.Status == ValidatorStatusSlashed {
