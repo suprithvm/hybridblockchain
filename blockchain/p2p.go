@@ -77,36 +77,38 @@ type SyncResponse struct {
 
 // Node represents a blockchain network node
 type Node struct {
-	Host              host.Host
-	DHT               *dht.IpfsDHT
-	PeerManager       *PeerManager
-	Blockchain        *Blockchain
-	Mempool           *Mempool
-	UTXOSet           *UTXOPool
-	StakePool         *StakePool
-	config            *NetworkConfig
-	ctx               context.Context
-	cancel            context.CancelFunc
-	keepAliveCtx      context.Context
-	keepAliveCancel   context.CancelFunc
-	UTXOPool          *UTXOPool
-	isSyncing         bool
-	syncMu            sync.RWMutex
-	gasModel          *gas.GasModel
-	accountManager    *AccountManager
-	P2PPort           int
-	RPCPort           int
-	NetworkPath       string
-	ChainID           uint64
-	NetworkID         string
-	wallet            *Wallet
-	isRunning         bool
-	runningMu         sync.RWMutex
-	knownPeers        map[peer.ID]bool
-	PubSub            *pubsub.PubSub
-	validatorProtocol *ValidatorProtocol
-	bootstrapNodes    map[peer.ID]bool
-	wg                sync.WaitGroup
+	Host                   host.Host
+	DHT                    *dht.IpfsDHT
+	PeerManager            *PeerManager
+	Blockchain             *Blockchain
+	Mempool                *Mempool
+	UTXOSet                *UTXOPool
+	StakePool              *StakePool
+	config                 *NetworkConfig
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	keepAliveCtx           context.Context
+	keepAliveCancel        context.CancelFunc
+	UTXOPool               *UTXOPool
+	isSyncing              bool
+	syncMu                 sync.RWMutex
+	gasModel               *gas.GasModel
+	accountManager         *AccountManager
+	P2PPort                int
+	RPCPort                int
+	NetworkPath            string
+	ChainID                uint64
+	NetworkID              string
+	wallet                 *Wallet
+	isRunning              bool
+	runningMu              sync.RWMutex
+	knownPeers             map[peer.ID]bool
+	PubSub                 *pubsub.PubSub
+	validatorProtocol      *ValidatorProtocol
+	bootstrapNodes         map[peer.ID]bool
+	wg                     sync.WaitGroup
+	isInitializedValidator bool
+	mu                     sync.RWMutex
 }
 
 // publishMessage publishes a message to a specific topic using pubsub
@@ -242,6 +244,11 @@ func (n *Node) Close() error {
 
 // DiscoverPeers finds and connects to peers in the network
 func (n *Node) DiscoverPeers() error {
+	// Skip peer discovery if we're an initialized validator
+	if n.IsInitializedValidator() {
+		return nil
+	}
+
 	log.Printf("🔍 Starting peer discovery...")
 
 	// Get connected peers
@@ -1690,9 +1697,14 @@ func (n *Node) startBlockchainSync() {
 
 // SyncWithPeer synchronizes blockchain state with a peer
 func (n *Node) SyncWithPeer(peerID peer.ID) error {
-	// Skip bootnode peers
+	// Skip sync if we're an initialized validator
+	if n.IsInitializedValidator() {
+		log.Printf("📝 Skipping sync as initialized validator")
+		return nil
+	}
+
+	// Skip sync with bootnode peers
 	if n.IsPeerBootstrapNode(peerID) {
-		log.Printf("⏭️ Skipping sync with bootnode peer %s", peerID)
 		return fmt.Errorf("skipping sync with bootnode peer %s", peerID)
 	}
 
@@ -1920,4 +1932,18 @@ func (n *Node) SyncBlockchain() error {
 		}
 	}
 	return fmt.Errorf("no suitable peers found for sync")
+}
+
+// SetInitializedValidator sets whether this node is an initialized validator
+func (n *Node) SetInitializedValidator(isInitialized bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.isInitializedValidator = isInitialized
+}
+
+// IsInitializedValidator returns whether this node is an initialized validator
+func (n *Node) IsInitializedValidator() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.isInitializedValidator
 }

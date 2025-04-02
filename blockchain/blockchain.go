@@ -849,47 +849,23 @@ func (bc *Blockchain) InitializeChain() error {
 		if genesisValidator != nil {
 			genesisBlock.Header.ValidatedBy = genesisValidator.Address
 			genesisBlock.Header.ValidatorAddress = genesisValidator.Address
-			log.Printf("✅ Genesis validator set: %s", genesisValidator.Address)
+			// Set as initialized validator to prevent unnecessary peer discovery
+			if bc.Node != nil {
+				bc.Node.SetInitializedValidator(true)
+			}
 		}
 	}
 
-	// Calculate state root
-	hasher := sha256.New()
-	hasher.Write([]byte(fmt.Sprintf("%d", genesisBlock.Header.BlockNumber)))
-	hasher.Write([]byte(genesisBlock.Header.PreviousHash))
-	hasher.Write([]byte(genesisBlock.Header.ValidatedBy))
-	hasher.Write([]byte(fmt.Sprintf("%d", genesisBlock.Header.Timestamp)))
-	for _, tx := range genesisBlock.Body.Transactions.GetAllTransactions() {
-		hasher.Write([]byte(tx.TransactionID))
-	}
-	genesisBlock.Header.StateRoot = fmt.Sprintf("%x", hasher.Sum(nil))
+	// Calculate state root for genesis block
+	genesisBlock.Header.StateRoot = calculateStateRoot(bc.utxoSet)
 
-	// Add genesis block to chain
-	bc.Chain = append(bc.Chain, genesisBlock)
-	bc.currentHash = genesisBlock.Hash()
-
-	// Save genesis block to database
+	// Save genesis block
 	if err := bc.saveBlock(genesisBlock); err != nil {
 		return fmt.Errorf("failed to save genesis block: %v", err)
 	}
 
-	// Initialize UTXO set and other state
-	bc.utxoSet = make(map[string]UTXO)
-	if bc.balances == nil {
-		bc.balances = make(map[string]float64)
-	}
-
 	log.Printf("🎉 Genesis block created with hash: %s", genesisBlock.Hash())
-	log.Printf("✅ Blockchain initialized successfully")
-
-	// Broadcast genesis block if we have a node
-	if bc.Node != nil {
-		if err := bc.Node.BroadcastBlock(genesisBlock); err != nil {
-			log.Printf("⚠️ Warning: Failed to broadcast genesis block: %v", err)
-		} else {
-			log.Printf("📢 Genesis block broadcasted to network")
-		}
-	}
+	bc.currentHash = genesisBlock.Hash()
 
 	return nil
 }

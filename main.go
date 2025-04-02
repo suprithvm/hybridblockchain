@@ -342,7 +342,7 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		log.Fatalf("❌ Failed to connect to bootstrap nodes after %d attempts. Please ensure bootnode is running.", maxRetries)
 	}
 
-	// Attempt peer discovery
+	// Initial peer discovery to check for existing blockchain
 	log.Printf("👥 Starting peer discovery (max 4 attempts)...")
 	nonBootnodePeers := 0
 	for attempt := 1; attempt <= 4; attempt++ {
@@ -390,6 +390,9 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) {
 		if err := validator.Start(); err != nil {
 			log.Printf("⚠️ Failed to start validator: %v", err)
 		}
+
+		// After initialization, stop peer discovery
+		node.SetInitializedValidator(true)
 	} else {
 		// Sync blockchain from peers
 		if err := node.SyncBlockchain(); err != nil {
