@@ -36,6 +36,7 @@ type Blockchain struct {
 	slashingManager  *SlashingManager
 	communityPool    float64
 	balances         map[string]float64
+	validator        *Validator
 }
 
 //intializes the blockchain with the genesis block
@@ -826,7 +827,7 @@ func (b Block) Serialize() ([]byte, error) {
 	return json.Marshal(b)
 }
 
-// InitializeChain starts the blockchain
+// InitializeChain initializes a new blockchain with a genesis block
 func (bc *Blockchain) InitializeChain() error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
