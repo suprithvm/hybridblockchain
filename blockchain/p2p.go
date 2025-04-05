@@ -47,6 +47,7 @@ const (
 	BlockchainSyncProtocol = "/blockchain/sync/1.0.0"
 	ChainStateProtocol     = "/blockchain/state/1.0.0"
 	BlockProtocol          = "/blockchain/block/1.0.0"
+	SyncProtocol           = "/blockchain/sync/1.0.0"
 )
 
 // NodeOptions contains options for creating a node
@@ -471,14 +472,11 @@ func (n *Node) handleHeartbeatStream(s network.Stream) {
 // registerProtocolHandlers sets up all protocol handlers for the node
 func (n *Node) registerProtocolHandlers() {
 	// Register blockchain protocol handlers
-	n.SetStreamHandler("/blockchain/1.0.0", n.handleBlockStream)
-	n.SetStreamHandler("/blockchain/tx/1.0.0", n.handleTransactionStream)
-	n.SetStreamHandler("/blockchain/heartbeat/1.0.0", n.handleHeartbeatStream)
-	n.SetStreamHandler("/blockchain/sync/1.0.0", n.handleBlockSync)
-	n.SetStreamHandler("/blockchain/state/1.0.0", n.handleStateVerification)
-	n.SetStreamHandler("/blockchain/fork/1.0.0", n.handleForkResolution)
-	n.SetStreamHandler("/blockchain/mempool/1.0.0", n.handleMempoolSync)
-	n.SetStreamHandler("/blockchain/validator/1.0.0", n.handleValidatorStream)
+	n.SetStreamHandler(BlockProtocolID, n.handleBlockStream)
+	n.SetStreamHandler(TransactionProtocolID, n.handleTransactionStream)
+	n.SetStreamHandler(HeartbeatProtocolID, n.handleHeartbeatStream)
+	n.SetStreamHandler(SyncProtocol, n.handleSyncRequest)
+	n.SetStreamHandler(ValidatorProtocolID, n.handleValidatorStream)
 
 	// Initialize validator protocol if node is a validator
 	if n.validatorProtocol != nil {
@@ -1299,6 +1297,29 @@ func (n *Node) handleSyncRequest(s network.Stream) {
 
 	log.Printf("📤 Sent sync response to peer %s - Height: %d, HasChain: %v",
 		s.Conn().RemotePeer(), response.Height, response.HasChain)
+
+	// If we have blocks and we're a validator, send them
+	if response.HasChain && n.IsInitializedValidator() {
+		log.Printf("📦 Preparing to send blocks to peer %s", s.Conn().RemotePeer())
+
+		// Send blocks from request height to our current height
+		for height := request.Height; height <= n.Blockchain.GetHeight(); height++ {
+			block := n.Blockchain.GetBlockByHeight(height)
+			if block == nil {
+				log.Printf("❌ Error getting block at height %d", height)
+				continue
+			}
+
+			// Send block
+			if err := json.NewEncoder(s).Encode(block); err != nil {
+				log.Printf("❌ Error sending block at height %d: %v", height, err)
+				continue
+			}
+			log.Printf("📤 Sent block #%d to peer %s", height, s.Conn().RemotePeer())
+		}
+
+		log.Printf("✅ Completed sending blocks to peer %s", s.Conn().RemotePeer())
+	}
 }
 
 func (n *Node) handleChainValidation(s network.Stream) {
@@ -1696,114 +1717,67 @@ func (n *Node) startBlockchainSync() {
 }
 
 // SyncWithPeer synchronizes blockchain state with a peer
-func (n *Node) SyncWithPeer(peerID peer.ID) error {
-	// Skip sync if we're an initialized validator
-	if n.IsInitializedValidator() {
-		log.Printf("📝 Skipping sync as initialized validator")
-		return nil
+func (n *Node) SyncWithPeer(peer peer.ID) error {
+	if n.IsPeerBootstrapNode(peer) {
+		return fmt.Errorf("skipping sync with bootnode peer %s", peer)
 	}
 
-	// Skip sync with bootnode peers
-	if n.IsPeerBootstrapNode(peerID) {
-		return fmt.Errorf("skipping sync with bootnode peer %s", peerID)
-	}
+	log.Printf("🔄 Attempting to sync with peer %s", peer)
 
-	log.Printf("🔄 Attempting to sync with peer %s", peerID)
-
-	// Open sync stream
-	stream, err := n.Host.NewStream(n.ctx, peerID, protocol.ID("/blockchain/sync/1.0.0"))
+	// Create sync stream
+	s, err := n.Host.NewStream(context.Background(), peer, protocol.ID(SyncProtocol))
 	if err != nil {
-		return fmt.Errorf("failed to open sync stream: %v", err)
+		return fmt.Errorf("failed to create sync stream: %v", err)
 	}
-	defer stream.Close()
+	defer s.Close()
 
-	// Create sync request
-	request := &SyncRequest{
-		Height: uint64(n.Blockchain.GetHeight()),
+	// Send sync request
+	request := SyncRequest{
+		Height: n.Blockchain.GetHeight(),
 	}
+	log.Printf("📤 Sent sync request to peer %s for height %d", peer, request.Height)
 
-	// Encode and send request
-	if err := json.NewEncoder(stream).Encode(request); err != nil {
+	if err := json.NewEncoder(s).Encode(request); err != nil {
 		return fmt.Errorf("failed to send sync request: %v", err)
 	}
-	log.Printf("📤 Sent sync request to peer %s for height %d", peerID, request.Height)
 
 	// Read response
 	var response SyncResponse
-	if err := json.NewDecoder(stream).Decode(&response); err != nil {
-		return fmt.Errorf("failed to receive sync response: %v", err)
+	if err := json.NewDecoder(s).Decode(&response); err != nil {
+		return fmt.Errorf("failed to read sync response: %v", err)
 	}
 
 	log.Printf("📥 Received sync response from peer %s - Height: %d, HasChain: %v",
-		peerID, response.Height, response.HasChain)
-
-	// If peer doesn't have a chain, nothing to sync
-	if !response.HasChain {
-		log.Printf("ℹ️ Peer %s does not have a blockchain", peerID)
-		return nil
-	}
-
-	// If peer's height is greater, sync blocks
-	if response.Height > n.Blockchain.GetHeight() {
-		log.Printf("📈 Peer %s has higher blockchain height (%d > %d), initiating block sync",
-			peerID, response.Height, n.Blockchain.GetHeight())
-
-		if err := n.syncBlocks(peerID, n.Blockchain.GetHeight(), response.Height); err != nil {
-			return fmt.Errorf("failed to sync blocks: %v", err)
-		}
-		log.Printf("✅ Successfully synced blocks from peer %s", peerID)
-	} else {
-		log.Printf("✓ Our blockchain height (%d) is up to date with peer %s (%d)",
-			n.Blockchain.GetHeight(), peerID, response.Height)
-	}
-
-	return nil
-}
-
-func (n *Node) syncBlocks(peerID peer.ID, startHeight, endHeight uint64) error {
-	log.Printf("📦 Syncing blocks %d to %d from peer %s", startHeight, endHeight, peerID)
-
-	// Open sync stream
-	stream, err := n.Host.NewStream(n.ctx, peerID, "/blockchain/sync/1.0.0")
-	if err != nil {
-		return fmt.Errorf("failed to open sync stream: %w", err)
-	}
-	defer stream.Close()
-
-	// Create sync request
-	request := &SyncRequest{
-		Height: endHeight,
-	}
-
-	// Send request
-	if err := json.NewEncoder(stream).Encode(request); err != nil {
-		return fmt.Errorf("failed to send sync request: %w", err)
-	}
-
-	// Read response
-	var response SyncResponse
-	if err := json.NewDecoder(stream).Decode(&response); err != nil {
-		return fmt.Errorf("failed to read sync response: %w", err)
-	}
+		peer, response.Height, response.HasChain)
 
 	if !response.HasChain {
-		log.Printf("ℹ️ Peer %s does not have a blockchain", peerID)
-		return nil
+		return fmt.Errorf("peer has no blockchain")
 	}
 
-	if response.Height > n.Blockchain.GetHeight() {
-		log.Printf("📈 Peer %s has higher blockchain height (%d > %d), initiating block sync",
-			peerID, response.Height, n.Blockchain.GetHeight())
-
-		if err := n.syncBlocks(peerID, n.Blockchain.GetHeight(), response.Height); err != nil {
-			return fmt.Errorf("failed to sync blocks: %v", err)
+	// Read blocks
+	blocksReceived := 0
+	for {
+		var block Block
+		if err := json.NewDecoder(s).Decode(&block); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("failed to read block: %v", err)
 		}
-		log.Printf("✅ Successfully synced blocks from peer %s", peerID)
-	} else {
-		log.Printf("✓ Our blockchain height (%d) is up to date with peer %s (%d)",
-			n.Blockchain.GetHeight(), peerID, response.Height)
+
+		log.Printf("📥 Received block #%d from peer %s", block.Header.BlockNumber, peer)
+
+		// Validate and add block
+		if err := n.Blockchain.AddBlock(&block, n.Mempool, n.StakePool, n.UTXOSet.GetUTXOs(), n.Host); err != nil {
+			log.Printf("⚠️ Failed to add block #%d: %v", block.Header.BlockNumber, err)
+			continue
+		}
+
+		blocksReceived++
+		log.Printf("✅ Added block #%d to chain", block.Header.BlockNumber)
 	}
 
+	log.Printf("✅ Sync completed with peer %s - Received %d blocks", peer, blocksReceived)
 	return nil
 }
 
@@ -1939,6 +1913,7 @@ func (n *Node) SetInitializedValidator(isInitialized bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.isInitializedValidator = isInitialized
+	log.Printf("🔐 Node validator initialization state set to: %v", isInitialized)
 }
 
 // IsInitializedValidator returns whether this node is an initialized validator

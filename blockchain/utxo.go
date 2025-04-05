@@ -709,10 +709,11 @@ func (u *UTXOPool) GetUTXOsForAddress(address string) []UTXO {
 	return addressUTXOs
 }
 
-func (u *UTXOPool) GetUTXOs() map[string]UTXO {
-	u.mu.RLock()
-	defer u.mu.RUnlock()
-	return u.utxos
+// GetUTXOs returns the map of UTXOs
+func (up *UTXOPool) GetUTXOs() map[string]UTXO {
+	up.mu.RLock()
+	defer up.mu.RUnlock()
+	return up.utxos
 }
 
 // Account state management
@@ -792,7 +793,7 @@ func (u *UTXOPool) restoreSnapshot(height uint64) error {
 	return fmt.Errorf("no snapshot found for height %d", height)
 }
 func (u *UTXOPool) GetAllUTXOs() map[string]UTXO {
-    u.mu.RLock()
-    defer u.mu.RUnlock()
-    return u.utxos
-} 
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.utxos
+}
