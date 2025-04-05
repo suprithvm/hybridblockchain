@@ -7,8 +7,10 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,7 +27,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/routing"
 	discovery "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/multiformats/go-multiaddr"
-	"github.com/pion/stun"
 )
 
 // Heartbeat represents a node's heartbeat message
@@ -771,47 +772,54 @@ func (bn *BootstrapNode) collectMetrics() {
 
 // Start starts the bootstrap node
 func (bn *BootstrapNode) Start() error {
-	// Set up connection handler
-	bn.host.Network().Notify(&network.NotifyBundle{
-		ConnectedF: func(n network.Network, conn network.Conn) {
-			peerID := conn.RemotePeer()
-			log.Printf("✅ New peer connected: %s", peerID)
+	log.Printf("🚀 Starting bootstrap node...")
 
-			// Add to known peers
-			bn.peers[peerID] = peerID
+	// Get public IP
+	publicIP, err := getPublicIP()
+	if err != nil {
+		log.Printf("⚠️ Failed to get public IP: %v, falling back to 0.0.0.0", err)
+		publicIP = "0.0.0.0"
+	}
 
-			// Send welcome message
-			go bn.sendWelcomeMessage(peerID)
-		},
-		DisconnectedF: func(n network.Network, conn network.Conn) {
-			peerID := conn.RemotePeer()
-			log.Printf("❌ Peer disconnected: %s", peerID)
-			delete(bn.peers, peerID)
-		},
-	})
+	// Setup P2P host options with public IP
+	opts := []libp2p.Option{
+		libp2p.ListenAddrStrings(
+			fmt.Sprintf("/ip4/%s/tcp/%d", publicIP, bn.config.ListenPort),
+			fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", bn.config.ListenPort),
+		),
+		libp2p.EnableRelay(),
+		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}),
+		libp2p.EnableHolePunching(),
+		libp2p.NATPortMap(),
+		libp2p.EnableNATService(),
+	}
 
-	// Set up stream handler for welcome protocol
-	bn.host.SetStreamHandler(protocol.ID("/blockchain/welcome/1.0.0"), func(s network.Stream) {
-		defer s.Close()
+	// Create libp2p host
+	host, err := libp2p.New(opts...)
+	if err != nil {
+		return fmt.Errorf("failed to create host: %v", err)
+	}
+	bn.host = host
 
-		var msg struct {
-			Type string `json:"type"`
-		}
+	// Initialize protocols
+	if err := bn.initializeProtocols(); err != nil {
+		return fmt.Errorf("failed to initialize protocols: %v", err)
+	}
 
-		if err := json.NewDecoder(s).Decode(&msg); err != nil {
-			log.Printf("❌ Failed to decode welcome request: %v", err)
-			return
-		}
+	// Start network services
+	if err := bn.startNetworkServices(); err != nil {
+		return fmt.Errorf("failed to start network services: %v", err)
+	}
 
-		if msg.Type == "REQUEST_WELCOME" {
-			bn.sendWelcomeMessage(s.Conn().RemotePeer())
-		}
-	})
+	// Start periodic tasks
+	bn.startPeriodicTasks()
 
-	// Start periodic peer status updates
-	go bn.updatePeerStatus()
+	log.Printf("✅ Bootstrap node started successfully")
+	log.Printf("📡 Listening on:")
+	for _, addr := range bn.host.Addrs() {
+		log.Printf("   %s/p2p/%s", addr, bn.host.ID())
+	}
 
-	log.Printf("✨ Bootstrap node is running on port %d", bn.config.ListenPort)
 	return nil
 }
 
@@ -1318,64 +1326,35 @@ func (bn *BootstrapNode) setupNAT() error {
 	return nil
 }
 
-// Helper function to get public IP
+// getPublicIP gets the node's public IP address
 func getPublicIP() (string, error) {
-	var publicIP string
-
-	done := make(chan bool)
-
-	// Try multiple STUN servers until we get an IPv4
-	stunServers := []string{
-		"stun.l.google.com:19302",
-		"stun1.l.google.com:19302",
-		"stun.stunprotocol.org:3478",
+	// Try multiple IP lookup services
+	urls := []string{
+		"https://api.ipify.org",
+		"https://api.myip.com",
+		"https://checkip.amazonaws.com",
 	}
 
-	for _, server := range stunServers {
-		c, err := stun.Dial("udp4", server) // Force IPv4
+	for _, url := range urls {
+		resp, err := http.Get(url)
 		if err != nil {
 			continue
 		}
-		defer c.Close()
+		defer resp.Body.Close()
 
-		message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+		ip, err := io.ReadAll(resp.Body)
+		if err != nil {
+			continue
+		}
 
-		c.Start(message, func(res stun.Event) {
-			if res.Error != nil {
-				err = res.Error
-				done <- true
-				return
-			}
-
-			var xorAddr stun.XORMappedAddress
-			if getErr := xorAddr.GetFrom(res.Message); getErr != nil {
-				err = getErr
-				done <- true
-				return
-			}
-
-			// Verify we got an IPv4
-			if ip4 := xorAddr.IP.To4(); ip4 != nil {
-				publicIP = ip4.String()
-				done <- true
-			} else {
-				err = fmt.Errorf("got IPv6 address, want IPv4")
-				done <- true
-			}
-		})
-
-		<-done // Wait for STUN response
-
-		if err == nil && publicIP != "" {
+		// Clean the IP string
+		publicIP := strings.TrimSpace(string(ip))
+		if net.ParseIP(publicIP) != nil {
 			return publicIP, nil
 		}
 	}
 
-	if publicIP == "" {
-		return "", fmt.Errorf("could not get public IPv4 address from any STUN server")
-	}
-
-	return publicIP, nil
+	return "", fmt.Errorf("failed to get public IP")
 }
 
 // updatePeerScores periodically updates peer scores based on their performance
