@@ -1328,7 +1328,36 @@ func (bn *BootstrapNode) setupNAT() error {
 
 // getPublicIP gets the node's public IP address
 func getPublicIP() (string, error) {
-	// Try multiple IP lookup services
+	// First try to get Tailscale IP
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", fmt.Errorf("failed to get network interfaces: %v", err)
+	}
+
+	for _, iface := range interfaces {
+		// Look for Tailscale interface (usually named "tailscale" or starts with "ts")
+		if strings.HasPrefix(strings.ToLower(iface.Name), "tailscale") ||
+			strings.HasPrefix(strings.ToLower(iface.Name), "ts") {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+
+			for _, addr := range addrs {
+				// Extract IP address
+				ipNet, ok := addr.(*net.IPNet)
+				if !ok {
+					continue
+				}
+				ip := ipNet.IP
+				if ip.To4() != nil { // Only consider IPv4 addresses
+					return ip.String(), nil
+				}
+			}
+		}
+	}
+
+	// Fallback to public IP services if Tailscale IP not found
 	urls := []string{
 		"https://api.ipify.org",
 		"https://api.myip.com",
@@ -1354,7 +1383,7 @@ func getPublicIP() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("failed to get public IP")
+	return "", fmt.Errorf("failed to get IP address")
 }
 
 // updatePeerScores periodically updates peer scores based on their performance
