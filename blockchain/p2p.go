@@ -23,7 +23,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	discovery "github.com/libp2p/go-libp2p/p2p/discovery/routing"
-	"github.com/multiformats/go-multiaddr"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -737,7 +736,7 @@ func (n *Node) ConnectToBootstrapNodes(ctx context.Context) error {
 	for _, addr := range n.config.BootstrapNodes {
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			// Parse the multiaddr
-			multiaddr, err := multiaddr.NewMultiaddr(addr)
+			multiaddr, err := ma.NewMultiaddr(addr)
 			if err != nil {
 				log.Printf("⚠️ Invalid bootstrap node address %s: %v", addr, err)
 				lastErr = err

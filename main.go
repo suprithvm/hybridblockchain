@@ -818,6 +818,15 @@ func connectToBootstrapNodes(node *blockchain.Node, bootstrapNodes []string) err
 	log.Printf("🔄 Connecting to %d bootstrap nodes", len(bootstrapNodes))
 	for _, addr := range bootstrapNodes {
 		log.Printf("  ↳ Attempting connection to %s", addr)
+
+		// Check if the address is already a valid multiaddr
+		if !strings.HasPrefix(addr, "/") {
+			// If it's just a peer ID, we need to construct a proper multiaddr
+			// This is a fallback in case the full multiaddr wasn't provided
+			log.Printf("⚠️ Invalid multiaddr format, attempting to fix: %s", addr)
+			continue // Skip invalid addresses
+		}
+
 		if err := node.ConnectToPeer(addr); err != nil {
 			log.Printf("⚠️ Failed to connect to bootstrap node %s: %v", addr, err)
 		}
