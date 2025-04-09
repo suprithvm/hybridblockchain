@@ -127,29 +127,56 @@ func parseFlags() *NodeConfig {
 func runBootstrapNode(config *NodeConfig) {
 	log.Printf("🌟 Starting Bootstrap Node")
 
-	bootConfig := &blockchain.BootstrapNodeConfig{
-		ListenPort:         extractPort(config.ListenAddr),
-		DataDir:            config.DataDir,
-		EnableRelay:        true,
-		EnableNAT:          true,
-		EnablePeerExchange: true,
-		StoragePath:        config.DataDir,
-		NetworkID:          config.NetworkID,
-		EnableMetrics:      config.EnableMetrics,
+	// Create data directory if it doesn't exist
+	if err := os.MkdirAll(config.DataDir, 0755); err != nil {
+		log.Fatalf("❌ Failed to create data directory: %v", err)
 	}
 
-	// Initialize bootstrap node with context
-	node, err := blockchain.NewBootstrapNode(bootConfig)
+	// Initialize database
+	dbConfig := &blockchain.DatabaseConfig{
+		Type:         "leveldb",
+		Path:         filepath.Join(config.DataDir, "chaindata"),
+		CacheSize:    256,
+		MaxOpenFiles: 64,
+		Compression:  true,
+	}
+
+	// Initialize blockchain
+	bc := blockchain.InitialiseBlockchain(dbConfig)
+
+	// Create network configuration
+	networkConfig := &blockchain.NetworkConfig{
+		P2PPort:        extractPort(config.ListenAddr),
+		RPCPort:        extractPort(config.RPCAddr),
+		BootstrapNodes: config.BootstrapNodes,
+		NetworkID:      config.NetworkID,
+		ChainID:        parseChainID(config.NetworkID),
+		NetworkPath:    config.DataDir,
+		Blockchain:     bc,
+		DHTServerMode:  true,
+	}
+
+	// Create and start the node
+	node, err := blockchain.NewNode(networkConfig)
 	if err != nil {
-		log.Fatalf("❌ Failed to create bootstrap node: %v", err)
+		log.Fatalf("❌ Failed to create node: %v", err)
 	}
 
 	// Start the node
 	if err := node.Start(); err != nil {
-		log.Fatalf("❌ Failed to start bootstrap node: %v", err)
+		log.Fatalf("❌ Failed to start node: %v", err)
 	}
 
+	// Log node information
+	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
+	log.Printf("📡 Listening on:")
+	for _, addr := range node.Host.Addrs() {
+		log.Printf("%s/p2p/%s", addr, node.Host.ID())
+	}
 	log.Printf("✅ Bootstrap node is running on %s", config.ListenAddr)
+
+	// Keep the node running
+	select {}
 }
 
 func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
