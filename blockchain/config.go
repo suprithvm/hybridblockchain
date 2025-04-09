@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 )
 
 // NodeConfig holds configuration for a blockchain node
@@ -83,6 +84,11 @@ type NetworkConfig struct {
 	// Add database configuration
 	Database *DatabaseConfig
 	Wallet   *Wallet
+	// Validator-specific fields
+	ValidatorMode  bool          // Whether this node is a validator
+	ValidatorStake float64       // Stake amount for validator nodes
+	MinStake       float64       // Minimum stake required for validation
+	BlockTimeout   time.Duration // Maximum time to wait for block validation
 }
 
 // TURNConfig holds TURN server configuration

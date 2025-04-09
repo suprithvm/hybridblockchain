@@ -155,8 +155,13 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		return nil, fmt.Errorf("failed to create host: %v", err)
 	}
 
-	// Initialize DHT
-	dht, err := dht.New(ctx, host, dht.Mode(dht.ModeServer))
+	// Initialize DHT with server mode if specified
+	dhtOpts := []dht.Option{dht.ProtocolPrefix("/hybrid")}
+	if config.DHTServerMode {
+		dhtOpts = append(dhtOpts, dht.Mode(dht.ModeServer))
+	}
+
+	kadDHT, err := dht.New(ctx, host, dhtOpts...)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create DHT: %v", err)
@@ -171,7 +176,7 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 	// Create node instance
 	node := &Node{
 		Host:              host,
-		DHT:               dht,
+		DHT:               kadDHT,
 		PeerManager:       peerManager,
 		Blockchain:        config.Blockchain,
 		Mempool:           NewMempool(nil),
@@ -197,16 +202,52 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		runningMu:         sync.RWMutex{},
 		knownPeers:        make(map[peer.ID]bool),
 		PubSub:            nil,
-		validatorProtocol: nil, // Will be initialized after node creation
+		validatorProtocol: nil,
 		bootstrapNodes:    make(map[peer.ID]bool),
 		wg:                sync.WaitGroup{},
 	}
 
-	// Initialize validator protocol after node creation
-	node.validatorProtocol = NewValidatorProtocol(node)
+	// Set validator mode if specified
+	if config.ValidatorMode {
+		node.isInitializedValidator = true
+		log.Printf("🔐 Node initialized in validator mode")
+	}
 
-	// Initialize pubsub
-	pubsub, err := pubsub.NewGossipSub(ctx, host)
+	// Initialize validator protocol if in validator mode
+	if config.ValidatorMode {
+		node.validatorProtocol = NewValidatorProtocol(node)
+	}
+
+	// Initialize pubsub with validator-specific options
+	pubsubOpts := []pubsub.Option{
+		pubsub.WithMessageSigning(true),
+		pubsub.WithStrictSignatureVerification(true),
+	}
+
+	if config.ValidatorMode {
+		pubsubOpts = append(pubsubOpts,
+			pubsub.WithPeerScore(
+				&pubsub.PeerScoreParams{
+					AppSpecificScore: func(p peer.ID) float64 {
+						if node.PeerManager.IsValidatorPeer(p) {
+							return 100.0
+						}
+						return 0
+					},
+					AppSpecificWeight: 1,
+					DecayInterval:     time.Hour,
+					DecayToZero:       0.01,
+				},
+				&pubsub.PeerScoreThresholds{
+					GossipThreshold:             -100,
+					PublishThreshold:            -500,
+					GraylistThreshold:           -1000,
+					AcceptPXThreshold:           100,
+					OpportunisticGraftThreshold: 5,
+				}))
+	}
+
+	pubsub, err := pubsub.NewGossipSub(ctx, host, pubsubOpts...)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create pubsub: %v", err)
@@ -227,7 +268,7 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 
 	// Bootstrap DHT
 	if err := node.bootstrapDHT(ctx); err != nil {
-		log.Printf("Warning: DHT bootstrap failed: %v", err)
+		log.Printf("⚠️ DHT bootstrap failed: %v", err)
 	}
 
 	return node, nil
@@ -244,40 +285,37 @@ func (n *Node) Close() error {
 
 // DiscoverPeers finds and connects to peers in the network
 func (n *Node) DiscoverPeers() error {
-	// Skip peer discovery if we're an initialized validator
-	if n.IsInitializedValidator() {
+	// Skip peer discovery if this is an initialized validator
+	if n.isInitializedValidator {
+		log.Printf("🔐 Skipping peer discovery for initialized validator")
 		return nil
 	}
 
 	log.Printf("🔍 Starting peer discovery...")
+	n.mu.RLock()
+	currentPeers := len(n.Host.Network().Peers())
+	n.mu.RUnlock()
+	log.Printf("📊 Current connections: %d peers", currentPeers)
 
-	// Get connected peers
-	peers := n.Host.Network().Peers()
-	log.Printf("📊 Current connections: %d peers", len(peers))
-
-	// If we have no peers, try to connect to bootstrap nodes again
-	if len(peers) == 0 {
-		log.Printf("⚠️ No peers found, retrying bootstrap connections...")
-		if err := n.ConnectToBootstrapNodes(context.Background()); err != nil {
-			log.Printf("❌ Failed to reconnect to bootstrap nodes: %v", err)
-			return err
+	// If we have no peers, try to reconnect to bootstrap nodes
+	if currentPeers == 0 {
+		log.Printf("⚠️ No peers found, attempting to reconnect to bootstrap nodes")
+		if err := n.ConnectToBootstrapNodes(n.ctx); err != nil {
+			log.Printf("⚠️ Failed to reconnect to bootstrap nodes: %v", err)
 		}
+		// Wait a bit for connections to establish
+		time.Sleep(5 * time.Second)
 	}
 
-	// Wait for connections to establish
-	time.Sleep(2 * time.Second)
+	n.mu.RLock()
+	finalPeers := len(n.Host.Network().Peers())
+	n.mu.RUnlock()
+	log.Printf("📊 Final peer count: %d", finalPeers)
 
-	// Check final peer count
-	peers = n.Host.Network().Peers()
-	log.Printf("📊 Final peer count: %d", len(peers))
-
-	if len(peers) > 0 {
-		log.Printf("✅ Successfully connected to peers:")
-		for _, p := range peers {
-			addrs := n.Host.Peerstore().Addrs(p)
-			if len(addrs) > 0 {
-				log.Printf("  • %s (%s)", p.String(), addrs[0].String())
-			}
+	if finalPeers > 0 {
+		log.Printf("✅ Successfully connected to %d peers", finalPeers)
+		for _, p := range n.Host.Network().Peers() {
+			log.Printf("   • Peer: %s", p.String())
 		}
 	} else {
 		log.Printf("⚠️ No peers connected after discovery")
@@ -508,25 +546,27 @@ func (n *Node) handleValidatorStream(s network.Stream) {
 	switch msg.Type {
 	case "heartbeat":
 		var heartbeat ValidatorHeartbeatMessage
-		if err := json.Unmarshal(msg.Payload, &heartbeat); err != nil {
+		if err := json.Unmarshal([]byte(msg.Payload), &heartbeat); err != nil {
 			n.handleStreamError(s, fmt.Errorf("failed to parse validator heartbeat: %v", err))
 			return
 		}
 		n.validatorProtocol.HandleHeartbeat(heartbeat.ValidatorAddress)
 	case "selection":
 		var selection ValidatorSelectionMessage
-		if err := json.Unmarshal(msg.Payload, &selection); err != nil {
+		if err := json.Unmarshal([]byte(msg.Payload), &selection); err != nil {
 			n.handleStreamError(s, fmt.Errorf("failed to parse validator selection: %v", err))
 			return
 		}
 		// Handle selection message
 	case "vote":
 		var vote ValidatorVoteMessage
-		if err := json.Unmarshal(msg.Payload, &vote); err != nil {
+		if err := json.Unmarshal([]byte(msg.Payload), &vote); err != nil {
 			n.handleStreamError(s, fmt.Errorf("failed to parse validator vote: %v", err))
 			return
 		}
 		// Handle vote message
+	default:
+		n.handleStreamError(s, fmt.Errorf("unknown validator message type: %s", msg.Type))
 	}
 
 	// Update peer info

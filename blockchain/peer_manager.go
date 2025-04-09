@@ -890,14 +890,29 @@ func (pm *PeerManager) GetTrustedPeers() []peer.ID {
 	pm.mutex.RLock()
 	defer pm.mutex.RUnlock()
 
-	trustedPeerList := make([]peer.ID, 0, len(pm.peers))
-	for peerID, peerInfo := range pm.peers {
-		if !peerInfo.Blacklisted {
-			trustedPeerList = append(trustedPeerList, peerID)
+	var trustedPeers []peer.ID
+	for id, peer := range pm.peers {
+		if peer.Score >= ReputationThresholdGood && !peer.Blacklisted {
+			trustedPeers = append(trustedPeers, id)
 		}
 	}
+	return trustedPeers
+}
 
-	return trustedPeerList
+// IsValidatorPeer checks if a peer is a validator
+func (pm *PeerManager) IsValidatorPeer(peerID peer.ID) bool {
+	pm.mutex.RLock()
+	defer pm.mutex.RUnlock()
+
+	if peer, exists := pm.peers[peerID]; exists {
+		// Check if peer has validator capability
+		for _, cap := range peer.Capabilities {
+			if cap == "validator" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CleanupBlacklistedPeers removes expired blacklist entries

@@ -89,10 +89,16 @@ func NewValidator(bc *Blockchain, config *ValidatorConfig, walletAddress string)
 		// For genesis validators, we need to ensure they're registered before genesis block
 		if bc.GetHeight() == 0 {
 			log.Printf("🔐 Registering genesis validator %s with stake %.4f", walletAddress, config.Stake)
-			nodeID := ""
+
+			// Get node ID if available
+			var nodeID string
 			if bc.Node != nil && bc.Node.Host != nil {
 				nodeID = bc.Node.Host.ID().String()
+				log.Printf("📡 Using node ID: %s", nodeID)
+			} else {
+				log.Printf("⚠️ Node or Host not initialized, proceeding without node ID")
 			}
+
 			if err := bc.stakePool.AddValidator(walletAddress, config.Stake, nodeID); err != nil {
 				return nil, fmt.Errorf("failed to register genesis validator: %v", err)
 			}
@@ -108,7 +114,11 @@ func NewValidator(bc *Blockchain, config *ValidatorConfig, walletAddress string)
 
 			log.Printf("✅ Genesis validator %s registered and activated", walletAddress)
 		} else {
-			// For non-genesis validators, register normally
+			// For non-genesis validators, ensure node is initialized
+			if bc.Node == nil || bc.Node.Host == nil {
+				return nil, fmt.Errorf("cannot register validator: node not properly initialized")
+			}
+			// Register normally
 			if err := bc.stakePool.AddValidator(walletAddress, config.Stake, bc.Node.Host.ID().String()); err != nil {
 				return nil, fmt.Errorf("failed to register validator: %v", err)
 			}
