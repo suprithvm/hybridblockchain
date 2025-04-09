@@ -773,32 +773,14 @@ func (bn *BootstrapNode) collectMetrics() {
 func (bn *BootstrapNode) Start() error {
 	log.Printf("🚀 Starting bootstrap node...")
 
-	// Get public IP
-	publicIP, err := getPublicIP()
-	if err != nil {
-		log.Printf("⚠️ Failed to get public IP: %v, falling back to 0.0.0.0", err)
-		publicIP = "0.0.0.0"
+	// Check if already started
+	bn.mu.Lock()
+	if bn.started {
+		bn.mu.Unlock()
+		return nil
 	}
-
-	// Setup P2P host options with public IP
-	opts := []libp2p.Option{
-		libp2p.ListenAddrStrings(
-			fmt.Sprintf("/ip4/%s/tcp/%d", publicIP, bn.config.ListenPort),
-			fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", bn.config.ListenPort),
-		),
-		libp2p.EnableRelay(),
-		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}),
-		libp2p.EnableHolePunching(),
-		libp2p.NATPortMap(),
-		libp2p.EnableNATService(),
-	}
-
-	// Create libp2p host
-	host, err := libp2p.New(opts...)
-	if err != nil {
-		return fmt.Errorf("failed to create host: %v", err)
-	}
-	bn.host = host
+	bn.started = true
+	bn.mu.Unlock()
 
 	// Initialize protocols
 	if err := bn.initializeProtocols(); err != nil {
