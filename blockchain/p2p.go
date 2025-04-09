@@ -981,7 +981,7 @@ func (n *Node) ValidateAndUpdateChain(newChain []Block) bool {
 		}
 
 		// Validate block using blockchain's validation function
-		if !ValidateBlock(block, previousBlock, block.Header.ValidatedBy, bc.stakePool) {
+		if !ValidateBlock(block, previousBlock, block.Header.ValidatedBy, bc.StakePool) {
 			log.Printf("Invalid block detected at height %d", block.Header.BlockNumber)
 			return false
 		}

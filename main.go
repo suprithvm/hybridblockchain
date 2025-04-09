@@ -280,7 +280,6 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 
 	// Keep node running
 	select {}
-	return nil
 }
 
 func runValidatorNode(config *NodeConfig, store *blockchain.Store) error {
@@ -391,7 +390,7 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) error {
 		if bc.Node != nil && bc.Node.Host != nil {
 			nodeID := bc.Node.Host.ID().String()
 			log.Printf("📡 Re-registering validator with node ID: %s", nodeID)
-			if err := bc.stakePool.AddValidator(wallet.Address, config.ValidatorStake, nodeID); err != nil {
+			if err := bc.StakePool.AddValidator(wallet.Address, config.ValidatorStake, nodeID); err != nil {
 				log.Printf("⚠️ Failed to re-register validator: %v", err)
 			} else {
 				log.Printf("✅ Validator re-registered successfully with node ID: %s", nodeID)

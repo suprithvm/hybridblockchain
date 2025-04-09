@@ -132,7 +132,7 @@ func (ce *ConsensusEngine) finalizeBlock() {
 	if err := ce.blockchain.AddBlock(
 		ce.state.ProposedBlock, // Add the proposed block as first argument
 		ce.blockchain.mempool,
-		ce.blockchain.stakePool,
+		ce.blockchain.StakePool,
 		ce.blockchain.utxoSet,
 		ce.blockchain.p2pHost,
 	); err != nil {

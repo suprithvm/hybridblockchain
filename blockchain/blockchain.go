@@ -28,7 +28,7 @@ type Blockchain struct {
 	p2pHost          host.Host
 	ctx              context.Context
 	cancel           context.CancelFunc
-	stakePool        *StakePool
+	StakePool        *StakePool
 	utxoSet          map[string]UTXO
 	Validators       map[string]*Validator
 	consensus        *ConsensusEngine
@@ -67,10 +67,12 @@ func InitialiseBlockchain(dbConfig *DatabaseConfig) *Blockchain {
 
 	genesis := GenesisBlock()
 	bc.Chain = append(bc.Chain, genesis)
-	bc.stakePool = NewStakePool(bc)
+
+	// Initialize stakePool after blockchain is created
+	bc.StakePool = NewStakePool(bc)
 
 	// Initialize validator selector and consensus engine
-	selector := NewValidatorSelector(bc.stakePool)
+	selector := NewValidatorSelector(bc.StakePool)
 	bc.consensus = NewConsensusEngine(bc, selector)
 
 	return bc
@@ -633,6 +635,10 @@ func InitialiseBlockchainWithStore(store *Store) *Blockchain {
 
 	genesis := GenesisBlock()
 	bc.Chain = append(bc.Chain, genesis)
+
+	// Initialize stakePool after blockchain is created
+	bc.StakePool = NewStakePool(bc)
+
 	return bc
 }
 
@@ -862,7 +868,7 @@ func (bc *Blockchain) InitializeChain() error {
 	genesisBlock := GenesisBlock()
 
 	// For genesis block, we need to ensure validator is registered first
-	if bc.stakePool != nil {
+	if bc.StakePool != nil {
 		// Get the first validator (genesis validator)
 		genesisValidator := bc.GetGenesisValidator()
 		if genesisValidator != nil {
@@ -891,7 +897,7 @@ func (bc *Blockchain) InitializeChain() error {
 
 // GetGenesisValidator returns the first registered validator (genesis validator)
 func (bc *Blockchain) GetGenesisValidator() *Validator {
-	if bc.stakePool == nil {
+	if bc.StakePool == nil {
 		return nil
 	}
 
@@ -905,7 +911,7 @@ func (bc *Blockchain) GetGenesisValidator() *Validator {
 }
 
 func (bc *Blockchain) processBlocks() {
-	if bc == nil || bc.mempool == nil || bc.stakePool == nil {
+	if bc == nil || bc.mempool == nil || bc.StakePool == nil {
 		log.Printf("❌ Cannot start block processing: blockchain not properly initialized")
 		return
 	}
@@ -931,7 +937,7 @@ func (bc *Blockchain) processBlocks() {
 				newBlock := NewBlock(previousBlock, bc.mempool, bc.utxoSet, difficulty, validator)
 
 				// Try to add the block
-				if err := bc.AddBlock(&newBlock, bc.mempool, bc.stakePool, bc.utxoSet, bc.p2pHost); err != nil {
+				if err := bc.AddBlock(&newBlock, bc.mempool, bc.StakePool, bc.utxoSet, bc.p2pHost); err != nil {
 					log.Printf("⚠️ Failed to add new block: %v", err)
 					continue
 				}
@@ -942,7 +948,7 @@ func (bc *Blockchain) processBlocks() {
 
 // VerifyStake checks if a stake is valid and mature
 func (bc *Blockchain) VerifyStake(address string) error {
-	stake, exists := bc.stakePool.Stakes[address]
+	stake, exists := bc.StakePool.Stakes[address]
 	if !exists {
 		return fmt.Errorf("no stake found for address: %s", address)
 	}
@@ -1082,14 +1088,14 @@ func (bc *Blockchain) GetUTXOSet() map[string]UTXO {
 
 // SetStakePool sets the stake pool for the blockchain
 func (bc *Blockchain) SetStakePool(pool *StakePool) {
-	bc.stakePool = pool
+	bc.StakePool = pool
 }
 
 // GetStakePool returns the blockchain's stake pool
 func (bc *Blockchain) GetStakePool() *StakePool {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	return bc.stakePool
+	return bc.StakePool
 }
 
 // GetBlock retrieves a block by its hash
