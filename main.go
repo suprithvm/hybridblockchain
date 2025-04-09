@@ -1,876 +1,157 @@
 package main
 
 import (
-	"bufio"
-	"context"
-	"crypto/elliptic"
-	"encoding/hex"
-	"flag"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"blockchain-core/blockchain"
-	"blockchain-core/blockchain/db"
-	"blockchain-core/blockchain/sync"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
-type NodeRole int
-
-const (
-	RoleObserver NodeRole = iota
-	RoleMiner
-	RoleValidator
-	RoleBootstrap
-)
-
-type NodeConfig struct {
-	Role           NodeRole
-	DataDir        string
-	BootstrapNodes []string
-	ListenAddr     string
-	RPCAddr        string
-	ValidatorStake float64
-	MinerThreads   int
-	EnableMetrics  bool
-	LogLevel       string
-	NetworkID      string
+// Block represents a blockchain block
+type Block struct {
+	Hash            string                 `json:"hash"`
+	PreviousHash    string                 `json:"previous_hash"`
+	BlockNumber     int64                  `json:"block_number"`
+	Timestamp       int64                  `json:"timestamp"`
+	MerkleRoot      string                 `json:"merkle_root"`
+	StateRoot       string                 `json:"state_root"`
+	Difficulty      int64                  `json:"difficulty"`
+	ValidatedBy     string                 `json:"validated_by"`
+	TransactionData map[string]interface{} `json:"transaction_data"`
 }
 
 func main() {
-	log.Printf("🚀 Starting blockchain node")
-
-	// Parse command line flags
-	config := parseFlags()
-
-	log.Printf("📋 Configuration loaded")
-
-	// Initialize logging
-	setupLogging(config.LogLevel)
-	log.Printf("\n🔗 Blockchain Node Initialization - Role: %s", getRoleName(config.Role))
-	log.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-	// Create data directories
-	if err := setupDataDir(config.DataDir); err != nil {
-		log.Fatalf("❌ Failed to create data directory: %v", err)
+	// Get the database path from command line or use default
+	dbPath := "blockchain.db"
+	if len(os.Args) > 1 {
+		dbPath = os.Args[1]
 	}
 
-	log.Printf("📂 Data directory setup: %s", config.DataDir)
+	// Check if the database directory exists
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		log.Fatalf("Database directory not found: %s", dbPath)
+	}
 
-	// Initialize database
-	db, store := initializeDatabase(config)
+	// Open the database
+	db, err := leveldb.OpenFile(dbPath, nil)
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
+	}
 	defer db.Close()
 
-	// Initialize node based on role
-	switch config.Role {
-	case RoleBootstrap:
-		runBootstrapNode(config)
-	case RoleMiner:
-		runMinerNode(config, store)
-	case RoleValidator:
-		runValidatorNode(config, store)
-	case RoleObserver:
-		runObserverNode(config, store)
-	}
+	// Process and display blocks
+	fmt.Println("=== BLOCKCHAIN DATABASE VIEWER ===")
+	fmt.Printf("Database: %s\n\n", dbPath)
 
-	// Keep the application running
-	select {}
-}
-
-func parseFlags() *NodeConfig {
-	config := &NodeConfig{}
-
-	// Basic node configuration
-	role := flag.String("role", "miner", "Node role (bootstrap, validator, or miner)")
-	dataDir := flag.String("datadir", "./data", "Data directory for the node")
-	listenAddr := flag.String("listen", ":50505", "Listen address for p2p")
-	rpcAddr := flag.String("rpc", ":8545", "RPC server address")
-	networkID := flag.String("network", "testnet", "Network identifier")
-
-	// Bootstrap configuration
-	bootstrapNodes := flag.String("bootnodes", "", "Comma separated bootstrap node addresses")
-
-	// Validator configuration
-	stake := flag.Float64("stake", 0.0, "Amount to stake (for validators)")
-
-	// Miner configuration
-	threads := flag.Int("threads", 1, "Number of mining threads")
-
-	// Additional options
-	metrics := flag.Bool("metrics", false, "Enable metrics collection")
-	logLevel := flag.String("loglevel", "info", "Logging level (debug, info, warn, error)")
-
-	flag.Parse()
-
-	// Parse role
-	config.Role = parseRole(*role)
-	config.DataDir = *dataDir
-	config.ListenAddr = *listenAddr
-	config.RPCAddr = *rpcAddr
-	config.NetworkID = *networkID
-	config.ValidatorStake = *stake
-	config.MinerThreads = *threads
-	config.EnableMetrics = *metrics
-	config.LogLevel = *logLevel
-
-	// Parse bootstrap nodes
-	if *bootstrapNodes != "" {
-		config.BootstrapNodes = strings.Split(*bootstrapNodes, ",")
-	}
-
-	return config
-}
-
-func runBootstrapNode(config *NodeConfig) {
-	log.Printf("🌟 Starting Bootstrap Node")
-
-	bootConfig := &blockchain.BootstrapNodeConfig{
-		ListenPort:         extractPort(config.ListenAddr),
-		DataDir:            config.DataDir,
-		EnableRelay:        true,
-		EnableNAT:          true,
-		EnablePeerExchange: true,
-		StoragePath:        config.DataDir,
-		NetworkID:          config.NetworkID,
-		EnableMetrics:      config.EnableMetrics,
-	}
-
-	// Initialize bootstrap node with context
-	node, err := blockchain.NewBootstrapNode(bootConfig)
-	if err != nil {
-		log.Fatalf("❌ Failed to create bootstrap node: %v", err)
-	}
-
-	// Start the node
-	if err := node.Start(); err != nil {
-		log.Fatalf("❌ Failed to start bootstrap node: %v", err)
-	}
-
-	log.Printf("✅ Bootstrap node is running on %s", config.ListenAddr)
-}
-
-func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
-	log.Printf("⛏️ Starting Miner Node")
-
-	// Load or create wallet
-	wallet, err := setupWallet(config.DataDir)
-	if err != nil {
-		log.Fatalf("❌ Failed to setup wallet: %v", err)
-	}
-
-	// Initialize blockchain with store's database
-	dbConfig := &blockchain.DatabaseConfig{
-		Type:         "leveldb",
-		Path:         filepath.Join(config.DataDir, "chaindata"),
-		CacheSize:    256,
-		MaxOpenFiles: 64,
-		Compression:  true,
-	}
-
-	// Initialize blockchain
-	bc := blockchain.InitialiseBlockchain(dbConfig)
-
-	// Read bootnode address from file if not provided in config
-	if len(config.BootstrapNodes) == 0 {
-		bootnodeAddr, err := os.ReadFile("bootnode.addr")
-		if err != nil {
-			log.Fatalf("❌ Failed to read bootnode address: %v", err)
-		}
-		config.BootstrapNodes = []string{strings.TrimSpace(string(bootnodeAddr))}
-		log.Printf("📡 Using bootnode address from file: %s", config.BootstrapNodes[0])
-	}
-
-	// Create network configuration
-	networkConfig := &blockchain.NetworkConfig{
-		P2PPort:        extractPort(config.ListenAddr),
-		RPCPort:        extractPort(config.RPCAddr),
-		BootstrapNodes: config.BootstrapNodes,
-		NetworkID:      config.NetworkID,
-		ChainID:        parseChainID(config.NetworkID),
-		NetworkPath:    config.DataDir,
-		Blockchain:     bc,
-		Wallet:         wallet,
-		DHTServerMode:  true,
-	}
-
-	// Create node
-	node, err := blockchain.NewNode(networkConfig)
-	if err != nil {
-		log.Fatalf("❌ Failed to create node: %v", err)
-	}
-
-	// Start the node
-	if err := node.Start(); err != nil {
-		log.Fatalf("❌ Failed to start node: %v", err)
-	}
-
-	// Log node ID
-	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
-
-	// Connect to bootstrap nodes with retries
-	log.Printf("🔄 Connecting to bootstrap nodes...")
-	maxRetries := 5
-	retryDelay := 5 * time.Second
-	connected := false
-
-	for i := 0; i < maxRetries; i++ {
-		log.Printf("📡 Attempt %d/%d: Connecting to bootstrap nodes: %v", i+1, maxRetries, config.BootstrapNodes)
-		if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
-			log.Printf("⚠️ Attempt %d/%d: Failed to connect to bootstrap nodes: %v", i+1, maxRetries, err)
-			if i < maxRetries-1 {
-				log.Printf("⏳ Retrying in %v...", retryDelay)
-				time.Sleep(retryDelay)
+	// Get all blocks
+	blocks := []Block{}
+	iter := db.NewIterator(util.BytesPrefix([]byte("block:")), nil)
+	for iter.Next() {
+		var block Block
+		if err := json.Unmarshal(iter.Value(), &block); err != nil {
+			log.Printf("Error unmarshaling block: %v", err)
 				continue
+		}
+		blocks = append(blocks, block)
+	}
+	iter.Release()
+
+	// Check for errors from iterating
+	if err := iter.Error(); err != nil {
+		log.Fatalf("Error iterating over blocks: %v", err)
+	}
+
+	// Display block count
+	fmt.Printf("Total blocks in database: %d\n\n", len(blocks))
+
+	// Group blocks by block number to identify duplicates
+	blockGroups := make(map[int64][]Block)
+	for _, block := range blocks {
+		blockGroups[block.BlockNumber] = append(blockGroups[block.BlockNumber], block)
+	}
+
+	// Display blocks with duplicates highlighted
+	for blockNum := int64(0); blockNum <= getMaxBlockNumber(blocks); blockNum++ {
+		group := blockGroups[blockNum]
+		if len(group) == 0 {
+			continue
+		}
+
+		fmt.Printf("=== BLOCK #%d ===\n", blockNum)
+		if len(group) > 1 {
+			fmt.Printf("⚠️ DUPLICATE BLOCK DETECTED: %d copies found\n", len(group))
+		}
+
+		for i, block := range group {
+			if len(group) > 1 {
+				fmt.Printf("--- Copy #%d ---\n", i+1)
 			}
-		} else {
-			connected = true
-			log.Printf("✅ Successfully connected to bootstrap nodes")
-			break
-		}
-	}
 
-	if !connected {
-		log.Printf("❌ Failed to connect to any bootstrap nodes after %d attempts", maxRetries)
-		return fmt.Errorf("failed to connect to bootstrap nodes")
-	}
+			fmt.Printf("Hash: %s\n", block.Hash)
+			fmt.Printf("Previous Hash: %s\n", block.PreviousHash)
+			fmt.Printf("Timestamp: %s\n", time.Unix(block.Timestamp, 0).Format(time.RFC3339))
+			fmt.Printf("Merkle Root: %s\n", block.MerkleRoot)
+			fmt.Printf("State Root: %s\n", block.StateRoot)
+			fmt.Printf("Difficulty: %d\n", block.Difficulty)
+			fmt.Printf("Validated By: %s\n", block.ValidatedBy)
 
-	// Try peer discovery a few times to find validator
-	maxPeerDiscoveryAttempts := 4
-	validatorFound := false
-	for i := 0; i < maxPeerDiscoveryAttempts; i++ {
-		log.Printf("👥 Peer discovery attempt %d/%d", i+1, maxPeerDiscoveryAttempts)
-		if err := node.DiscoverPeers(); err != nil {
-			log.Printf("⚠️ Peer discovery attempt failed: %v", err)
-		}
-
-		// Check for validator peer
-		for _, peer := range node.Host.Network().Peers() {
-			if !node.IsPeerBootstrapNode(peer) {
-				// Try to sync with this peer
-				if err := node.SyncWithPeer(peer); err != nil {
-					log.Printf("⚠️ Failed to sync with peer %s: %v", peer, err)
-					continue
+			// Display transaction data
+			if block.TransactionData != nil {
+				fmt.Println("Transaction Data:")
+				for key, value := range block.TransactionData {
+					fmt.Printf("  %s: %v\n", key, value)
 				}
-				validatorFound = true
-				log.Printf("✅ Successfully synced with validator peer %s", peer)
-				break
+			}
+
+			fmt.Println()
+		}
+	}
+
+	// Display summary of duplicates
+	fmt.Println("=== DUPLICATE BLOCK SUMMARY ===")
+	for blockNum, group := range blockGroups {
+		if len(group) > 1 {
+			fmt.Printf("Block #%d: %d copies\n", blockNum, len(group))
+			for i, block := range group {
+				fmt.Printf("  Copy #%d: Hash=%s, Timestamp=%s\n", 
+					i+1, 
+					block.Hash, 
+					time.Unix(block.Timestamp, 0).Format(time.RFC3339))
 			}
 		}
+	}
 
-		if validatorFound {
-			break
+	// Display other database information
+	fmt.Println("\n=== DATABASE INFORMATION ===")
+	
+	// Count keys by prefix
+	prefixes := []string{"block:", "tx:", "state:", "peer:", "validator:"}
+	for _, prefix := range prefixes {
+		count := 0
+		iter := db.NewIterator(util.BytesPrefix([]byte(prefix)), nil)
+		for iter.Next() {
+			count++
 		}
-
-		if i < maxPeerDiscoveryAttempts-1 {
-			log.Printf("⏳ No validator found, waiting before next attempt...")
-			time.Sleep(5 * time.Second)
-		}
-	}
-
-	if !validatorFound {
-		return fmt.Errorf("no validator peer found after %d attempts", maxPeerDiscoveryAttempts)
-	}
-
-	// Start mining
-	log.Printf("⛏️ Starting mining process...")
-	go startMining(bc, wallet.Address)
-
-	// Keep node running
-	select {}
-	return nil
-}
-
-func runValidatorNode(config *NodeConfig, store *blockchain.Store) error {
-	log.Printf("🚀 Starting validator node...")
-
-	// 1. First, setup wallet
-	wallet, err := setupWallet(config.DataDir)
-	if err != nil {
-		return fmt.Errorf("failed to setup wallet: %v", err)
-	}
-	log.Printf("📝 Wallet address: %s", wallet.Address)
-
-	// 2. Initialize blockchain database
-	dbConfig := &blockchain.DatabaseConfig{
-		Type:         "leveldb",
-		Path:         filepath.Join(config.DataDir, "chaindata"),
-		CacheSize:    256,
-		MaxOpenFiles: 64,
-		Compression:  true,
-	}
-	bc := blockchain.InitialiseBlockchain(dbConfig)
-
-	// 3. Read bootnode address
-	if len(config.BootstrapNodes) == 0 {
-		bootnodeAddr, err := os.ReadFile("bootnode.addr")
-		if err != nil {
-			return fmt.Errorf("failed to read bootnode address: %v", err)
-		}
-		config.BootstrapNodes = []string{strings.TrimSpace(string(bootnodeAddr))}
-		log.Printf("📡 Using bootnode address from file: %s", config.BootstrapNodes[0])
-	}
-
-	// 4. Initialize P2P network with validator-specific configuration
-	networkConfig := &blockchain.NetworkConfig{
-		P2PPort:        extractPort(config.ListenAddr),
-		RPCPort:        extractPort(config.RPCAddr),
-		BootstrapNodes: config.BootstrapNodes,
-		NetworkID:      config.NetworkID,
-		ChainID:        parseChainID(config.NetworkID),
-		NetworkPath:    config.DataDir,
-		Blockchain:     bc,
-		Wallet:         wallet,
-		DHTServerMode:  true,
-		ValidatorMode:  true, // Enable validator-specific features
-	}
-
-	// Create and start the node
-	node, err := blockchain.NewNode(networkConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create node: %v", err)
-	}
-
-	// Start the node
-	if err := node.Start(); err != nil {
-		return fmt.Errorf("failed to start node: %v", err)
-	}
-
-	// Log node information
-	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
-	log.Printf("📡 Listening on: %s", config.ListenAddr)
-
-	// 5. Connect to bootstrap nodes with retries
-	maxRetries := 5
-	retryDelay := time.Second * 5
-	connected := false
-
-	for i := 0; i < maxRetries; i++ {
-		log.Printf("📡 Attempt %d/%d: Connecting to bootstrap nodes", i+1, maxRetries)
-		if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
-			log.Printf("⚠️ Attempt %d/%d failed: %v", i+1, maxRetries, err)
-			if i < maxRetries-1 {
-				log.Printf("⏳ Waiting %v before next attempt...", retryDelay)
-				time.Sleep(retryDelay)
-				continue
-			}
-		} else {
-			connected = true
-			log.Printf("✅ Successfully connected to bootstrap nodes")
-			break
-		}
-	}
-
-	if !connected {
-		return fmt.Errorf("failed to connect to bootstrap nodes after %d attempts", maxRetries)
-	}
-
-	// 6. Create validator instance
-	validator, err := blockchain.NewValidator(bc, &blockchain.ValidatorConfig{
-		Stake:        config.ValidatorStake,
-		MinStake:     0.0,  // Set minimum stake requirement
-		RewardRate:   0.01, // 1% reward rate
-		SlashingRate: 0.5,  // 50% slashing for violations
-		BlockTimeout: 30 * time.Second,
-		MaxMissed:    10,
-	}, wallet.Address)
-	if err != nil {
-		return fmt.Errorf("failed to create validator: %v", err)
-	}
-
-	// 7. Check if this is a new blockchain
-	if bc.GetHeight() == 0 {
-		log.Printf("🌟 No existing blockchain found. Initializing as first validator...")
-		log.Printf("🌟 Creating genesis block...")
-
-		if err := bc.InitializeChain(); err != nil {
-			return fmt.Errorf("failed to initialize chain: %v", err)
-
-		}
-
-		displayGenesisBlock(bc, wallet.Address)
-		node.SetInitializedValidator(true)
-		log.Printf("🔐 Validator node activated and waiting for miner connections")
-	}
-
-	// 8. Start validator process
-	if err := validator.Start(); err != nil {
-		return fmt.Errorf("failed to start validator: %v", err)
-	}
-
-	// 9. Keep the node running
-	select {}
-}
-
-func runObserverNode(config *NodeConfig, store *blockchain.Store) {
-	log.Printf("👀 Starting Observer Node")
-
-	// Initialize blockchain
-	dbConfig := &blockchain.DatabaseConfig{
-		Type:      "leveldb",
-		Path:      filepath.Join(config.DataDir, "blockchain"),
-		CacheSize: 256,
-	}
-	bc := blockchain.InitialiseBlockchain(dbConfig)
-
-	// Initialize and start sync service
-	startSyncService(config, bc, store)
-}
-
-// Helper functions...
-func setupLogging(level string) {
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	switch strings.ToLower(level) {
-	case "debug":
-		log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Llongfile)
-	case "warn":
-		// Add custom warning prefix
-		log.SetPrefix("WARNING: ")
-	case "error":
-		// Add custom error prefix
-		log.SetPrefix("ERROR: ")
-	}
-}
-
-func setupDataDir(dataDir string) error {
-	return os.MkdirAll(dataDir, 0755)
-}
-
-func initializeDatabase(config *NodeConfig) (db.Database, *blockchain.Store) {
-	log.Printf("🔧 Initializing Database in main.go")
-
-	// Create database options
-	dbConfig := &db.Options{
-		Type:         "leveldb",
-		Path:         filepath.Join(config.DataDir, "nodedata"),
-		CacheSize:    256,
-		MaxOpenFiles: 64,
-		Compression:  true,
-	}
-
-	log.Printf("📝 Database Options Created:")
-	log.Printf("   • Type: %s", dbConfig.Type)
-	log.Printf("   • Path: %s", dbConfig.Path)
-	log.Printf("   • MaxOpenFiles: %d", dbConfig.MaxOpenFiles)
-
-	database, err := db.NewDatabase(dbConfig)
-	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
-	}
-
-	// Create store with the database interface
-	store, err := blockchain.NewStore(database)
-	if err != nil {
-		log.Fatalf("❌ Failed to create blockchain store: %v", err)
-	}
-
-	log.Printf("📦 Database initialized: %s", dbConfig.Path)
-	return database, store
-}
-
-func startSyncService(config *NodeConfig, bc *blockchain.Blockchain, store *blockchain.Store) {
-	// Get the host from the blockchain's node
-	host := bc.Node.Host
-	log.Printf("🔄 Sync Service: Running on %s", config.ListenAddr)
-
-	// Create sync service with the host
-	syncService := sync.NewSyncService(&sync.SyncConfig{
-		ListenAddr:     config.ListenAddr,
-		BootstrapNodes: config.BootstrapNodes,
-		NetworkID:      config.NetworkID,
-		EnableMetrics:  config.EnableMetrics,
-	}, bc, store, host)
-
-	// Start the sync service
-	if err := syncService.Start(config.ListenAddr); err != nil {
-		log.Printf("⚠️ Failed to start sync service: %v", err)
-		return
-	}
-
-	// Only sync with non-bootnode peers
-	for _, peerID := range bc.Node.Host.Network().Peers() {
-		// Skip bootnode peers
-		if bc.Node.IsPeerBootstrapNode(peerID) {
+		iter.Release()
+		if err := iter.Error(); err != nil {
+			log.Printf("Error counting %s: %v", prefix, err)
 			continue
 		}
+		fmt.Printf("%s: %d entries\n", strings.TrimSuffix(prefix, ":"), count)
+	}
+}
 
-		log.Printf("🔄 Attempting to sync with peer %s", peerID.String())
-		if err := syncService.SyncWithPeer(peerID); err != nil {
-			log.Printf("⚠️ Failed to sync with peer %s: %v", peerID.String(), err)
-			continue
+func getMaxBlockNumber(blocks []Block) int64 {
+	var max int64
+	for _, block := range blocks {
+		if block.BlockNumber > max {
+			max = block.BlockNumber
 		}
 	}
-
-	log.Printf("✅ Sync service started on %s", config.ListenAddr)
-}
-
-func parseRole(role string) NodeRole {
-	switch strings.ToLower(role) {
-	case "bootstrap":
-		return RoleBootstrap
-	case "miner":
-		return RoleMiner
-	case "validator":
-		return RoleValidator
-	default:
-		return RoleObserver
-	}
-}
-
-func getRoleName(role NodeRole) string {
-	switch role {
-	case RoleBootstrap:
-		return "Bootstrap Node"
-	case RoleMiner:
-		return "Miner"
-	case RoleValidator:
-		return "Validator"
-	default:
-		return "Observer"
-	}
-}
-
-func extractPort(addr string) int {
-	parts := strings.Split(addr, ":")
-	if len(parts) != 2 {
-		return 50505 // Default port
-	}
-	port := 0
-	fmt.Sscanf(parts[1], "%d", &port)
-	return port
-}
-
-type logWrapper struct {
-	*log.Logger
-}
-
-func (l *logWrapper) Debug(v ...interface{}) {
-	l.Printf("DEBUG: %v", v...)
-}
-
-func (l *logWrapper) Error(v ...interface{}) {
-	l.Printf("ERROR: %v", v...)
-}
-
-func (l *logWrapper) Info(v ...interface{}) {
-	l.Printf("INFO: %v", v...)
-}
-
-func parseChainID(networkID string) uint64 {
-	switch networkID {
-	case "mainnet":
-		return 1
-	case "testnet":
-		return 2
-	default:
-		return 3 // devnet
-	}
-}
-
-func setupWallet(dataDir string) (*blockchain.Wallet, error) {
-	walletPath := filepath.Join(dataDir, "wallet.json")
-
-	// Check if wallet exists
-	if _, err := os.Stat(walletPath); err == nil {
-		// Load existing wallet
-		log.Printf("💼 Loading existing wallet from %s", walletPath)
-		wallet, err := blockchain.LoadWalletFromFile(walletPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load wallet: %v", err)
-		}
-		log.Printf("📝 Wallet address: %s", wallet.Address)
-		return wallet, nil
-	}
-
-	// Ask user if they want to create a new wallet or restore from mnemonic
-	fmt.Println("\n💼 Wallet not found. Choose an option:")
-	fmt.Println("1. Create a new wallet")
-	fmt.Println("2. Restore from mnemonic phrase")
-
-	var choice int
-	fmt.Print("\nEnter your choice (1-2): ")
-	fmt.Scanf("%d", &choice)
-
-	var wallet *blockchain.Wallet
-	var err error
-
-	switch choice {
-	case 1:
-		// Create new wallet
-		fmt.Println("\n🔑 Creating new wallet...")
-		wallet, err = blockchain.NewWallet()
-		if err != nil {
-			return nil, fmt.Errorf("failed to create wallet: %v", err)
-		}
-
-		// Display wallet information
-		fmt.Println("\n✅ Wallet created successfully!")
-		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		fmt.Println("📝 Wallet Address:", wallet.Address)
-		fmt.Println("🔐 Public Key:", hex.EncodeToString(elliptic.Marshal(wallet.PublicKey.Curve, wallet.PublicKey.X, wallet.PublicKey.Y)))
-		privateKeyBytes, _ := wallet.PrivateKey.D.MarshalText()
-		fmt.Println("🔑 Private Key:", string(privateKeyBytes))
-		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		fmt.Println("⚠️ IMPORTANT: Write down your mnemonic phrase and keep it safe!")
-		fmt.Println("🔤 Mnemonic:", wallet.Mnemonic)
-		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-		// Ask user to confirm they've saved the mnemonic
-		fmt.Print("\nHave you saved your mnemonic phrase? (y/n): ")
-		var confirm string
-		fmt.Scanf("%s", &confirm)
-		if confirm != "y" && confirm != "Y" {
-			fmt.Println("⚠️ Please save your mnemonic phrase before continuing!")
-			fmt.Println("🔤 Mnemonic:", wallet.Mnemonic)
-			fmt.Print("\nPress Enter when you have saved it...")
-			fmt.Scanln()
-		}
-
-	case 2:
-		// Restore from mnemonic
-		fmt.Println("\n🔄 Wallet Recovery")
-		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		fmt.Println("Please enter your 12-word mnemonic phrase:")
-
-		var mnemonic string
-		// Clear any leftover input
-		bufio.NewReader(os.Stdin).ReadString('\n')
-
-		// Use ReadString instead of Scanner for more reliable input
-		fmt.Print("> ")
-		reader := bufio.NewReader(os.Stdin)
-		mnemonic, err = reader.ReadString('\n')
-		if err != nil {
-			return nil, fmt.Errorf("failed to read mnemonic: %v", err)
-		}
-
-		// Trim whitespace and newlines
-		mnemonic = strings.TrimSpace(mnemonic)
-
-		// Validate mnemonic has 12 words
-		words := strings.Fields(mnemonic)
-		if len(words) != 12 {
-			return nil, fmt.Errorf("invalid mnemonic: expected 12 words, got %d", len(words))
-		}
-
-		fmt.Println("\n🔄 Restoring wallet from mnemonic...")
-		wallet, err = blockchain.RecoverWallet(mnemonic)
-		if err != nil {
-			return nil, fmt.Errorf("failed to restore wallet: %v", err)
-		}
-
-		// Display recovered wallet information
-		fmt.Println("\n✅ Wallet recovered successfully!")
-		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		fmt.Println("📝 Wallet Address:", wallet.Address)
-		fmt.Println("🔐 Public Key:", hex.EncodeToString(elliptic.Marshal(wallet.PublicKey.Curve, wallet.PublicKey.X, wallet.PublicKey.Y)))
-		privateKeyBytes, _ := wallet.PrivateKey.D.MarshalText()
-		fmt.Println("🔑 Private Key:", string(privateKeyBytes))
-		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-	default:
-		return nil, fmt.Errorf("invalid choice")
-	}
-
-	// Save wallet
-	if err := wallet.SaveToFile(walletPath); err != nil {
-		return nil, fmt.Errorf("failed to save wallet: %v", err)
-	}
-
-	log.Printf("💼 Wallet saved to %s", walletPath)
-	log.Printf("📝 Wallet address: %s", wallet.Address)
-
-	return wallet, nil
-}
-
-// Initialize miner node
-func initMinerNode(config *NodeConfig) error {
-	log.Printf("🏗️ Initializing miner node with ID: %s", config.DataDir)
-
-	// Load or create wallet
-	wallet, err := setupWallet(config.DataDir)
-	if err != nil {
-		return err
-	}
-	log.Printf("💼 Miner wallet initialized with address: %s", wallet.Address)
-
-	// Initialize blockchain
-	log.Printf("⛓️ Initializing blockchain database at %s", config.DataDir)
-	bc, err := blockchain.NewBlockchain(config.DataDir)
-	if err != nil {
-		return err
-	}
-	log.Printf("✅ Blockchain initialized - current height: %d", bc.GetHeight())
-
-	// Initialize P2P network
-	log.Printf("🌐 Setting up P2P network on port %d", extractPort(config.ListenAddr))
-	node, err := initP2PNetwork(config, bc, wallet)
-	fmt.Println("node", node)
-	if err != nil {
-		return err
-	}
-	log.Printf("🔌 P2P network initialized - connecting to bootstrap nodes")
-
-	// Connect to bootstrap nodes
-	if len(config.BootstrapNodes) > 0 {
-		log.Printf("🔄 Connecting to %d bootstrap nodes", len(config.BootstrapNodes))
-		for _, addr := range config.BootstrapNodes {
-			log.Printf("  ↳ Attempting connection to %s", addr)
-			// Connection logic
-		}
-	}
-
-	// Start mining
-	log.Printf("⛏️ Starting mining process with address %s", wallet.Address)
-	go startMining(bc, wallet.Address)
-	log.Printf("✨ Miner node fully initialized and operational")
-
-	return nil
-}
-
-// Start mining process
-func startMining(bc *blockchain.Blockchain, minerAddress string) {
-	log.Printf("⚒️ Mining service activated for address %s", minerAddress)
-
-	for {
-		log.Printf("🔄 Starting new mining cycle")
-		block, err := bc.MineBlock(minerAddress)
-		if err != nil {
-			log.Printf("❌ Mining error: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		log.Printf("💎 Successfully mined block #%d with %d transactions",
-			block.Header.BlockNumber, len(block.Body.Transactions.GetAllTransactions()))
-		log.Printf(" Block stats: Hash: %s, Nonce: %d",
-			block.Hash(), block.Header.Nonce)
-
-		// Short pause between mining cycles
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-// Initialize validator node
-func initValidatorNode(config *NodeConfig) error {
-	log.Printf("🏗️ Initializing validator node with ID: %s", config.DataDir)
-
-	// Load or create wallet
-	wallet, err := setupWallet(config.DataDir)
-	if err != nil {
-		return err
-	}
-	log.Printf("💼 Validator wallet initialized with address: %s", wallet.Address)
-
-	// Initialize blockchain
-	log.Printf("⛓️ Initializing blockchain database at %s", config.DataDir)
-	bc, err := blockchain.NewBlockchain(config.DataDir)
-	if err != nil {
-		return err
-	}
-	log.Printf("✅ Blockchain initialized - current height: %d", bc.GetHeight())
-
-	// Initialize P2P network
-	log.Printf("🌐 Setting up P2P network on port %d", extractPort(config.ListenAddr))
-	node, err := initP2PNetwork(config, bc, wallet)
-	fmt.Println("node", node)
-	if err != nil {
-		return err
-	}
-	log.Printf("🔌 P2P network initialized - connecting to bootstrap nodes")
-
-	// Create validator config
-	validatorConfig := &blockchain.ValidatorConfig{
-		Stake:        config.ValidatorStake,
-		MinStake:     0,
-		RewardRate:   config.ValidatorStake * 0.05,
-		SlashingRate: config.ValidatorStake * 0.10,
-	}
-	log.Printf("🔐 Creating validator with stake: %.4f tokens", config.ValidatorStake)
-
-	// Initialize validator
-	validator, err := blockchain.NewValidator(bc, validatorConfig, wallet.Address)
-	if err != nil {
-		return err
-	}
-
-	// Start validation
-	log.Printf("🚀 Starting validation process")
-	if err := validator.Start(); err != nil {
-		return err
-	}
-	log.Printf("✨ Validator node fully initialized and operational")
-
-	return nil
-}
-
-// initP2PNetwork initializes the P2P network for the node
-func initP2PNetwork(config *NodeConfig, bc *blockchain.Blockchain, wallet *blockchain.Wallet) (*blockchain.Node, error) {
-	log.Printf("🔌 Initializing P2P network on %s", config.ListenAddr)
-
-	// Create network configuration
-	networkConfig := &blockchain.NetworkConfig{
-		P2PPort:        extractPort(config.ListenAddr),
-		BootstrapNodes: config.BootstrapNodes,
-		NetworkID:      config.NetworkID,
-		ChainID:        parseChainID(config.NetworkID),
-		NetworkPath:    config.DataDir,
-		Blockchain:     bc,
-		Wallet:         wallet,
-		DHTServerMode:  true,
-	}
-
-	// Create and start P2P node
-	node, err := blockchain.NewNode(networkConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create P2P node: %v", err)
-	}
-
-	// Start the node
-	if err := node.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start P2P node: %v", err)
-	}
-
-	// Connect to bootstrap nodes
-	if len(config.BootstrapNodes) > 0 {
-		log.Printf("🔄 Connecting to %d bootstrap nodes", len(config.BootstrapNodes))
-		if err := node.ConnectToBootstrapNodes(context.Background()); err != nil {
-			log.Printf("⚠️ Warning: Some bootstrap connections failed: %v", err)
-		}
-	}
-
-	return node, nil
-}
-
-// Update displayGenesisBlock to include validator address
-func displayGenesisBlock(bc *blockchain.Blockchain, validatorAddr string) {
-	genesis := bc.GetLatestBlock()
-	log.Printf("📖 Genesis Block Details:")
-	log.Printf("• Hash: %s", genesis.Hash())
-	log.Printf("• Previous Hash: %s", genesis.Header.PreviousHash)
-	log.Printf("• Validator: %s", validatorAddr)
-	log.Printf("• Timestamp: %s", time.Unix(genesis.Header.Timestamp, 0).Format(time.RFC3339))
-	log.Printf("• State Root: %s", genesis.Header.StateRoot)
-}
-
-func connectToBootstrapNodes(node *blockchain.Node, bootstrapNodes []string) error {
-	log.Printf("🔄 Connecting to %d bootstrap nodes", len(bootstrapNodes))
-	for _, addr := range bootstrapNodes {
-		log.Printf("  ↳ Attempting connection to %s", addr)
-
-		// Check if the address is already a valid multiaddr
-		if !strings.HasPrefix(addr, "/") {
-			// If it's just a peer ID, we need to construct a proper multiaddr
-			// This is a fallback in case the full multiaddr wasn't provided
-			log.Printf("⚠️ Invalid multiaddr format, attempting to fix: %s", addr)
-			continue // Skip invalid addresses
-		}
-
-		if err := node.ConnectToPeer(addr); err != nil {
-			log.Printf("⚠️ Failed to connect to bootstrap node %s: %v", addr, err)
-		}
-	}
-	return nil
+	return max
 }

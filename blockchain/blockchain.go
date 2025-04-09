@@ -816,8 +816,27 @@ func (bc *Blockchain) saveBlock(block Block) error {
 	if err := bc.db.Put([]byte("latest_block"), []byte(block.Hash())); err != nil {
 		return fmt.Errorf("failed to update latest block: %v", err)
 	}
-
 	log.Printf("📦 Block #%d saved to database", block.Header.BlockNumber)
+	// Verify block was saved correctly by retrieving it
+	savedBlock, err := bc.GetBlock(block.Hash())
+	if err != nil {
+		return fmt.Errorf("failed to verify saved block: %v", err)
+	}
+
+	// Print block information
+	log.Printf("📦 Block #%d saved and verified in database", savedBlock.Header.BlockNumber)
+	log.Printf("   • Hash: %s", savedBlock.Hash())
+	log.Printf("   • Previous Hash: %s", savedBlock.Header.PreviousHash)
+	log.Printf("   • Timestamp: %d", savedBlock.Header.Timestamp)
+	log.Printf("   • Transactions: %d", len(savedBlock.Body.Transactions.GetAllTransactions()))
+	log.Printf("   • Mined By: %s", savedBlock.Header.MinedBy)
+	log.Printf("   • Difficulty: %d", savedBlock.Header.Difficulty)
+	log.Printf("   • Gas Used: %d", savedBlock.Header.GasUsed)
+	log.Printf("   • Gas Limit: %d", savedBlock.Header.GasLimit)
+	if savedBlock.Header.ValidatedBy != "" {
+		log.Printf("   • Validated By: %s", savedBlock.Header.ValidatedBy)
+	}
+
 	return nil
 }
 
@@ -1071,4 +1090,40 @@ func (bc *Blockchain) GetStakePool() *StakePool {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 	return bc.stakePool
+}
+
+// GetBlock retrieves a block by its hash
+func (bc *Blockchain) GetBlock(hash string) (*Block, error) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	// First try to find the block in memory
+	for _, block := range bc.Chain {
+		if block.Hash() == hash {
+			return &block, nil
+		}
+	}
+
+	// If not found in memory, try to get from database
+	if bc.db != nil {
+		// Create key with block hash
+		key := db.CreateKey(db.BlockPrefix, []byte(hash))
+		data, err := bc.db.Get(key)
+		if err != nil {
+			if err == db.ErrKeyNotFound {
+				return nil, fmt.Errorf("block not found with hash %s", hash)
+			}
+			return nil, fmt.Errorf("failed to get block from database: %w", err)
+		}
+
+		// Deserialize block
+		var block Block
+		if err := json.Unmarshal(data, &block); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal block: %w", err)
+		}
+
+		return &block, nil
+	}
+
+	return nil, fmt.Errorf("block not found with hash %s", hash)
 }

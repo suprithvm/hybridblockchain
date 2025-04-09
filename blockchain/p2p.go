@@ -1615,8 +1615,12 @@ func (n *Node) Start() error {
 	// Start peer discovery
 	go n.discoverPeers()
 
-	// Start blockchain sync
-	go n.startBlockchainSync()
+	// Only start blockchain sync if this is not a genesis validator
+	if !n.IsInitializedValidator() {
+		go n.startBlockchainSync()
+	} else {
+		log.Printf("🔐 Genesis validator detected - skipping blockchain sync")
+	}
 
 	log.Printf("✅ Node started successfully with ID: %s", n.Host.ID())
 	return nil

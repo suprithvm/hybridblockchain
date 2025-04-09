@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +61,11 @@ func (sp *StakePool) AddValidator(walletAddress string, stake float64, hostID st
 	}
 	if stake < 0 {
 		return fmt.Errorf("stake amount cannot be negative")
+	}
+
+	// Log if using a temporary host ID for genesis validator
+	if strings.HasPrefix(hostID, "genesis-validator-") {
+		log.Printf("⚠️ Using temporary host ID for genesis validator: %s", hostID)
 	}
 
 	// Create or update stake info

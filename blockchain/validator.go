@@ -96,7 +96,10 @@ func NewValidator(bc *Blockchain, config *ValidatorConfig, walletAddress string)
 				nodeID = bc.Node.Host.ID().String()
 				log.Printf("📡 Using node ID: %s", nodeID)
 			} else {
-				log.Printf("⚠️ Node or Host not initialized, proceeding without node ID")
+				// Generate a temporary node ID for genesis validator
+				tempID := fmt.Sprintf("genesis-validator-%s", walletAddress[:8])
+				log.Printf("⚠️ Node or Host not initialized, using temporary node ID: %s", tempID)
+				nodeID = tempID
 			}
 
 			if err := bc.stakePool.AddValidator(walletAddress, config.Stake, nodeID); err != nil {
