@@ -169,10 +169,31 @@ func (bc *Blockchain) AddBlock(block *Block, mempool *Mempool, stakePool *StakeP
 func (bc *Blockchain) GetLatestBlock() Block {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	if len(bc.Chain) == 0 {
-		return Block{}
+
+	// If we have blocks in memory, return the latest
+	if len(bc.Chain) > 0 {
+		return bc.Chain[len(bc.Chain)-1]
 	}
-	return bc.Chain[len(bc.Chain)-1]
+
+	// If no blocks in memory, try to get from database
+	if bc.db != nil {
+		// Get latest block hash from database
+		latestHash, err := bc.db.Get([]byte("latest_block"))
+		if err == nil && len(latestHash) > 0 {
+			// Get the block data
+			blockKey := db.CreateKey(db.BlockPrefix, latestHash)
+			blockData, err := bc.db.Get(blockKey)
+			if err == nil {
+				var block Block
+				if err := json.Unmarshal(blockData, &block); err == nil {
+					return block
+				}
+			}
+		}
+	}
+
+	// If all else fails, return empty block
+	return Block{}
 }
 
 // ValidateGenesisBlock ensures all nodes use the same genesis block
@@ -812,8 +833,8 @@ func (bc *Blockchain) saveBlock(block Block) error {
 		return fmt.Errorf("failed to serialize block: %v", err)
 	}
 
-	// Save block by hash
-	blockKey := []byte("block_" + block.Hash())
+	// Save block by hash using the same key format as GetBlock
+	blockKey := db.CreateKey(db.BlockPrefix, []byte(block.Hash()))
 	if err := bc.db.Put(blockKey, blockData); err != nil {
 		return fmt.Errorf("failed to save block: %v", err)
 	}
@@ -822,25 +843,31 @@ func (bc *Blockchain) saveBlock(block Block) error {
 	if err := bc.db.Put([]byte("latest_block"), []byte(block.Hash())); err != nil {
 		return fmt.Errorf("failed to update latest block: %v", err)
 	}
-	log.Printf("📦 Block #%d saved to database", block.Header.BlockNumber)
-	// Verify block was saved correctly by retrieving it
-	savedBlock, err := bc.GetBlock(block.Hash())
-	if err != nil {
-		return fmt.Errorf("failed to verify saved block: %v", err)
-	}
 
-	// Print block information
-	log.Printf("📦 Block #%d saved and verified in database", savedBlock.Header.BlockNumber)
-	log.Printf("   • Hash: %s", savedBlock.Hash())
-	log.Printf("   • Previous Hash: %s", savedBlock.Header.PreviousHash)
-	log.Printf("   • Timestamp: %d", savedBlock.Header.Timestamp)
-	log.Printf("   • Transactions: %d", len(savedBlock.Body.Transactions.GetAllTransactions()))
-	log.Printf("   • Mined By: %s", savedBlock.Header.MinedBy)
-	log.Printf("   • Difficulty: %d", savedBlock.Header.Difficulty)
-	log.Printf("   • Gas Used: %d", savedBlock.Header.GasUsed)
-	log.Printf("   • Gas Limit: %d", savedBlock.Header.GasLimit)
-	if savedBlock.Header.ValidatedBy != "" {
-		log.Printf("   • Validated By: %s", savedBlock.Header.ValidatedBy)
+	log.Printf("📦 Block #%d saved to database", block.Header.BlockNumber)
+
+	// Verify block was saved correctly using a separate function that doesn't cause deadlock
+	if err := bc.verifyBlockInDB(block.Hash(), block); err != nil {
+		log.Printf("⚠️ Warning: Block verification failed: %v", err)
+	} else {
+		log.Printf("✅ Block #%d verified in database", block.Header.BlockNumber)
+		log.Printf("   • Hash: %s", block.hash)
+		log.Printf("   • Previous Hash: %s", block.Header.PreviousHash)
+		log.Printf("   • Timestamp: %s (%d)", time.Unix(block.Header.Timestamp, 0).Format(time.RFC3339), block.Header.Timestamp)
+		log.Printf("   • Transactions: %d", len(block.Body.Transactions.GetAllTransactions()))
+		log.Printf("   • Mined By: %s", block.Header.MinedBy)
+		log.Printf("   • Validated By: %s", block.Header.ValidatedBy)
+		log.Printf("   • Difficulty: %d", block.Header.Difficulty)
+		log.Printf("   • Gas Used: %d", block.Header.GasUsed)
+		log.Printf("   • Gas Limit: %d", block.Header.GasLimit)
+		log.Printf("   • Version: %d", block.Header.Version)
+		log.Printf("   • State Root: %s", block.Header.StateRoot)
+		log.Printf("   • Merkle Root: %s", block.Header.MerkleRoot)
+		log.Printf("   • Receipts Root: %s", block.Header.ReceiptsRoot)
+		log.Printf("   • Block Size: %d bytes", block.Size())
+		if len(block.Header.ExtraData) > 0 {
+			log.Printf("   • Extra Data: %x", block.Header.ExtraData)
+		}
 	}
 
 	return nil
@@ -850,6 +877,34 @@ func (bc *Blockchain) saveBlock(block Block) error {
 // Serialize converts a block to bytes
 func (b Block) Serialize() ([]byte, error) {
 	return json.Marshal(b)
+}
+
+// verifyBlockInDB verifies that a block exists in the database without using the blockchain's mutex
+// This avoids deadlock when called from saveBlock
+func (bc *Blockchain) verifyBlockInDB(hash string, expectedBlock Block) error {
+	if bc.db == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	// Get the block directly from the database without using the blockchain's mutex
+	key := db.CreateKey(db.BlockPrefix, []byte(hash))
+	blockData, err := bc.db.Get(key)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve block from database: %v", err)
+	}
+
+	// Deserialize the block data
+	var block Block
+	if err := json.Unmarshal(blockData, &block); err != nil {
+		return fmt.Errorf("failed to deserialize block data: %v", err)
+	}
+
+	// Verify the block matches what we expected
+	if block.Hash() != expectedBlock.Hash() {
+		return fmt.Errorf("block hash mismatch: expected %s, got %s", expectedBlock.Hash(), block.Hash())
+	}
+
+	return nil
 }
 
 // InitializeChain initializes a new blockchain with a genesis block
@@ -884,14 +939,16 @@ func (bc *Blockchain) InitializeChain() error {
 	// Calculate state root for genesis block
 	genesisBlock.Header.StateRoot = calculateStateRoot(bc.utxoSet)
 
-	// Save genesis block
+	// Save genesis block to database
 	if err := bc.saveBlock(genesisBlock); err != nil {
 		return fmt.Errorf("failed to save genesis block: %v", err)
 	}
 
-	log.Printf("🎉 Genesis block created with hash: %s", genesisBlock.Hash())
-	bc.currentHash = genesisBlock.Hash()
+	// Add genesis block to in-memory chain
+	bc.Chain = append(bc.Chain, genesisBlock)
+	bc.currentHash = genesisBlock.hash
 
+	log.Printf("🎉 Genesis block created with hash: %s", genesisBlock.hash)
 	return nil
 }
 
@@ -1098,38 +1155,50 @@ func (bc *Blockchain) GetStakePool() *StakePool {
 	return bc.StakePool
 }
 
-// GetBlock retrieves a block by its hash
+// GetBlock retrieves a block by its hash from either memory or database
 func (bc *Blockchain) GetBlock(hash string) (*Block, error) {
+	// Use read lock for thread safety
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
+
+	log.Printf("🔍 Attempting to retrieve block with hash: %s", hash)
 
 	// First try to find the block in memory
 	for _, block := range bc.Chain {
 		if block.Hash() == hash {
+			log.Printf("✅ Block found in memory")
 			return &block, nil
 		}
 	}
+	log.Printf("⚠️ Block not found in memory, checking database")
 
-	// If not found in memory, try to get from database
+	// If not found in memory, try to find it in the database
 	if bc.db != nil {
-		// Create key with block hash
 		key := db.CreateKey(db.BlockPrefix, []byte(hash))
-		data, err := bc.db.Get(key)
+		log.Printf("🔑 Using database key: %x", key)
+
+		blockData, err := bc.db.Get(key)
 		if err != nil {
 			if err == db.ErrKeyNotFound {
-				return nil, fmt.Errorf("block not found with hash %s", hash)
+				log.Printf("❌ Block not found in database: %v", err)
+				return nil, fmt.Errorf("block with hash %s not found", hash)
 			}
-			return nil, fmt.Errorf("failed to get block from database: %w", err)
+			log.Printf("❌ Database error: %v", err)
+			return nil, fmt.Errorf("failed to retrieve block from database: %v", err)
 		}
+		log.Printf("✅ Block data retrieved from database, size: %d bytes", len(blockData))
 
-		// Deserialize block
+		// Deserialize the block data
 		var block Block
-		if err := json.Unmarshal(data, &block); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal block: %w", err)
+		if err := json.Unmarshal(blockData, &block); err != nil {
+			log.Printf("❌ Failed to deserialize block data: %v", err)
+			return nil, fmt.Errorf("failed to deserialize block data: %v", err)
 		}
+		log.Printf("✅ Block successfully deserialized")
 
 		return &block, nil
 	}
 
-	return nil, fmt.Errorf("block not found with hash %s", hash)
+	log.Printf("❌ Database not initialized")
+	return nil, fmt.Errorf("block with hash %s not found", hash)
 }

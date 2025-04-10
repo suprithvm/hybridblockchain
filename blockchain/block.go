@@ -132,11 +132,13 @@ func NewBlock(previousBlock Block, mempool *Mempool, utxoSet map[string]UTXO, di
 }
 
 // Hash calculates the hash of the block
-func (b Block) Hash() string {
+func (b *Block) Hash() string {
+	// Return cached hash if available
 	if b.hash != "" {
 		return b.hash
 	}
 
+	// Calculate hash if not cached
 	header := b.Header
 	data := fmt.Sprintf("%d%d%s%d%s%s%s%d%d",
 		header.Version,

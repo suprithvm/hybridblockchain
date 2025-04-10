@@ -173,6 +173,7 @@ func (v *Validator) validate() {
 	defer ticker.Stop()
 
 	log.Printf("👀 Validator watching for new blocks - last processed: #%d", v.lastBlock)
+	log.Printf("🔍 Validator status: Active=%v, Stake=%.4f, Score=%d", v.isValidating, v.config.Stake, v.Score)
 
 	for range ticker.C {
 		if !v.isValidating {
@@ -182,16 +183,26 @@ func (v *Validator) validate() {
 
 		// Get latest block
 		currentBlock := v.blockchain.GetLatestBlock()
+		if currentBlock.Header.BlockNumber == 0 {
+			log.Printf("⏳ Waiting for genesis block...")
+			continue
+		}
 
 		// Check if we missed any blocks
 		if currentBlock.Header.BlockNumber > v.lastBlock+1 {
 			missed := currentBlock.Header.BlockNumber - v.lastBlock - 1
+			log.Printf("⚠️ Missed %d blocks between #%d and #%d", missed, v.lastBlock, currentBlock.Header.BlockNumber)
 			v.handleMissedBlocks(int(missed))
 		}
 
 		// Validate new block if available
 		if currentBlock.Header.BlockNumber > v.lastBlock {
 			log.Printf("🔍 New block #%d detected - beginning validation", currentBlock.Header.BlockNumber)
+			log.Printf("   • Hash: %s", currentBlock.Hash())
+			log.Printf("   • Previous Hash: %s", currentBlock.Header.PreviousHash)
+			log.Printf("   • Timestamp: %s", time.Unix(currentBlock.Header.Timestamp, 0).Format(time.RFC3339))
+			log.Printf("   • Transactions: %d", len(currentBlock.Body.Transactions.GetAllTransactions()))
+
 			if err := v.validateBlock(currentBlock); err != nil {
 				log.Printf("❌ Block validation failed: %v", err)
 				continue
@@ -199,6 +210,8 @@ func (v *Validator) validate() {
 			log.Printf("✅ Block #%d successfully validated", currentBlock.Header.BlockNumber)
 			v.lastBlock = currentBlock.Header.BlockNumber
 			v.distributeRewards(currentBlock)
+		} else {
+			log.Printf("👀 Waiting for new blocks... Current height: #%d", currentBlock.Header.BlockNumber)
 		}
 	}
 }

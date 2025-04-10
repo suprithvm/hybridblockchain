@@ -428,9 +428,10 @@ func (s *SyncService) broadcastGenesisBlock() error {
 
 func (s *SyncService) sendChainToPeer(stream network.Stream, startHeight, endHeight uint64) error {
 	// Send chain info first
+	latestBlock := s.blockchain.GetLatestBlock()
 	chainInfo := &ChainInfo{
 		Height:        endHeight,
-		LastBlockHash: s.blockchain.GetLatestBlock().Hash(),
+		LastBlockHash: (&latestBlock).Hash(),
 		StateRoot:     s.blockchain.CalculateStateHash(),
 	}
 

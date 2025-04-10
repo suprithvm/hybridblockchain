@@ -382,7 +382,8 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) error {
 	if err != nil {
 		return fmt.Errorf("failed to create validator: %v", err)
 	}
-	
+	log.Printf("✅ Validator instance created with stake: %.2f", config.ValidatorStake)
+
 	// Ensure the validator is properly registered with the blockchain
 	if bc.GetHeight() == 0 {
 		log.Printf("🔐 Ensuring validator is properly registered with blockchain")
@@ -405,18 +406,24 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) error {
 
 		if err := bc.InitializeChain(); err != nil {
 			return fmt.Errorf("failed to initialize chain: %v", err)
-
 		}
 
 		displayGenesisBlock(bc, wallet.Address)
 		node.SetInitializedValidator(true)
 		log.Printf("🔐 Validator node activated and waiting for miner connections")
+	} else {
+		log.Printf("📊 Existing blockchain found at height: %d", bc.GetHeight())
+		log.Printf("🔍 Validator will start validating from the current state")
 	}
 
 	// 8. Start validator process
+	log.Printf("🚀 Starting validator process...")
 	if err := validator.Start(); err != nil {
 		return fmt.Errorf("failed to start validator: %v", err)
 	}
+	log.Printf("✅ Validator process started successfully")
+	log.Printf("📡 Validator is now active and monitoring the network")
+	log.Printf("💰 Current stake: %.2f", config.ValidatorStake)
 
 	// 9. Keep the node running
 	select {}
@@ -866,11 +873,20 @@ func initP2PNetwork(config *NodeConfig, bc *blockchain.Blockchain, wallet *block
 func displayGenesisBlock(bc *blockchain.Blockchain, validatorAddr string) {
 	genesis := bc.GetLatestBlock()
 	log.Printf("📖 Genesis Block Details:")
+	log.Printf("• Block Number: %d", genesis.Header.BlockNumber)
 	log.Printf("• Hash: %s", genesis.Hash())
 	log.Printf("• Previous Hash: %s", genesis.Header.PreviousHash)
 	log.Printf("• Validator: %s", validatorAddr)
-	log.Printf("• Timestamp: %s", time.Unix(genesis.Header.Timestamp, 0).Format(time.RFC3339))
+	log.Printf("• Timestamp: %s (%d)", time.Unix(genesis.Header.Timestamp, 0).Format(time.RFC3339), genesis.Header.Timestamp)
 	log.Printf("• State Root: %s", genesis.Header.StateRoot)
+	log.Printf("• Merkle Root: %s", genesis.Header.MerkleRoot)
+	log.Printf("• Receipts Root: %s", genesis.Header.ReceiptsRoot)
+	log.Printf("• Difficulty: %d", genesis.Header.Difficulty)
+	log.Printf("• Gas Limit: %d", genesis.Header.GasLimit)
+	log.Printf("• Gas Used: %d", genesis.Header.GasUsed)
+	log.Printf("• Version: %d", genesis.Header.Version)
+	log.Printf("• Transaction Count: %d", genesis.TransactionCount())
+	log.Printf("• Block Size: %d bytes", genesis.Size())
 }
 
 func connectToBootstrapNodes(node *blockchain.Node, bootstrapNodes []string) error {
