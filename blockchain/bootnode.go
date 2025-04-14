@@ -403,6 +403,8 @@ func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
 	return bn, nil
 }
 
+
+
 // GetMultiaddr returns the complete multiaddr string for the bootnode
 func (config *BootstrapNodeConfig) GetMultiaddr(peerID peer.ID) string {
 	// Local address

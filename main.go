@@ -144,7 +144,9 @@ func runBootstrapNode(config *NodeConfig) {
 		log.Fatalf("❌ Failed to create bootstrap node: %v", err)
 	}
 
-	log.Printf("node",node)
+	if err := node.Start(); err != nil {
+		log.Fatalf("❌ Failed to start bootstrap node: %v", err)
+	}
 
 	log.Printf("✅ Bootstrap node is running on %s", config.ListenAddr)
 }

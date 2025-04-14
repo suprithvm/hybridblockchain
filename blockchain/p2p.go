@@ -155,29 +155,18 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		return nil, fmt.Errorf("failed to create host: %v", err)
 	}
 
-	// Initialize DHT with server mode if specified
-	var bootstrapPeers []peer.AddrInfo
-	for _, addr := range config.BootstrapNodes {
-		if ma, err := ma.NewMultiaddr(addr); err == nil {
-			if pi, err := peer.AddrInfoFromP2pAddr(ma); err == nil {
-				bootstrapPeers = append(bootstrapPeers, *pi)
-			}
-		}
-	}
-
-	dhtOpts := []dht.Option{
-		dht.ProtocolPrefix("/hybrid"),
-		dht.Mode(dht.ModeServer),
-		dht.BootstrapPeers(bootstrapPeers...),
-		dht.RoutingTableRefreshPeriod(10 * time.Minute),
-		dht.RoutingTableLatencyTolerance(5 * time.Second),
-	}
-
-	kadDHT, err := dht.New(ctx, host, dhtOpts...)
+	// Initialize DHT with server mode
+	log.Printf("🔄 Initializing DHT in server mode...")
+	kadDHT, err := dht.New(ctx, host, dht.Mode(dht.ModeServer))
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create DHT: %v", err)
 	}
+
+	log.Printf("✅ DHT initialized successfully")
+	log.Printf("📊 DHT Status:")
+	log.Printf("• Routing Table Size: %d", kadDHT.RoutingTable().Size())
+	log.Printf("• Connected Peers: %d", len(host.Network().Peers()))
 
 	// Create keep-alive context
 	keepAliveCtx, keepAliveCancel := context.WithCancel(ctx)
@@ -701,25 +690,48 @@ func (n *Node) StartHeartbeat() {
 
 // bootstrapDHT bootstraps the DHT and connects to initial peers
 func (n *Node) bootstrapDHT(ctx context.Context) error {
+	log.Printf("🔄 Starting DHT bootstrap process...")
+	log.Printf("📊 Initial DHT Status:")
+	log.Printf("• Routing Table Size: %d", n.DHT.RoutingTable().Size())
+	log.Printf("• Connected Peers: %d", len(n.Host.Network().Peers()))
+	log.Printf("• Bootstrap Peers: %d", len(n.config.BootstrapNodes))
+
 	// Bootstrap the DHT
+	log.Printf("🔍 Attempting to bootstrap DHT...")
 	if err := n.DHT.Bootstrap(ctx); err != nil {
-		return fmt.Errorf("failed to bootstrap DHT: %w", err)
+		log.Printf("❌ DHT bootstrap failed: %v", err)
+		return fmt.Errorf("failed to bootstrap DHT: %v", err)
 	}
 
-	// Connect to bootstrap peers
-	bootstrapPeers := n.DHT.RoutingTable().ListPeers()
-	for _, peer := range bootstrapPeers {
-		if peer == n.Host.ID() {
-			continue
-		}
+	// Wait for routing table to populate
+	log.Printf("⏳ Waiting for routing table to populate...")
+	ticker := time.NewTicker(100 * time.Millisecond)
+	timeout := time.After(10 * time.Second)
 
-		peerInfo := n.Host.Peerstore().PeerInfo(peer)
-		if err := n.Host.Connect(ctx, peerInfo); err != nil {
-			log.Printf("Failed to connect to bootstrap peer %s: %v", peer, err)
+	for {
+		select {
+		case <-ticker.C:
+			rtSize := n.DHT.RoutingTable().Size()
+			connCount := len(n.Host.Network().Peers())
+			log.Printf("📊 DHT Status Update:")
+			log.Printf("• Routing Table Size: %d", rtSize)
+			log.Printf("• Connected Peers: %d", connCount)
+
+			if rtSize > 0 {
+				log.Printf("✅ DHT bootstrap completed successfully")
+				ticker.Stop()
+				return nil
+			}
+		case <-timeout:
+			log.Printf("⚠️ DHT bootstrap timeout - continuing with current state")
+			ticker.Stop()
+			return nil
+		case <-ctx.Done():
+			log.Printf("⚠️ DHT bootstrap cancelled")
+			ticker.Stop()
+			return ctx.Err()
 		}
 	}
-
-	return nil
 }
 
 // ConnectToPeer connects to a peer using multiaddr
@@ -1614,12 +1626,14 @@ func (n *Node) Start() error {
 	n.isRunning = true
 	n.runningMu.Unlock()
 
-	// Start DHT bootstrap
+	// Bootstrap DHT
+	log.Printf("🔄 Starting DHT bootstrap...")
 	if err := n.bootstrapDHT(n.ctx); err != nil {
 		return fmt.Errorf("failed to bootstrap DHT: %v", err)
 	}
 
 	// Start peer discovery
+	log.Printf("🔍 Starting peer discovery...")
 	go n.discoverPeers()
 
 	// Only start blockchain sync if this is not a genesis validator
@@ -1843,19 +1857,28 @@ func (n *Node) SyncWithPeer(peer peer.ID) error {
 }
 
 func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, error) {
+	log.Printf("🔍 Starting peer discovery with rendezvous...")
 	routingDiscovery := discovery.NewRoutingDiscovery(n.DHT)
 	discoveryTag := fmt.Sprintf("blockchain/%s", n.NetworkID)
+	log.Printf("📝 Using discovery tag: %s", discoveryTag)
 
 	// Advertise ourselves
+	log.Printf("📢 Advertising node %s...", n.Host.ID())
 	ttl, err := routingDiscovery.Advertise(ctx, discoveryTag)
 	if err != nil {
+		log.Printf("❌ Failed to advertise: %v", err)
+		log.Printf("📊 DHT Status:")
+		log.Printf("• Routing Table Size: %d", n.DHT.RoutingTable().Size())
+		log.Printf("• Connected Peers: %d", len(n.Host.Network().Peers()))
 		return nil, fmt.Errorf("failed to advertise: %v", err)
 	}
-	log.Printf("📢 Advertising with TTL: %v", ttl)
+	log.Printf("✅ Successfully advertised with TTL: %v", ttl)
 
 	// Find peers
+	log.Printf("🔍 Finding peers with tag: %s", discoveryTag)
 	peerChan, err := routingDiscovery.FindPeers(ctx, discoveryTag)
 	if err != nil {
+		log.Printf("❌ Failed to find peers: %v", err)
 		return nil, fmt.Errorf("failed to find peers: %v", err)
 	}
 
@@ -1863,22 +1886,30 @@ func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, er
 	var peers []peer.AddrInfo
 	for p := range peerChan {
 		if p.ID == n.Host.ID() {
-			continue // Skip ourselves
+			log.Printf("⏭️ Skipping self: %s", p.ID)
+			continue
 		}
 
 		// Skip if it's a bootnode
 		if n.IsPeerBootstrapNode(p.ID) {
+			log.Printf("⏭️ Skipping bootnode: %s", p.ID)
 			continue
 		}
 
 		// Skip if we're already connected
 		if n.Host.Network().Connectedness(p.ID) == network.Connected {
+			log.Printf("⏭️ Skipping already connected peer: %s", p.ID)
 			continue
 		}
 
 		peers = append(peers, p)
 		log.Printf("🔍 Found potential peer: %s", p.ID)
 	}
+
+	log.Printf("📊 Peer discovery results:")
+	log.Printf("• Total peers found: %d", len(peers))
+	log.Printf("• Current connections: %d", len(n.Host.Network().Peers()))
+	log.Printf("• DHT routing table size: %d", n.DHT.RoutingTable().Size())
 
 	return peers, nil
 }
