@@ -769,40 +769,7 @@ func (bn *BootstrapNode) collectMetrics() {
 	}
 }
 
-// Start starts the bootstrap node
-func (bn *BootstrapNode) Start() error {
-	log.Printf("🚀 Starting bootstrap node...")
 
-	// Check if already started
-	bn.mu.Lock()
-	if bn.started {
-		bn.mu.Unlock()
-		return nil
-	}
-	bn.started = true
-	bn.mu.Unlock()
-
-	// Initialize protocols
-	if err := bn.initializeProtocols(); err != nil {
-		return fmt.Errorf("failed to initialize protocols: %v", err)
-	}
-
-	// Start network services
-	if err := bn.startNetworkServices(); err != nil {
-		return fmt.Errorf("failed to start network services: %v", err)
-	}
-
-	// Start periodic tasks
-	bn.startPeriodicTasks()
-
-	log.Printf("✅ Bootstrap node started successfully")
-	log.Printf("📡 Listening on:")
-	for _, addr := range bn.host.Addrs() {
-		log.Printf("   %s/p2p/%s", addr, bn.host.ID())
-	}
-
-	return nil
-}
 
 // sendWelcomeMessage sends a welcome message to a newly connected peer
 func (bn *BootstrapNode) sendWelcomeMessage(peerID peer.ID) {
@@ -1158,37 +1125,7 @@ func (ps *PersistentPeerStore) GetPeers() []peer.AddrInfo {
 	return peers
 }
 
-// Example usage function for running a bootstrap node
-func RunBootstrapNode() {
-	// Create bootstrap node configuration
-	config := &BootstrapNodeConfig{
-		ListenPort:         BlockchainDefaultPort,
-		PublicIP:           "",
-		KeyFile:            "",
-		EnableRelay:        false,
-		EnableNAT:          true,
-		EnablePeerExchange: true,
-		// Optional: Add seed nodes if known
-		// SeedNodes: []peer.AddrInfo{
-		//     {ID: peerID1, Addrs: []multiaddr.Multiaddr{addr1}},
-		//     {ID: peerID2, Addrs: []multiaddr.Multiaddr{addr2}},
-		// },
-	}
 
-	// Create bootstrap node
-	bootstrapNode, err := NewBootstrapNode(config)
-	if err != nil {
-		log.Fatalf("Failed to create bootstrap node: %v", err)
-	}
-
-	// Start the bootstrap node
-	if err := bootstrapNode.Start(); err != nil {
-		log.Fatalf("Failed to start bootstrap node: %v", err)
-	}
-
-	// Keep the bootstrap node running
-	select {}
-}
 
 // Add these handler methods
 func (bn *BootstrapNode) handleRelay(stream network.Stream) {

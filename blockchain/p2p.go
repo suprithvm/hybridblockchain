@@ -156,9 +156,21 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 	}
 
 	// Initialize DHT with server mode if specified
-	dhtOpts := []dht.Option{dht.ProtocolPrefix("/hybrid")}
-	if config.DHTServerMode {
-		dhtOpts = append(dhtOpts, dht.Mode(dht.ModeServer))
+	var bootstrapPeers []peer.AddrInfo
+	for _, addr := range config.BootstrapNodes {
+		if ma, err := ma.NewMultiaddr(addr); err == nil {
+			if pi, err := peer.AddrInfoFromP2pAddr(ma); err == nil {
+				bootstrapPeers = append(bootstrapPeers, *pi)
+			}
+		}
+	}
+
+	dhtOpts := []dht.Option{
+		dht.ProtocolPrefix("/hybrid"),
+		dht.Mode(dht.ModeServer),
+		dht.BootstrapPeers(bootstrapPeers...),
+		dht.RoutingTableRefreshPeriod(10 * time.Minute),
+		dht.RoutingTableLatencyTolerance(5 * time.Second),
 	}
 
 	kadDHT, err := dht.New(ctx, host, dhtOpts...)
@@ -265,11 +277,6 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 
 	// Start heartbeat
 	go node.StartHeartbeat()
-
-	// Bootstrap DHT
-	if err := node.bootstrapDHT(ctx); err != nil {
-		log.Printf("⚠️ DHT bootstrap failed: %v", err)
-	}
 
 	return node, nil
 }
@@ -1639,6 +1646,13 @@ func (n *Node) discoverPeers() {
 	ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
 	defer cancel()
 
+	// Bootstrap DHT if not already bootstrapped
+	if err := n.DHT.Bootstrap(ctx); err != nil {
+		log.Printf("⚠️ Failed to bootstrap DHT: %v", err)
+		return
+	}
+
+	// Find peers through DHT
 	peers, err := n.findPeersWithRendezvous(ctx)
 	if err != nil {
 		log.Printf("⚠️ Peer discovery error: %v", err)
@@ -1658,8 +1672,12 @@ func (n *Node) discoverPeers() {
 		}
 
 		if err := n.Host.Connect(ctx, peerInfo); err != nil {
+			log.Printf("⚠️ Failed to connect to peer %s: %v", peerInfo.ID, err)
 			continue
 		}
+
+		log.Printf("✅ Connected to new peer: %s", peerInfo.ID)
+		n.PeerManager.AddPeer(peerInfo.ID)
 	}
 
 	// Log final peer count
@@ -1833,7 +1851,7 @@ func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to advertise: %v", err)
 	}
-	log.Printf("Advertising with TTL: %v", ttl)
+	log.Printf("📢 Advertising with TTL: %v", ttl)
 
 	// Find peers
 	peerChan, err := routingDiscovery.FindPeers(ctx, discoveryTag)
@@ -1847,7 +1865,19 @@ func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, er
 		if p.ID == n.Host.ID() {
 			continue // Skip ourselves
 		}
+
+		// Skip if it's a bootnode
+		if n.IsPeerBootstrapNode(p.ID) {
+			continue
+		}
+
+		// Skip if we're already connected
+		if n.Host.Network().Connectedness(p.ID) == network.Connected {
+			continue
+		}
+
 		peers = append(peers, p)
+		log.Printf("🔍 Found potential peer: %s", p.ID)
 	}
 
 	return peers, nil
