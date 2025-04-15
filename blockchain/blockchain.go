@@ -493,8 +493,26 @@ func (bc *Blockchain) ValidateBlock(block *Block) error {
 func (bc *Blockchain) AddBlockWithoutValidation(block *Block) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
+	
 
+	// Verify block number
+	if block.Header.BlockNumber != bc.GetHeight()+1 {
+		return fmt.Errorf("invalid block number: expected %d, got %d", bc.GetHeight()+1, block.Header.BlockNumber)
+	}
+
+	// Verify previous hash
+	if block.Header.BlockNumber > 0 {
+		prevBlock := bc.GetLatestBlock()
+		if prevBlock.hash != block.Header.PreviousHash {
+			return fmt.Errorf("invalid previous hash: expected %s, got %s", prevBlock.hash, block.Header.PreviousHash)
+		}
+	}
+
+	// Add block to chain
 	bc.Chain = append(bc.Chain, *block)
+	bc.currentHash = block.hash
+
+	log.Printf("Added block #%d to chain without validation", block.Header.BlockNumber)
 	return nil
 }
 

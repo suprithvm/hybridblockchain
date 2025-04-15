@@ -53,7 +53,7 @@ const (
 const (
 	MessageTypeValidatorRequest  = "validator_request"
 	MessageTypeValidatorResponse = "validator_response"
-	ProtocolID                  = "/blockchain/1.0.0"
+	ProtocolID                   = "/blockchain/1.0.0"
 )
 
 // NodeOptions contains options for creating a node
@@ -1985,8 +1985,8 @@ func (n *Node) SyncWithPeer(peer peer.ID) error {
 		log.Printf("   • Validator: %s", block.Header.ValidatedBy)
 		log.Printf("   • Transaction Count: %d", len(block.Body.Transactions.GetAllTransactions()))
 
-		// Validate and add block
-		if err := n.Blockchain.AddBlock(&block, n.Mempool, n.StakePool, n.UTXOSet.GetUTXOs(), n.Host); err != nil {
+		// Add block without validation for sync
+		if err := n.Blockchain.AddBlockWithoutValidation(&block); err != nil {
 			log.Printf("⚠️ Failed to add block #%d: %v", block.Header.BlockNumber, err)
 			continue
 		}
