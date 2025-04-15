@@ -124,6 +124,18 @@ func (bc *Blockchain) AddBlock(block *Block, mempool *Mempool, stakePool *StakeP
 		return bc.addBlockWithoutValidation(block)
 	}
 
+	// Check if we have any validators in the stake pool
+	if len(stakePool.Stakes) == 0 {
+		log.Printf("⚠️ No validators available in stake pool, attempting to sync...")
+		if host != nil {
+			// Broadcast a request for validator information
+			if err := bc.node.BroadcastValidatorRequest(); err != nil {
+				log.Printf("Failed to broadcast validator request: %v", err)
+			}
+		}
+		return fmt.Errorf("no validators available")
+	}
+
 	// Select validator
 	validatorWallet, validatorHost, err := stakePool.SelectValidator(host)
 	if err != nil {

@@ -49,6 +49,13 @@ const (
 	SyncProtocol           = "/blockchain/sync/1.0.0"
 )
 
+// Add message type constants at the top of the file
+const (
+	MessageTypeValidatorRequest  = "validator_request"
+	MessageTypeValidatorResponse = "validator_response"
+	ProtocolID                  = "/blockchain/1.0.0"
+)
+
 // NodeOptions contains options for creating a node
 type NodeOptions struct {
 	ListenAddr     string
@@ -2168,4 +2175,74 @@ func (n *Node) IsInitializedValidator() bool {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.isInitializedValidator
+}
+
+// BroadcastValidatorRequest broadcasts a validator request to all connected peers
+func (n *Node) BroadcastValidatorRequest() error {
+	// Create a validator request message
+	msg := &Message{
+		Type:    MessageTypeValidatorRequest,
+		Payload: []byte("request_validators"),
+	}
+
+	// Broadcast to all connected peers
+	for _, peer := range n.Host.Network().Peers() {
+		if err := n.SendMessage(peer, msg); err != nil {
+			log.Printf("Failed to send validator request to peer %s: %v", peer.String(), err)
+		}
+	}
+
+	return nil
+}
+
+// HandleValidatorRequest handles validator request messages from peers
+func (n *Node) HandleValidatorRequest(peerID peer.ID, msg *Message) error {
+	// Get validator information from stake pool
+	validatorInfo, err := n.StakePool.GetValidatorInfo()
+	if err != nil {
+		return err
+	}
+
+	// Create response message
+	response := &Message{
+		Type:    MessageTypeValidatorResponse,
+		Payload: validatorInfo,
+	}
+
+	// Send response to requesting peer
+	return n.SendMessage(peerID, response)
+}
+
+// HandleValidatorResponse handles validator response messages from peers
+func (n *Node) HandleValidatorResponse(peerID peer.ID, msg *Message) error {
+	// Update stake pool with received validator information
+	payload, ok := msg.Payload.([]byte)
+	if !ok {
+		return fmt.Errorf("invalid payload type: expected []byte")
+	}
+	if err := n.StakePool.UpdateValidators(payload); err != nil {
+		return err
+	}
+
+	log.Printf("✅ Updated validator information from peer %s", peerID.String())
+	return nil
+}
+
+// SendMessage sends a message to a specific peer
+func (n *Node) SendMessage(peerID peer.ID, msg *Message) error {
+	// Serialize the message
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+
+	// Send the message
+	stream, err := n.Host.NewStream(context.Background(), peerID, protocol.ID(ProtocolID))
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+
+	_, err = stream.Write(data)
+	return err
 }

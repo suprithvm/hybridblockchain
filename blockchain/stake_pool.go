@@ -36,6 +36,7 @@ type StakePool struct {
 	Stakes       map[string]*StakeInfo // Wallet address -> Stake info
 	WalletToHost map[string]string     // Wallet address -> Host ID mapping
 	mu           sync.Mutex            // Protects concurrent access
+	stateRoot    string                // Added for GetValidatorInfo
 }
 
 // NewStakePool initializes a new StakePool.
@@ -450,4 +451,49 @@ func (sp *StakePool) mergeStakes(peerStakes map[string]StakeInfo) {
 			log.Printf("📝 Updated stake for validator %s to %d", validator, peerStake.Amount)
 		}
 	}
+}
+
+// GetValidatorInfo returns the current validator information
+func (sp *StakePool) GetValidatorInfo() ([]byte, error) {
+	// Get all validators
+	validators, err := sp.GetValidators(0) // Get all validators
+	if err != nil {
+		return nil, err
+	}
+
+	// Create validator info struct
+	info := struct {
+		Validators []ValidatorNode `json:"validators"`
+		StateRoot  string          `json:"state_root"`
+	}{
+		Validators: validators,
+		StateRoot:  sp.stateRoot,
+	}
+
+	// Marshal to JSON
+	return json.Marshal(info)
+}
+
+// UpdateValidators updates the stake pool with received validator information
+func (sp *StakePool) UpdateValidators(data []byte) error {
+	// Unmarshal validator info
+	var info struct {
+		Validators []ValidatorNode `json:"validators"`
+		StateRoot  string          `json:"state_root"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		return err
+	}
+
+	// Update validators
+	for _, validator := range info.Validators {
+		if err := sp.AddStake(validator.Address, validator.hostID, float64(validator.Stake)); err != nil {
+			return err
+		}
+	}
+
+	// Update state root
+	sp.stateRoot = info.StateRoot
+
+	return nil
 }
