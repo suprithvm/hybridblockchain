@@ -493,26 +493,39 @@ func (bc *Blockchain) ValidateBlock(block *Block) error {
 func (bc *Blockchain) AddBlockWithoutValidation(block *Block) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
-	
 
-	// Verify block number
+	// Special case for genesis block
+	if block.Header.BlockNumber == 0 {
+		// If this is the first block in the chain, add it
+		if len(bc.Chain) == 0 {
+			bc.Chain = append(bc.Chain, *block)
+			bc.currentHash = block.hash
+			log.Printf("✅ Added genesis block to chain")
+			return nil
+		}
+		// If we already have a genesis block, verify it matches
+		if bc.Chain[0].Hash() != block.Hash() {
+			return fmt.Errorf("genesis block mismatch")
+		}
+		return nil
+	}
+
+	// For non-genesis blocks, verify block number
 	if block.Header.BlockNumber != bc.GetHeight()+1 {
 		return fmt.Errorf("invalid block number: expected %d, got %d", bc.GetHeight()+1, block.Header.BlockNumber)
 	}
 
 	// Verify previous hash
-	if block.Header.BlockNumber > 0 {
-		prevBlock := bc.GetLatestBlock()
-		if prevBlock.hash != block.Header.PreviousHash {
-			return fmt.Errorf("invalid previous hash: expected %s, got %s", prevBlock.hash, block.Header.PreviousHash)
-		}
+	prevBlock := bc.GetLatestBlock()
+	if prevBlock.hash != block.Header.PreviousHash {
+		return fmt.Errorf("invalid previous hash: expected %s, got %s", prevBlock.hash, block.Header.PreviousHash)
 	}
 
 	// Add block to chain
 	bc.Chain = append(bc.Chain, *block)
 	bc.currentHash = block.hash
 
-	log.Printf("Added block #%d to chain without validation", block.Header.BlockNumber)
+	log.Printf("✅ Added block #%d to chain without validation", block.Header.BlockNumber)
 	return nil
 }
 
