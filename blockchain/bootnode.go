@@ -403,8 +403,6 @@ func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
 	return bn, nil
 }
 
-
-
 // GetMultiaddr returns the complete multiaddr string for the bootnode
 func (config *BootstrapNodeConfig) GetMultiaddr(peerID peer.ID) string {
 	// Local address
@@ -771,8 +769,6 @@ func (bn *BootstrapNode) collectMetrics() {
 	}
 }
 
-
-
 // sendWelcomeMessage sends a welcome message to a newly connected peer
 func (bn *BootstrapNode) sendWelcomeMessage(peerID peer.ID) {
 	stream, err := bn.host.NewStream(context.Background(), peerID, "/blockchain/welcome/1.0.0")
@@ -1126,8 +1122,6 @@ func (ps *PersistentPeerStore) GetPeers() []peer.AddrInfo {
 	}
 	return peers
 }
-
-
 
 // Add these handler methods
 func (bn *BootstrapNode) handleRelay(stream network.Stream) {

@@ -1328,7 +1328,8 @@ func (n *Node) setupStateSync() {
 }
 
 func (n *Node) handleSyncRequest(s network.Stream) {
-	log.Printf("📥 Received sync request from peer %s", s.Conn().RemotePeer())
+	peerID := s.Conn().RemotePeer()
+	log.Printf("📥 Received sync request from peer %s", peerID)
 
 	// Read request
 	var request SyncRequest
@@ -1338,13 +1339,22 @@ func (n *Node) handleSyncRequest(s network.Stream) {
 		return
 	}
 
-	log.Printf("📦 Processing sync request from peer %s for height %d",
-		s.Conn().RemotePeer(), request.Height)
+	log.Printf("📦 Processing sync request from peer %s for height %d", peerID, request.Height)
+
+	// Get current blockchain state
+	currentHeight := n.Blockchain.GetHeight()
+	hasBlocks := currentHeight > 0
+
+	log.Printf("📊 Blockchain State:")
+	log.Printf("• Current Height: %d", currentHeight)
+	log.Printf("• Has Blocks: %v", hasBlocks)
+	log.Printf("• Latest Block Hash: %s", n.Blockchain.GetLatestBlock().hash)
+	log.Printf("• Genesis Block Hash: %s", n.Blockchain.GetBlockByHeight(0).Hash())
 
 	// Create response
 	response := SyncResponse{
-		Height:   n.Blockchain.GetHeight(),
-		HasChain: n.Blockchain.GetHeight() > 0,
+		Height:   currentHeight,
+		HasChain: hasBlocks,
 	}
 
 	// Send response
@@ -1354,29 +1364,36 @@ func (n *Node) handleSyncRequest(s network.Stream) {
 	}
 
 	log.Printf("📤 Sent sync response to peer %s - Height: %d, HasChain: %v",
-		s.Conn().RemotePeer(), response.Height, response.HasChain)
+		peerID, response.Height, response.HasChain)
 
 	// If we have blocks and we're a validator, send them
 	if response.HasChain && n.IsInitializedValidator() {
-		log.Printf("📦 Preparing to send blocks to peer %s", s.Conn().RemotePeer())
+		log.Printf("📦 Preparing to send blocks to peer %s", peerID)
 
 		// Send blocks from request height to our current height
-		for height := request.Height; height <= n.Blockchain.GetHeight(); height++ {
+		for height := request.Height; height <= currentHeight; height++ {
 			block := n.Blockchain.GetBlockByHeight(height)
 			if block == nil {
 				log.Printf("❌ Error getting block at height %d", height)
 				continue
 			}
 
+			// Log block details before sending
+			log.Printf("📤 Sending block #%d to peer %s", height, peerID)
+			log.Printf("   • Block Hash: %s", block.Hash())
+			log.Printf("   • Previous Hash: %s", block.Header.PreviousHash)
+			log.Printf("   • Validator: %s", block.Header.ValidatedBy)
+			log.Printf("   • Transaction Count: %d", len(block.Body.Transactions.GetAllTransactions()))
+
 			// Send block
 			if err := json.NewEncoder(s).Encode(block); err != nil {
 				log.Printf("❌ Error sending block at height %d: %v", height, err)
 				continue
 			}
-			log.Printf("📤 Sent block #%d to peer %s", height, s.Conn().RemotePeer())
+			log.Printf("✅ Successfully sent block #%d to peer %s", height, peerID)
 		}
 
-		log.Printf("✅ Completed sending blocks to peer %s", s.Conn().RemotePeer())
+		log.Printf("✅ Completed sending blocks to peer %s", peerID)
 	}
 }
 
@@ -1840,7 +1857,12 @@ func (n *Node) SyncWithPeer(peer peer.ID) error {
 			return fmt.Errorf("failed to read block: %v", err)
 		}
 
+		// Log received block details
 		log.Printf("📥 Received block #%d from peer %s", block.Header.BlockNumber, peer)
+		log.Printf("   • Block Hash: %s", block.Hash())
+		log.Printf("   • Previous Hash: %s", block.Header.PreviousHash)
+		log.Printf("   • Validator: %s", block.Header.ValidatedBy)
+		log.Printf("   • Transaction Count: %d", len(block.Body.Transactions.GetAllTransactions()))
 
 		// Validate and add block
 		if err := n.Blockchain.AddBlock(&block, n.Mempool, n.StakePool, n.UTXOSet.GetUTXOs(), n.Host); err != nil {
@@ -1858,6 +1880,11 @@ func (n *Node) SyncWithPeer(peer peer.ID) error {
 
 func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, error) {
 	log.Printf("🔍 Starting peer discovery with rendezvous...")
+	log.Printf("📊 Initial DHT Status:")
+	log.Printf("• Routing Table Size: %d", n.DHT.RoutingTable().Size())
+	log.Printf("• Connected Peers: %d", len(n.Host.Network().Peers()))
+	log.Printf("• Network ID: %s", n.NetworkID)
+
 	routingDiscovery := discovery.NewRoutingDiscovery(n.DHT)
 	discoveryTag := fmt.Sprintf("blockchain/%s", n.NetworkID)
 	log.Printf("📝 Using discovery tag: %s", discoveryTag)
@@ -1870,6 +1897,7 @@ func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, er
 		log.Printf("📊 DHT Status:")
 		log.Printf("• Routing Table Size: %d", n.DHT.RoutingTable().Size())
 		log.Printf("• Connected Peers: %d", len(n.Host.Network().Peers()))
+		log.Printf("• Bootstrap Peers: %d", len(n.config.BootstrapNodes))
 		return nil, fmt.Errorf("failed to advertise: %v", err)
 	}
 	log.Printf("✅ Successfully advertised with TTL: %v", ttl)
@@ -1910,6 +1938,7 @@ func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, er
 	log.Printf("• Total peers found: %d", len(peers))
 	log.Printf("• Current connections: %d", len(n.Host.Network().Peers()))
 	log.Printf("• DHT routing table size: %d", n.DHT.RoutingTable().Size())
+	log.Printf("• Network ID: %s", n.NetworkID)
 
 	return peers, nil
 }
