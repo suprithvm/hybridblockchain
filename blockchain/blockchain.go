@@ -928,7 +928,7 @@ func (bc *Blockchain) verifyBlockInDB(hash string, expectedBlock Block) error {
 	return nil
 }
 
-// InitializeChain initializes a new blockchain with a genesis block
+// InitializeChain initializes the blockchain with the genesis block
 func (bc *Blockchain) InitializeChain() error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -943,33 +943,33 @@ func (bc *Blockchain) InitializeChain() error {
 	// Create genesis block
 	genesisBlock := GenesisBlock()
 
-	// For genesis block, we need to ensure validator is registered first
-	if bc.StakePool != nil {
-		// Get the first validator (genesis validator)
-		genesisValidator := bc.GetGenesisValidator()
-		if genesisValidator != nil {
-			genesisBlock.Header.ValidatedBy = genesisValidator.Address
-			genesisBlock.Header.ValidatorAddress = genesisValidator.Address
-			// Set as initialized validator to prevent unnecessary peer discovery
-			if bc.Node != nil {
-				bc.Node.SetInitializedValidator(true)
-			}
-		}
+	// Set validator information if available
+	if bc.Node != nil && bc.Node.Host != nil {
+		nodeID := bc.Node.Host.ID().String()
+		genesisBlock.Header.ValidatedBy = nodeID
+		genesisBlock.Header.ValidatorAddress = nodeID
 	}
 
 	// Calculate state root for genesis block
 	genesisBlock.Header.StateRoot = calculateStateRoot(bc.utxoSet)
+
+	// Calculate and set the hash after all fields are set
+	genesisBlock.hash = genesisBlock.Hash()
 
 	// Save genesis block to database
 	if err := bc.saveBlock(genesisBlock); err != nil {
 		return fmt.Errorf("failed to save genesis block: %v", err)
 	}
 
-	// Add genesis block to in-memory chain
-	bc.Chain = append(bc.Chain, genesisBlock)
+	// Update chain state
+	bc.Chain = []Block{genesisBlock}
 	bc.currentHash = genesisBlock.hash
 
-	log.Printf("🎉 Genesis block created with hash: %s", genesisBlock.hash)
+	// Save latest block hash
+	if err := bc.db.Put([]byte("latest_block"), []byte(genesisBlock.hash)); err != nil {
+		return fmt.Errorf("failed to save latest block hash: %v", err)
+	}
+
 	return nil
 }
 

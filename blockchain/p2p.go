@@ -1214,13 +1214,25 @@ func (n *Node) SyncBlocks(peerID peer.ID, startHeight, endHeight int) error {
 
 	// Validate and add blocks
 	for i, block := range blocks {
+		// Create a deep copy of the block to prevent modifications
+		blockCopy := block
+		blockCopy.mu.Lock()
+		originalHash := blockCopy.hash
+		blockCopy.mu.Unlock()
+
 		// Validate block structure and hash
-		if err := validateBlockStructure(&block); err != nil {
+		if err := validateBlockStructure(&blockCopy); err != nil {
 			return fmt.Errorf("invalid block structure at height %d: %v", startHeight+i, err)
 		}
 
+		// Verify hash consistency
+		if blockCopy.Hash() != originalHash {
+			return fmt.Errorf("block hash mismatch at height %d: expected %s, got %s",
+				startHeight+i, originalHash, blockCopy.Hash())
+		}
+
 		// Add block to blockchain
-		if err := n.Blockchain.AddBlock(&block, n.Mempool, n.StakePool, utxoMap, n.Host); err != nil {
+		if err := n.Blockchain.AddBlock(&blockCopy, n.Mempool, n.StakePool, utxoMap, n.Host); err != nil {
 			return fmt.Errorf("failed to add block at height %d: %v", startHeight+i, err)
 		}
 
@@ -1348,7 +1360,7 @@ func (n *Node) handleSyncRequest(s network.Stream) {
 	log.Printf("📊 Blockchain State:")
 	log.Printf("• Current Height: %d", currentHeight)
 	log.Printf("• Has Blocks: %v", hasBlocks)
-	log.Printf("• Latest Block Hash: %s", n.Blockchain.GetLatestBlock().hash) 
+	log.Printf("• Latest Block Hash: %s", n.Blockchain.GetLatestBlock().hash)
 	log.Printf("• Genesis Block Hash: %s", n.Blockchain.GetBlockByHeight(0).Hash())
 
 	// Create response
@@ -1518,44 +1530,99 @@ func (n *Node) broadcastStateVerification() {
 
 // handleBlockSync processes block sync requests
 func (n *Node) handleBlockSync(s network.Stream) {
-	var req BlockSyncRequest
-	if err := json.NewDecoder(s).Decode(&req); err != nil {
-		log.Printf("Error decoding block sync request: %v", err)
+	log.Printf("🔍 [ENGINEERING] Starting block sync handler")
+	defer s.Close()
+
+	// Read sync request
+	var request SyncRequest
+	if err := json.NewDecoder(s).Decode(&request); err != nil {
+		log.Printf("❌ [ENGINEERING] Failed to decode sync request: %v", err)
+		sendError(s, "invalid sync request")
 		return
 	}
-	// Validate request range
-	if req.StartHeight > req.EndHeight || req.EndHeight > uint64(len(n.Blockchain.Chain)) {
-		log.Printf("Error: invalid height range in block sync request")
+	log.Printf("📥 [ENGINEERING] Received sync request for height %d", request.Height)
+
+	// Get requested block
+	block := n.Blockchain.GetBlockByHeight(request.Height)
+	if block == nil {
+		log.Printf("❌ [ENGINEERING] Failed to get block at height %d", request.Height)
+		sendError(s, "block not found")
 		return
 	}
 
-	switch req.RequestType {
-	case "headers":
-		headers := n.getBlockHeaders(req.StartHeight, req.EndHeight)
-		// Convert BlockHeader to SyncBlockHeader
-		syncHeaders := make([]SyncBlockHeader, len(headers))
-		for i, h := range headers {
-			block := n.Blockchain.Chain[h.BlockNumber] // Get corresponding block
-			syncHeaders[i] = SyncBlockHeader{
-				Hash:              block.Hash(), // Get hash from block
-				PreviousHash:      h.PreviousHash,
-				Height:            h.BlockNumber,
-				Timestamp:         h.Timestamp,
-				MerkleRoot:        h.MerkleRoot,
-				StateRoot:         h.StateRoot,
-				Difficulty:        uint64(h.Difficulty),
-				TotalTransactions: block.numTx, // Get transaction count from block
-			}
-		}
-		json.NewEncoder(s).Encode(BlockHeaderResponse{
-			Headers:     syncHeaders,
-			StartHeight: req.StartHeight,
-			EndHeight:   req.EndHeight,
-		})
-	case "full":
-		blocks := n.Blockchain.Chain[req.StartHeight : req.EndHeight+1]
-		json.NewEncoder(s).Encode(blocks)
+	// Log block state before any operations
+	log.Printf("📦 [ENGINEERING] Block state before sync:")
+	log.Printf("    • Block Number: %d", block.Header.BlockNumber)
+	log.Printf("    • Original Hash: %s", block.Hash())
+	log.Printf("    • Previous Hash: %s", block.Header.PreviousHash)
+	log.Printf("    • ValidatedBy: %s", block.Header.ValidatedBy)
+	log.Printf("    • ValidatorAddress: %s", block.Header.ValidatorAddress)
+	log.Printf("    • Timestamp: %d", block.Header.Timestamp)
+	log.Printf("    • State Root: %s", block.Header.StateRoot)
+	log.Printf("    • Merkle Root: %s", block.Header.MerkleRoot)
+	log.Printf("    • Receipts Root: %s", block.Header.ReceiptsRoot)
+
+	// Create a deep copy of the block
+	blockCopy := *block
+	blockCopy.Header = block.Header.Copy()
+	blockCopy.Body = &BlockBody{
+		Transactions: NewPatriciaTrie(), // Create new trie instead of copying
+		Receipts:     make([]*TxReceipt, len(block.Body.Receipts)),
 	}
+	// Copy transactions from original trie to new trie
+	for _, tx := range block.Body.Transactions.GetAllTransactions() {
+		blockCopy.Body.Transactions.Insert(tx)
+	}
+	copy(blockCopy.Body.Receipts, block.Body.Receipts)
+
+	// Log block copy state
+	log.Printf("📦 [ENGINEERING] Block copy state:")
+	log.Printf("    • Block Number: %d", blockCopy.Header.BlockNumber)
+	log.Printf("    • Copy Hash: %s", blockCopy.Hash())
+	log.Printf("    • Previous Hash: %s", blockCopy.Header.PreviousHash)
+	log.Printf("    • ValidatedBy: %s", blockCopy.Header.ValidatedBy)
+	log.Printf("    • ValidatorAddress: %s", blockCopy.Header.ValidatorAddress)
+	log.Printf("    • Timestamp: %d", blockCopy.Header.Timestamp)
+	log.Printf("    • State Root: %s", blockCopy.Header.StateRoot)
+	log.Printf("    • Merkle Root: %s", blockCopy.Header.MerkleRoot)
+	log.Printf("    • Receipts Root: %s", blockCopy.Header.ReceiptsRoot)
+
+	// Verify hash consistency
+	originalHash := block.Hash()
+	copyHash := blockCopy.Hash()
+	if originalHash != copyHash {
+		log.Printf("⚠️ [ENGINEERING] Hash mismatch detected!")
+		log.Printf("    • Original Hash: %s", originalHash)
+		log.Printf("    • Copy Hash: %s", copyHash)
+		log.Printf("    • Difference in fields:")
+		log.Printf("      - Original ValidatedBy: %s", block.Header.ValidatedBy)
+		log.Printf("      - Copy ValidatedBy: %s", blockCopy.Header.ValidatedBy)
+		log.Printf("      - Original ValidatorAddress: %s", block.Header.ValidatorAddress)
+		log.Printf("      - Copy ValidatorAddress: %s", blockCopy.Header.ValidatorAddress)
+	}
+
+	// Serialize the block copy
+	blockData, err := json.Marshal(blockCopy)
+	if err != nil {
+		log.Printf("❌ [ENGINEERING] Failed to marshal block: %v", err)
+		sendError(s, "failed to serialize block")
+		return
+	}
+
+	// Log serialized data
+	log.Printf("📦 [ENGINEERING] Serialized block data:")
+	log.Printf("    • Data Length: %d bytes", len(blockData))
+	log.Printf("    • Serialized Hash: %s", blockCopy.Hash())
+
+	// Send the block
+	if _, err := s.Write(blockData); err != nil {
+		log.Printf("❌ [ENGINEERING] Failed to send block: %v", err)
+		return
+	}
+
+	log.Printf("✅ [ENGINEERING] Successfully sent block #%d", block.Header.BlockNumber)
+	log.Printf("    • Final Hash: %s", blockCopy.Hash())
+	log.Printf("    • Original Hash: %s", originalHash)
 }
 
 // getBlockHeaders returns block headers for the specified range

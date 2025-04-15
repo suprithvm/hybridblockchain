@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
@@ -62,7 +64,117 @@ type Block struct {
 	hash                 string // Cached block hash
 	size                 uint64 // Cached block size
 	numTx                uint32 // Cached transaction count
-	CumulativeDifficulty uint64 // Add this field
+	CumulativeDifficulty uint64
+	mu                   sync.RWMutex // Add mutex for thread safety
+}
+
+// MarshalJSON implements json.Marshaler interface
+func (b *Block) MarshalJSON() ([]byte, error) {
+	log.Printf("🔑 [ENGINEERING] Starting block serialization:")
+	log.Printf("    • BlockNumber: %d", b.Header.BlockNumber)
+	log.Printf("    • Original hash: %s", b.hash)
+	log.Printf("    • ValidatedBy: %s", b.Header.ValidatedBy)
+	log.Printf("    • ValidatorAddress: %s", b.Header.ValidatorAddress)
+	log.Printf("    • ExtraData: %v", b.Header.ExtraData)
+	log.Printf("    • ValidatorProof: %v", b.Header.ValidatorProof)
+	log.Printf("    • ValidatorSig: %v", b.Header.ValidatorSig)
+
+	// Calculate hash if not already set
+	if b.hash == "" {
+		log.Printf("🔑 [ENGINEERING] Hash not set, calculating...")
+		b.Hash()
+	}
+
+	// Create a simplified block structure for consistent serialization
+	type SimplifiedBlock struct {
+		Hash   string       `json:"hash"`
+		Header *BlockHeader `json:"header"`
+		Body   struct {
+			Transactions *PatriciaTrie `json:"transactions"`
+			Receipts     []*TxReceipt  `json:"receipts"`
+		} `json:"body"`
+		CumulativeDifficulty uint64 `json:"cumulativeDifficulty"`
+	}
+
+	simplified := SimplifiedBlock{
+		Hash:                 b.hash,
+		Header:               b.Header,
+		CumulativeDifficulty: b.CumulativeDifficulty,
+	}
+
+	// Add transactions and receipts
+	simplified.Body.Transactions = b.Body.Transactions
+	simplified.Body.Receipts = b.Body.Receipts
+
+	// Use a consistent JSON encoder with sorted keys
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "")
+
+	if err := encoder.Encode(simplified); err != nil {
+		log.Printf("🔑 [ENGINEERING] Serialization error: %v", err)
+		return nil, err
+	}
+
+	data := buf.Bytes()
+	log.Printf("🔑 [ENGINEERING] Serialized block data length: %d bytes", len(data))
+	log.Printf("🔑 [ENGINEERING] Serialized block hash: %s", b.hash)
+	log.Printf("🔑 [ENGINEERING] Serialized block data: %s", string(data))
+	return data, nil
+}
+
+// UnmarshalJSON implements json.Unmarshaler interface
+func (b *Block) UnmarshalJSON(data []byte) error {
+	log.Printf("🔑 [ENGINEERING] Starting block deserialization:")
+	log.Printf("    • Input data length: %d bytes", len(data))
+	log.Printf("    • Input data: %s", string(data))
+
+	type SimplifiedBlock struct {
+		Hash   string       `json:"hash"`
+		Header *BlockHeader `json:"header"`
+		Body   struct {
+			Transactions *PatriciaTrie `json:"transactions"`
+			Receipts     []*TxReceipt  `json:"receipts"`
+		} `json:"body"`
+		CumulativeDifficulty uint64 `json:"cumulativeDifficulty"`
+	}
+
+	var simplified SimplifiedBlock
+	if err := json.Unmarshal(data, &simplified); err != nil {
+		log.Printf("🔑 [ENGINEERING] Deserialization error: %v", err)
+		return err
+	}
+
+	// Restore the block structure
+	b.Header = simplified.Header
+	b.hash = simplified.Hash
+	b.CumulativeDifficulty = simplified.CumulativeDifficulty
+
+	// Create new body with the deserialized transactions and receipts
+	b.Body = &BlockBody{
+		Transactions: simplified.Body.Transactions,
+		Receipts:     simplified.Body.Receipts,
+	}
+
+	// Ensure the hash is preserved and not recalculated
+	if b.hash != "" {
+		log.Printf("🔑 [ENGINEERING] Preserving original hash: %s", b.hash)
+	} else {
+		log.Printf("🔑 [ENGINEERING] No hash found in deserialized data, calculating...")
+		b.Hash()
+	}
+
+	log.Printf("🔑 [ENGINEERING] Deserialized block:")
+	log.Printf("    • BlockNumber: %d", b.Header.BlockNumber)
+	log.Printf("    • Restored hash: %s", b.hash)
+	log.Printf("    • ValidatedBy: %s", b.Header.ValidatedBy)
+	log.Printf("    • ValidatorAddress: %s", b.Header.ValidatorAddress)
+	log.Printf("    • ExtraData: %v", b.Header.ExtraData)
+	log.Printf("    • ValidatorProof: %v", b.Header.ValidatorProof)
+	log.Printf("    • ValidatorSig: %v", b.Header.ValidatorSig)
+
+	return nil
 }
 
 // TxReceipt stores transaction execution results
@@ -133,31 +245,87 @@ func NewBlock(previousBlock Block, mempool *Mempool, utxoSet map[string]UTXO, di
 
 // Hash calculates the hash of the block
 func (b *Block) Hash() string {
-	// Return cached hash if available
+	b.mu.RLock()
 	if b.hash != "" {
+		defer b.mu.RUnlock()
+		log.Printf("🔑 [ENGINEERING] Returning cached hash: %s", b.hash)
+		return b.hash
+	}
+	b.mu.RUnlock()
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// Double check after acquiring write lock
+	if b.hash != "" {
+		log.Printf("🔑 [ENGINEERING] Hash already calculated after lock: %s", b.hash)
 		return b.hash
 	}
 
 	// Calculate hash if not cached
 	header := b.Header
-	data := fmt.Sprintf("%d%d%s%d%s%s%s%d%d%d%d%s%s",
-		header.Version,
-		header.BlockNumber,
-		header.PreviousHash,
-		header.Timestamp,
-		header.MerkleRoot,
-		header.StateRoot,
-		header.ReceiptsRoot,
-		header.Nonce,
-		header.GasUsed,
-		header.Difficulty,
-		header.GasLimit,
-		header.ValidatedBy,
-		header.ValidatorAddress,
-	)
+	log.Printf("🔑 [ENGINEERING] Detailed Block State for Hash Calculation:")
+	log.Printf("    • Version: %d", header.Version)
+	log.Printf("    • BlockNumber: %d", header.BlockNumber)
+	log.Printf("    • PreviousHash: %s", header.PreviousHash)
+	log.Printf("    • Timestamp: %d", header.Timestamp)
+	log.Printf("    • MerkleRoot: %s", header.MerkleRoot)
+	log.Printf("    • StateRoot: %s", header.StateRoot)
+	log.Printf("    • ReceiptsRoot: %s", header.ReceiptsRoot)
+	log.Printf("    • Nonce: %d", header.Nonce)
+	log.Printf("    • GasUsed: %d", header.GasUsed)
+	log.Printf("    • Difficulty: %d", header.Difficulty)
+	log.Printf("    • GasLimit: %d", header.GasLimit)
+	log.Printf("    • ValidatedBy: %s", header.ValidatedBy)
+	log.Printf("    • ValidatorAddress: %s", header.ValidatorAddress)
+	log.Printf("    • ExtraData: %v", header.ExtraData)
+	log.Printf("    • ValidatorProof: %v", header.ValidatorProof)
+	log.Printf("    • ValidatorSig: %v", header.ValidatorSig)
 
-	hash := sha256.Sum256([]byte(data))
+	// Create a consistent string representation of the block
+	var data strings.Builder
+	data.WriteString(fmt.Sprintf("%d|", header.Version))
+	data.WriteString(fmt.Sprintf("%d|", header.BlockNumber))
+	data.WriteString(fmt.Sprintf("%s|", header.PreviousHash))
+	data.WriteString(fmt.Sprintf("%d|", header.Timestamp))
+	data.WriteString(fmt.Sprintf("%s|", header.MerkleRoot))
+	data.WriteString(fmt.Sprintf("%s|", header.StateRoot))
+	data.WriteString(fmt.Sprintf("%s|", header.ReceiptsRoot))
+	data.WriteString(fmt.Sprintf("%d|", header.Nonce))
+	data.WriteString(fmt.Sprintf("%d|", header.GasUsed))
+	data.WriteString(fmt.Sprintf("%d|", header.Difficulty))
+	data.WriteString(fmt.Sprintf("%d|", header.GasLimit))
+	data.WriteString(fmt.Sprintf("%s|", header.ValidatedBy))
+	data.WriteString(fmt.Sprintf("%s|", header.ValidatorAddress))
+
+	// Handle ExtraData consistently
+	if len(header.ExtraData) == 0 {
+		data.WriteString("[]|")
+	} else {
+		data.WriteString(fmt.Sprintf("%v|", header.ExtraData))
+	}
+
+	// Handle ValidatorProof consistently
+	if header.ValidatorProof == nil {
+		data.WriteString("<nil>|")
+	} else {
+		data.WriteString(fmt.Sprintf("%v|", header.ValidatorProof))
+	}
+
+	// Handle ValidatorSig consistently
+	if len(header.ValidatorSig) == 0 {
+		data.WriteString("[]")
+	} else {
+		data.WriteString(fmt.Sprintf("%v", header.ValidatorSig))
+	}
+
+	hashInput := data.String()
+	log.Printf("🔑 [ENGINEERING] Hash input data: %s", hashInput)
+
+	hash := sha256.Sum256([]byte(hashInput))
 	b.hash = hex.EncodeToString(hash[:])
+
+	log.Printf("🔑 [ENGINEERING] Calculated new hash: %s", b.hash)
 	return b.hash
 }
 
@@ -385,17 +553,19 @@ func ValidateBlock(block Block, previousBlock Block, validatorAddress string, st
 // GenesisBlock creates the genesis block
 func GenesisBlock() Block {
 	header := &BlockHeader{
-		Version:      1,
-		BlockNumber:  0,
-		PreviousHash: "0x00000000000000000000000000000000",
-		Timestamp:    time.Now().Unix(),
-		Difficulty:   1,
-		GasLimit:     BaseGasLimit,
-		MerkleRoot:   "0x0000000000000000000000000000000000000000000000000000000000000000",
-		StateRoot:    "0x0000000000000000000000000000000000000000000000000000000000000000",
-		ReceiptsRoot: "0x0000000000000000000000000000000000000000000000000000000000000000",
-		Nonce:        0,
-		GasUsed:      0,
+		Version:          1,
+		BlockNumber:      0,
+		PreviousHash:     "0x00000000000000000000000000000000",
+		Timestamp:        time.Now().Unix(),
+		Difficulty:       1,
+		GasLimit:         BaseGasLimit,
+		MerkleRoot:       "0x0000000000000000000000000000000000000000000000000000000000000000",
+		StateRoot:        "0x0000000000000000000000000000000000000000000000000000000000000000",
+		ReceiptsRoot:     "0x0000000000000000000000000000000000000000000000000000000000000000",
+		Nonce:            0,
+		GasUsed:          0,
+		ValidatedBy:      "", // Will be set during initialization
+		ValidatorAddress: "", // Will be set during initialization
 	}
 
 	body := &BlockBody{
@@ -408,8 +578,6 @@ func GenesisBlock() Block {
 		Body:   body,
 	}
 
-	// Calculate and set the hash
-	block.hash = block.Hash()
 	return block
 }
 
