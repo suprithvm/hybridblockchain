@@ -1343,12 +1343,12 @@ func (n *Node) handleSyncRequest(s network.Stream) {
 
 	// Get current blockchain state
 	currentHeight := n.Blockchain.GetHeight()
-	hasBlocks := currentHeight > 0
+	hasBlocks := currentHeight >= 0
 
 	log.Printf("📊 Blockchain State:")
 	log.Printf("• Current Height: %d", currentHeight)
 	log.Printf("• Has Blocks: %v", hasBlocks)
-	log.Printf("• Latest Block Hash: %s", n.Blockchain.GetLatestBlock().hash)
+	log.Printf("• Latest Block Hash: %s", n.Blockchain.GetLatestBlock().hash) 
 	log.Printf("• Genesis Block Hash: %s", n.Blockchain.GetBlockByHeight(0).Hash())
 
 	// Create response

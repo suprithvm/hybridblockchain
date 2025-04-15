@@ -543,20 +543,41 @@ func (bc *Blockchain) GetBlockByHeight(height interface{}) *Block {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 
-	var h int
+	var h uint64
 	switch v := height.(type) {
 	case int:
-		h = v
+		h = uint64(v)
 	case uint64:
-		h = int(v)
+		h = v
 	default:
 		return nil
 	}
 
-	if h < 0 || h >= len(bc.Chain) {
-		return nil
+	// First check in memory
+	if h < uint64(len(bc.Chain)) {
+		block := &bc.Chain[h]
+		// Recalculate hash to ensure consistency
+		block.hash = block.CalculateHash()
+		return block
 	}
-	return &bc.Chain[h]
+
+	// If not in memory, try to get from database
+	if bc.db != nil {
+		// Get block by height from database
+		heightBytes := []byte(fmt.Sprintf("%020d", h))
+		key := db.CreateKey(db.BlockPrefix, heightBytes)
+		blockData, err := bc.db.Get(key)
+		if err == nil {
+			var block Block
+			if err := json.Unmarshal(blockData, &block); err == nil {
+				// Recalculate hash to ensure consistency
+				block.hash = block.CalculateHash()
+				return &block
+			}
+		}
+	}
+
+	return nil
 }
 
 // GetHeight returns the current height of the blockchain

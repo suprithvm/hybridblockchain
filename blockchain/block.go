@@ -140,7 +140,7 @@ func (b *Block) Hash() string {
 
 	// Calculate hash if not cached
 	header := b.Header
-	data := fmt.Sprintf("%d%d%s%d%s%s%s%d%d",
+	data := fmt.Sprintf("%d%d%s%d%s%s%s%d%d%d%d",
 		header.Version,
 		header.BlockNumber,
 		header.PreviousHash,
@@ -150,6 +150,8 @@ func (b *Block) Hash() string {
 		header.ReceiptsRoot,
 		header.Nonce,
 		header.GasUsed,
+		header.Difficulty,
+		header.GasLimit,
 	)
 
 	hash := sha256.Sum256([]byte(data))
@@ -387,6 +389,11 @@ func GenesisBlock() Block {
 		Timestamp:    time.Now().Unix(),
 		Difficulty:   1,
 		GasLimit:     BaseGasLimit,
+		MerkleRoot:   "0x0000000000000000000000000000000000000000000000000000000000000000",
+		StateRoot:    "0x0000000000000000000000000000000000000000000000000000000000000000",
+		ReceiptsRoot: "0x0000000000000000000000000000000000000000000000000000000000000000",
+		Nonce:        0,
+		GasUsed:      0,
 	}
 
 	body := &BlockBody{
@@ -394,10 +401,14 @@ func GenesisBlock() Block {
 		Receipts:     make([]*TxReceipt, 0),
 	}
 
-	return Block{
+	block := Block{
 		Header: header,
 		Body:   body,
 	}
+
+	// Calculate and set the hash
+	block.hash = block.CalculateHash()
+	return block
 }
 
 // Add this method
