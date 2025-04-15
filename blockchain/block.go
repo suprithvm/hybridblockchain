@@ -140,7 +140,7 @@ func (b *Block) Hash() string {
 
 	// Calculate hash if not cached
 	header := b.Header
-	data := fmt.Sprintf("%d%d%s%d%s%s%s%d%d%d%d",
+	data := fmt.Sprintf("%d%d%s%d%s%s%s%d%d%d%d%s%s",
 		header.Version,
 		header.BlockNumber,
 		header.PreviousHash,
@@ -152,6 +152,8 @@ func (b *Block) Hash() string {
 		header.GasUsed,
 		header.Difficulty,
 		header.GasLimit,
+		header.ValidatedBy,
+		header.ValidatorAddress,
 	)
 
 	hash := sha256.Sum256([]byte(data))
@@ -380,7 +382,7 @@ func ValidateBlock(block Block, previousBlock Block, validatorAddress string, st
 	return true
 }
 
-// Add this function
+// GenesisBlock creates the genesis block
 func GenesisBlock() Block {
 	header := &BlockHeader{
 		Version:      1,
@@ -407,7 +409,7 @@ func GenesisBlock() Block {
 	}
 
 	// Calculate and set the hash
-	block.hash = block.CalculateHash()
+	block.hash = block.Hash()
 	return block
 }
 
