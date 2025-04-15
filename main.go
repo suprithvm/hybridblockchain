@@ -146,7 +146,6 @@ func runBootstrapNode(config *NodeConfig) {
 
 	log.Printf("node: %v", node)
 
-
 	log.Printf("✅ Bootstrap node is running on %s", config.ListenAddr)
 }
 
@@ -247,11 +246,27 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 		// Check for validator peer
 		for _, peer := range node.Host.Network().Peers() {
 			if !node.IsPeerBootstrapNode(peer) {
-				// Try to sync with this peer
+				// Sync blockchain
+				log.Printf("🔄 Syncing blockchain with peer %s", peer)
 				if err := node.SyncWithPeer(peer); err != nil {
-					log.Printf("⚠️ Failed to sync with peer %s: %v", peer, err)
+					log.Printf("⚠️ Failed to sync blockchain with peer %s: %v", peer, err)
 					continue
 				}
+
+				// Sync stake pool
+				log.Printf("🔄 Syncing stake pool with peer %s", peer)
+				if err := node.StakePool.SyncWithPeer(node, peer); err != nil {
+					log.Printf("⚠️ Failed to sync stake pool with peer %s: %v", peer, err)
+					continue
+				}
+
+				// Sync mempool
+				log.Printf("🔄 Syncing mempool with peer %s", peer)
+				if err := node.Mempool.SyncWithPeer(node, peer); err != nil {
+					log.Printf("⚠️ Failed to sync mempool with peer %s: %v", peer, err)
+					continue
+				}
+
 				validatorFound = true
 				log.Printf("✅ Successfully synced with validator peer %s", peer)
 				break

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -65,39 +66,41 @@ type Block struct {
 	size                 uint64 // Cached block size
 	numTx                uint32 // Cached transaction count
 	CumulativeDifficulty uint64
-	mu                   sync.RWMutex // Add mutex for thread safety
+	mu                   sync.RWMutex
+	originalHash         string // Store the original hash to prevent recalculation
 }
 
 // MarshalJSON implements json.Marshaler interface
 func (b *Block) MarshalJSON() ([]byte, error) {
-	log.Printf("🔑 [ENGINEERING] Starting block serialization:")
-	log.Printf("    • BlockNumber: %d", b.Header.BlockNumber)
-	log.Printf("    • Original hash: %s", b.hash)
-	log.Printf("    • ValidatedBy: %s", b.Header.ValidatedBy)
-	log.Printf("    • ValidatorAddress: %s", b.Header.ValidatorAddress)
-	log.Printf("    • ExtraData: %v", b.Header.ExtraData)
-	log.Printf("    • ValidatorProof: %v", b.Header.ValidatorProof)
-	log.Printf("    • ValidatorSig: %v", b.Header.ValidatorSig)
-
-	// Calculate hash if not already set
-	if b.hash == "" {
-		log.Printf("🔑 [ENGINEERING] Hash not set, calculating...")
-		b.Hash()
-	}
+	log.Printf("🔑 [SERIALIZATION] Starting MarshalJSON:")
+	log.Printf("    • Block ptr: %p", b)
+	log.Printf("    • Current hash: %s (ptr: %p)", b.hash, &b.hash)
+	log.Printf("    • Original hash: %s", b.originalHash)
+	log.Printf("    • Header ptr: %p", b.Header)
+	log.Printf("    • Body ptr: %p", b.Body)
+	log.Printf("    • Call stack: %s", getCallerInfo())
 
 	// Create a simplified block structure for consistent serialization
 	type SimplifiedBlock struct {
-		Hash   string       `json:"hash"`
-		Header *BlockHeader `json:"header"`
-		Body   struct {
+		Hash         string       `json:"hash"`
+		OriginalHash string       `json:"originalHash"`
+		Header       *BlockHeader `json:"header"`
+		Body         struct {
 			Transactions *PatriciaTrie `json:"transactions"`
 			Receipts     []*TxReceipt  `json:"receipts"`
 		} `json:"body"`
 		CumulativeDifficulty uint64 `json:"cumulativeDifficulty"`
 	}
 
+	// Use original hash if available, otherwise use current hash
+	hashToUse := b.originalHash
+	if hashToUse == "" {
+		hashToUse = b.hash
+	}
+
 	simplified := SimplifiedBlock{
-		Hash:                 b.hash,
+		Hash:                 hashToUse,
+		OriginalHash:         hashToUse,
 		Header:               b.Header,
 		CumulativeDifficulty: b.CumulativeDifficulty,
 	}
@@ -113,27 +116,34 @@ func (b *Block) MarshalJSON() ([]byte, error) {
 	encoder.SetIndent("", "")
 
 	if err := encoder.Encode(simplified); err != nil {
-		log.Printf("🔑 [ENGINEERING] Serialization error: %v", err)
+		log.Printf("🔑 [SERIALIZATION] Error during encoding: %v", err)
 		return nil, err
 	}
 
 	data := buf.Bytes()
-	log.Printf("🔑 [ENGINEERING] Serialized block data length: %d bytes", len(data))
-	log.Printf("🔑 [ENGINEERING] Serialized block hash: %s", b.hash)
-	log.Printf("🔑 [ENGINEERING] Serialized block data: %s", string(data))
+	log.Printf("🔑 [SERIALIZATION] Serialization complete:")
+	log.Printf("    • Serialized data length: %d bytes", len(data))
+	log.Printf("    • Final hash: %s (ptr: %p)", hashToUse, &hashToUse)
+	log.Printf("    • Serialized data: %s", string(data))
 	return data, nil
 }
 
 // UnmarshalJSON implements json.Unmarshaler interface
 func (b *Block) UnmarshalJSON(data []byte) error {
-	log.Printf("🔑 [ENGINEERING] Starting block deserialization:")
+	log.Printf("🔑 [DESERIALIZATION] Starting UnmarshalJSON:")
+	log.Printf("    • Block ptr: %p", b)
+	log.Printf("    • Current hash: %s (ptr: %p)", b.hash, &b.hash)
+	log.Printf("    • Header ptr: %p", b.Header)
+	log.Printf("    • Body ptr: %p", b.Body)
 	log.Printf("    • Input data length: %d bytes", len(data))
 	log.Printf("    • Input data: %s", string(data))
+	log.Printf("    • Call stack: %s", getCallerInfo())
 
 	type SimplifiedBlock struct {
-		Hash   string       `json:"hash"`
-		Header *BlockHeader `json:"header"`
-		Body   struct {
+		Hash         string       `json:"hash"`
+		OriginalHash string       `json:"originalHash"`
+		Header       *BlockHeader `json:"header"`
+		Body         struct {
 			Transactions *PatriciaTrie `json:"transactions"`
 			Receipts     []*TxReceipt  `json:"receipts"`
 		} `json:"body"`
@@ -142,13 +152,14 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 
 	var simplified SimplifiedBlock
 	if err := json.Unmarshal(data, &simplified); err != nil {
-		log.Printf("🔑 [ENGINEERING] Deserialization error: %v", err)
+		log.Printf("🔑 [DESERIALIZATION] Error during unmarshaling: %v", err)
 		return err
 	}
 
 	// Restore the block structure
 	b.Header = simplified.Header
-	b.hash = simplified.Hash
+	b.hash = simplified.OriginalHash
+	b.originalHash = simplified.OriginalHash
 	b.CumulativeDifficulty = simplified.CumulativeDifficulty
 
 	// Create new body with the deserialized transactions and receipts
@@ -157,23 +168,11 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 		Receipts:     simplified.Body.Receipts,
 	}
 
-	// Ensure the hash is preserved and not recalculated
-	if b.hash != "" {
-		log.Printf("🔑 [ENGINEERING] Preserving original hash: %s", b.hash)
-	} else {
-		log.Printf("🔑 [ENGINEERING] No hash found in deserialized data, calculating...")
-		b.Hash()
-	}
-
-	log.Printf("🔑 [ENGINEERING] Deserialized block:")
-	log.Printf("    • BlockNumber: %d", b.Header.BlockNumber)
-	log.Printf("    • Restored hash: %s", b.hash)
-	log.Printf("    • ValidatedBy: %s", b.Header.ValidatedBy)
-	log.Printf("    • ValidatorAddress: %s", b.Header.ValidatorAddress)
-	log.Printf("    • ExtraData: %v", b.Header.ExtraData)
-	log.Printf("    • ValidatorProof: %v", b.Header.ValidatorProof)
-	log.Printf("    • ValidatorSig: %v", b.Header.ValidatorSig)
-
+	log.Printf("🔑 [DESERIALIZATION] Deserialization complete:")
+	log.Printf("    • Restored hash: %s (ptr: %p)", b.hash, &b.hash)
+	log.Printf("    • Restored original hash: %s", b.originalHash)
+	log.Printf("    • Header ptr: %p", b.Header)
+	log.Printf("    • Body ptr: %p", b.Body)
 	return nil
 }
 
@@ -245,11 +244,20 @@ func NewBlock(previousBlock Block, mempool *Mempool, utxoSet map[string]UTXO, di
 
 // Hash calculates the hash of the block
 func (b *Block) Hash() string {
+	// Log the current state before any operations
+	log.Printf("🔑 [HASH CACHE] Starting Hash() call:")
+	log.Printf("    • Block ptr: %p", b)
+	log.Printf("    • Current cached hash: %s", b.hash)
+	log.Printf("    • Original hash: %s", b.originalHash)
+	log.Printf("    • Header ptr: %p", b.Header)
+	log.Printf("    • Body ptr: %p", b.Body)
+	log.Printf("    • Call stack: %s", getCallerInfo())
+
 	b.mu.RLock()
-	if b.hash != "" {
+	if b.originalHash != "" {
 		defer b.mu.RUnlock()
-		log.Printf("🔑 [ENGINEERING] Returning cached hash: %s", b.hash)
-		return b.hash
+		log.Printf("🔑 [HASH CACHE] Returning original hash: %s (ptr: %p)", b.originalHash, &b.originalHash)
+		return b.originalHash
 	}
 	b.mu.RUnlock()
 
@@ -257,15 +265,14 @@ func (b *Block) Hash() string {
 	defer b.mu.Unlock()
 
 	// Double check after acquiring write lock
-	if b.hash != "" {
-		log.Printf("🔑 [ENGINEERING] Hash already calculated after lock: %s", b.hash)
-		return b.hash
+	if b.originalHash != "" {
+		log.Printf("🔑 [HASH CACHE] Original hash already calculated after lock: %s (ptr: %p)", b.originalHash, &b.originalHash)
+		return b.originalHash
 	}
 
 	// Calculate hash if not cached
 	header := b.Header
-	log.Printf("🔑 [ENGINEERING] Detailed Block State for Hash Calculation:")
-	log.Printf("    • Version: %d", header.Version)
+	log.Printf("🔑 [HASH CACHE] Calculating new hash:")
 	log.Printf("    • BlockNumber: %d", header.BlockNumber)
 	log.Printf("    • PreviousHash: %s", header.PreviousHash)
 	log.Printf("    • Timestamp: %d", header.Timestamp)
@@ -276,6 +283,7 @@ func (b *Block) Hash() string {
 	log.Printf("    • GasUsed: %d", header.GasUsed)
 	log.Printf("    • Difficulty: %d", header.Difficulty)
 	log.Printf("    • GasLimit: %d", header.GasLimit)
+	log.Printf("    • MinedBy: %s", header.MinedBy)
 	log.Printf("    • ValidatedBy: %s", header.ValidatedBy)
 	log.Printf("    • ValidatorAddress: %s", header.ValidatorAddress)
 	log.Printf("    • ExtraData: %v", header.ExtraData)
@@ -295,6 +303,7 @@ func (b *Block) Hash() string {
 	data.WriteString(fmt.Sprintf("%d|", header.GasUsed))
 	data.WriteString(fmt.Sprintf("%d|", header.Difficulty))
 	data.WriteString(fmt.Sprintf("%d|", header.GasLimit))
+	data.WriteString(fmt.Sprintf("%s|", header.MinedBy))
 	data.WriteString(fmt.Sprintf("%s|", header.ValidatedBy))
 	data.WriteString(fmt.Sprintf("%s|", header.ValidatorAddress))
 
@@ -320,13 +329,35 @@ func (b *Block) Hash() string {
 	}
 
 	hashInput := data.String()
-	log.Printf("🔑 [ENGINEERING] Hash input data: %s", hashInput)
+	log.Printf("🔑 [HASH CACHE] Hash input data: %s", hashInput)
 
 	hash := sha256.Sum256([]byte(hashInput))
-	b.hash = hex.EncodeToString(hash[:])
+	b.originalHash = hex.EncodeToString(hash[:])
+	b.hash = b.originalHash
 
-	log.Printf("🔑 [ENGINEERING] Calculated new hash: %s", b.hash)
-	return b.hash
+	log.Printf("🔑 [HASH CACHE] Calculated new hash: %s (ptr: %p)", b.originalHash, &b.originalHash)
+	log.Printf("🔑 [HASH CACHE] Hash calculation complete")
+	return b.originalHash
+}
+
+// Helper function to get caller information
+func getCallerInfo() string {
+	pc := make([]uintptr, 10)
+	n := runtime.Callers(2, pc)
+	if n == 0 {
+		return "unknown"
+	}
+	pc = pc[:n]
+	frames := runtime.CallersFrames(pc)
+	var info strings.Builder
+	for {
+		frame, more := frames.Next()
+		info.WriteString(fmt.Sprintf("%s:%d -> ", frame.File, frame.Line))
+		if !more {
+			break
+		}
+	}
+	return info.String()
 }
 
 // API helper methods
@@ -362,6 +393,28 @@ func (h *BlockHeader) Copy() *BlockHeader {
 	if len(h.ExtraData) > 0 {
 		cpy.ExtraData = make([]byte, len(h.ExtraData))
 		copy(cpy.ExtraData, h.ExtraData)
+	}
+	// Ensure all string fields are properly copied
+	if h.MinedBy != "" {
+		cpy.MinedBy = h.MinedBy
+	}
+	if h.ValidatedBy != "" {
+		cpy.ValidatedBy = h.ValidatedBy
+	}
+	if h.ValidatorAddress != "" {
+		cpy.ValidatorAddress = h.ValidatorAddress
+	}
+	if h.PreviousHash != "" {
+		cpy.PreviousHash = h.PreviousHash
+	}
+	if h.StateRoot != "" {
+		cpy.StateRoot = h.StateRoot
+	}
+	if h.MerkleRoot != "" {
+		cpy.MerkleRoot = h.MerkleRoot
+	}
+	if h.ReceiptsRoot != "" {
+		cpy.ReceiptsRoot = h.ReceiptsRoot
 	}
 	return &cpy
 }
@@ -674,4 +727,29 @@ func verifyProof(proof1, proof2 *SelectionProof) bool {
 		bytes.Equal(proof1.Seed, proof2.Seed) &&
 		proof1.Weight == proof2.Weight &&
 		proof1.Score == proof2.Score
+}
+
+// Copy creates a deep copy of the block
+func (b *Block) Copy() *Block {
+	cpy := &Block{
+		Header:               b.Header.Copy(),
+		Body:                 &BlockBody{},
+		CumulativeDifficulty: b.CumulativeDifficulty,
+		originalHash:         b.originalHash,
+		hash:                 b.hash,
+		size:                 b.size,
+		numTx:                b.numTx,
+	}
+
+	// Copy transactions
+	cpy.Body.Transactions = NewPatriciaTrie()
+	for _, tx := range b.Body.Transactions.GetAllTransactions() {
+		cpy.Body.Transactions.Insert(tx)
+	}
+
+	// Copy receipts
+	cpy.Body.Receipts = make([]*TxReceipt, len(b.Body.Receipts))
+	copy(cpy.Body.Receipts, b.Body.Receipts)
+
+	return cpy
 }

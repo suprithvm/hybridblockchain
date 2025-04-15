@@ -109,6 +109,8 @@ type Node struct {
 	wg                     sync.WaitGroup
 	isInitializedValidator bool
 	mu                     sync.RWMutex
+	lastSyncTime           time.Time
+	syncComplete           bool
 }
 
 // publishMessage publishes a message to a specific topic using pubsub
@@ -1341,6 +1343,35 @@ func (n *Node) setupStateSync() {
 
 func (n *Node) handleSyncRequest(s network.Stream) {
 	peerID := s.Conn().RemotePeer()
+
+	// Don't sync with bootstrap nodes
+	if n.IsPeerBootstrapNode(peerID) {
+		log.Printf("⚠️ Ignoring sync request from bootstrap node %s", peerID)
+		return
+	}
+
+	n.syncMu.Lock()
+	defer n.syncMu.Unlock()
+
+	// Check if we're already syncing
+	if n.isSyncing {
+		log.Printf("⚠️ Already syncing, ignoring request from %s", peerID)
+		return
+	}
+
+	// Check if we've synced recently
+	if n.syncComplete && time.Since(n.lastSyncTime) < 5*time.Minute {
+		log.Printf("⚠️ Recently synced, ignoring request from %s", peerID)
+		return
+	}
+
+	n.isSyncing = true
+	defer func() {
+		n.isSyncing = false
+		n.lastSyncTime = time.Now()
+		n.syncComplete = true
+	}()
+
 	log.Printf("📥 Received sync request from peer %s", peerID)
 
 	// Read request
@@ -1360,8 +1391,9 @@ func (n *Node) handleSyncRequest(s network.Stream) {
 	log.Printf("📊 Blockchain State:")
 	log.Printf("• Current Height: %d", currentHeight)
 	log.Printf("• Has Blocks: %v", hasBlocks)
-	log.Printf("• Latest Block Hash: %s", n.Blockchain.GetLatestBlock().hash)
-	log.Printf("• Genesis Block Hash: %s", n.Blockchain.GetBlockByHeight(0).Hash())
+	latestBlock := n.Blockchain.GetLatestBlock()
+	log.Printf("• Latest Block Hash: %s", latestBlock.hash)
+	log.Printf("• Genesis Block Hash: %s", n.Blockchain.GetBlockByHeight(0).hash)
 
 	// Create response
 	response := SyncResponse{
@@ -1530,6 +1562,31 @@ func (n *Node) broadcastStateVerification() {
 
 // handleBlockSync processes block sync requests
 func (n *Node) handleBlockSync(s network.Stream) {
+	peerID := s.Conn().RemotePeer()
+
+	// Don't sync with bootstrap nodes
+	if n.IsPeerBootstrapNode(peerID) {
+		log.Printf("⚠️ Ignoring block sync from bootstrap node %s", peerID)
+		return
+	}
+
+	n.syncMu.Lock()
+	if n.isSyncing {
+		n.syncMu.Unlock()
+		log.Printf("⚠️ Already syncing, ignoring block sync from %s", peerID)
+		return
+	}
+	n.isSyncing = true
+	n.syncMu.Unlock()
+
+	defer func() {
+		n.syncMu.Lock()
+		n.isSyncing = false
+		n.lastSyncTime = time.Now()
+		n.syncComplete = true
+		n.syncMu.Unlock()
+	}()
+
 	log.Printf("🔍 [ENGINEERING] Starting block sync handler")
 	defer s.Close()
 
@@ -1563,17 +1620,7 @@ func (n *Node) handleBlockSync(s network.Stream) {
 	log.Printf("    • Receipts Root: %s", block.Header.ReceiptsRoot)
 
 	// Create a deep copy of the block
-	blockCopy := *block
-	blockCopy.Header = block.Header.Copy()
-	blockCopy.Body = &BlockBody{
-		Transactions: NewPatriciaTrie(), // Create new trie instead of copying
-		Receipts:     make([]*TxReceipt, len(block.Body.Receipts)),
-	}
-	// Copy transactions from original trie to new trie
-	for _, tx := range block.Body.Transactions.GetAllTransactions() {
-		blockCopy.Body.Transactions.Insert(tx)
-	}
-	copy(blockCopy.Body.Receipts, block.Body.Receipts)
+	blockCopy := block.Copy()
 
 	// Log block copy state
 	log.Printf("📦 [ENGINEERING] Block copy state:")
@@ -1926,7 +1973,7 @@ func (n *Node) SyncWithPeer(peer peer.ID) error {
 
 		// Log received block details
 		log.Printf("📥 Received block #%d from peer %s", block.Header.BlockNumber, peer)
-		log.Printf("   • Block Hash: %s", block.Hash())
+		log.Printf("   • Block Hash: %s", block.hash)
 		log.Printf("   • Previous Hash: %s", block.Header.PreviousHash)
 		log.Printf("   • Validator: %s", block.Header.ValidatedBy)
 		log.Printf("   • Transaction Count: %d", len(block.Body.Transactions.GetAllTransactions()))

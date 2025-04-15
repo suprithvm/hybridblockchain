@@ -3,11 +3,14 @@ package blockchain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // Mempool stores unconfirmed transactions
@@ -285,6 +288,7 @@ type MempoolSync struct {
 	StateRoot    string        `json:"state_root"`
 	Timestamp    int64         `json:"timestamp"`
 	LastSyncTime int64         `json:"last_sync_time"`
+	PeerID       string        `json:"peer_id"`
 }
 
 // GetMempoolSync creates a sync snapshot of the mempool
@@ -427,4 +431,43 @@ func (m *Mempool) SortByGasPrice() {
 	sort.SliceStable(m.Transactions, func(i, j int) bool {
 		return m.Transactions[i].GasPrice > m.Transactions[j].GasPrice
 	})
+}
+
+// SyncWithPeer synchronizes mempool with a specific peer
+func (m *Mempool) SyncWithPeer(node *Node, peer peer.ID) error {
+	log.Printf("🔄 Starting mempool sync with peer %s", peer)
+
+	// Create stream to peer
+	s, err := node.Host.NewStream(node.ctx, peer, "/mempool/sync/1.0.0")
+	if err != nil {
+		log.Printf("❌ Failed to create stream to peer %s: %v", peer, err)
+		return err
+	}
+	defer s.Close()
+
+	// Send sync request
+	syncReq := struct {
+		Type      string `json:"type"`
+		Timestamp int64  `json:"timestamp"`
+	}{
+		Type:      "MEMPOOL_SYNC_REQUEST",
+		Timestamp: time.Now().Unix(),
+	}
+
+	if err := json.NewEncoder(s).Encode(syncReq); err != nil {
+		log.Printf("❌ Failed to send sync request to peer %s: %v", peer, err)
+		return err
+	}
+
+	// Receive peer's mempool
+	var peerMempool []Transaction
+	if err := json.NewDecoder(s).Decode(&peerMempool); err != nil {
+		log.Printf("❌ Failed to receive mempool from peer %s: %v", peer, err)
+		return err
+	}
+
+	// Sync mempools
+	m.SyncMempool(peerMempool)
+	log.Printf("✅ Successfully synced mempool with peer %s", peer)
+	return nil
 }

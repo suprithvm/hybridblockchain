@@ -2,6 +2,7 @@ package blockchain
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // ValidatorNode represents a node that can validate blocks
@@ -385,4 +387,67 @@ func (sp *StakePool) CreateStake(address string, amount uint64) (*StakeInfo, err
 	}
 	sp.Stakes[address] = stake
 	return stake, nil
+}
+
+// StakePoolSync represents the sync state of stake pool
+type StakePoolSync struct {
+	Stakes       map[string]StakeInfo `json:"stakes"`
+	StateRoot    string               `json:"state_root"`
+	Timestamp    int64                `json:"timestamp"`
+	LastSyncTime int64                `json:"last_sync_time"`
+	PeerID       string               `json:"peer_id"`
+}
+
+// SyncWithPeer synchronizes stake pool with a specific peer
+func (sp *StakePool) SyncWithPeer(node *Node, peer peer.ID) error {
+	log.Printf("🔄 Starting stake pool sync with peer %s", peer)
+
+	// Create stream to peer
+	s, err := node.Host.NewStream(node.ctx, peer, "/stake/sync/1.0.0")
+	if err != nil {
+		log.Printf("❌ Failed to create stream to peer %s: %v", peer, err)
+		return err
+	}
+	defer s.Close()
+
+	// Send sync request
+	syncReq := struct {
+		Type      string `json:"type"`
+		Timestamp int64  `json:"timestamp"`
+	}{
+		Type:      "STAKE_SYNC_REQUEST",
+		Timestamp: time.Now().Unix(),
+	}
+
+	if err := json.NewEncoder(s).Encode(syncReq); err != nil {
+		log.Printf("❌ Failed to send sync request to peer %s: %v", peer, err)
+		return err
+	}
+
+	// Receive peer's stake pool
+	var peerStakes map[string]StakeInfo
+	if err := json.NewDecoder(s).Decode(&peerStakes); err != nil {
+		log.Printf("❌ Failed to receive stake pool from peer %s: %v", peer, err)
+		return err
+	}
+
+	// Verify and merge stakes
+	sp.mergeStakes(peerStakes)
+	log.Printf("✅ Successfully synced stake pool with peer %s", peer)
+	return nil
+}
+
+// mergeStakes merges peer's stakes with local stake pool
+func (sp *StakePool) mergeStakes(peerStakes map[string]StakeInfo) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	for validator, peerStake := range peerStakes {
+		localStake, exists := sp.Stakes[validator]
+		if !exists || peerStake.Amount > localStake.Amount {
+			// Update stake if peer has higher amount
+			sp.Stakes[validator] = &peerStake
+			log.Printf("📝 Updated stake for validator %s to %d", validator, peerStake.Amount)
+		}
+	}
 }

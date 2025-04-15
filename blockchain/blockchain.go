@@ -37,6 +37,7 @@ type Blockchain struct {
 	communityPool    float64
 	balances         map[string]float64
 	validator        *Validator
+	node             *Node
 }
 
 //intializes the blockchain with the genesis block
@@ -117,6 +118,12 @@ func initDB(config *DatabaseConfig) db.Database {
 func (bc *Blockchain) AddBlock(block *Block, mempool *Mempool, stakePool *StakePool, utxos map[string]UTXO, host host.Host) error {
 	previousBlock := bc.GetLatestBlock()
 
+	// Skip validator selection for miner nodes
+	if bc.node != nil && !bc.node.IsInitializedValidator() {
+		log.Printf("⛏️ Miner node skipping validator selection")
+		return bc.addBlockWithoutValidation(block)
+	}
+
 	// Select validator
 	validatorWallet, validatorHost, err := stakePool.SelectValidator(host)
 	if err != nil {
@@ -124,7 +131,7 @@ func (bc *Blockchain) AddBlock(block *Block, mempool *Mempool, stakePool *StakeP
 		return err
 	}
 
-	// Create the new block
+	// Create the new block with validator wallet address
 	newBlock := NewBlock(previousBlock, mempool, utxos, previousBlock.Header.Difficulty, validatorWallet)
 
 	// Mine and validate the block
@@ -162,6 +169,52 @@ func (bc *Blockchain) AddBlock(block *Block, mempool *Mempool, stakePool *StakeP
 		log.Printf("Block %d validation failed.\n", newBlock.Header.BlockNumber)
 	}
 
+	return nil
+}
+
+func (bc *Blockchain) addBlockWithoutValidation(block *Block) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	// Verify block hash
+	if block.Hash() != block.hash {
+		return fmt.Errorf("invalid block hash")
+	}
+
+	// Verify block number
+	if block.Header.BlockNumber != uint64(len(bc.Chain)) {
+		return fmt.Errorf("invalid block number")
+	}
+
+	// Verify previous hash
+	if len(bc.Chain) > 0 {
+		if block.Header.PreviousHash != bc.Chain[len(bc.Chain)-1].Hash() {
+			return fmt.Errorf("invalid previous hash")
+		}
+	}
+
+	// Add block to chain
+	bc.Chain = append(bc.Chain, *block)
+
+	// Update latest block
+	bc.currentHash = block.Hash()
+
+	// Store block in database
+	if bc.db != nil {
+		blockData, err := block.Serialize()
+		if err != nil {
+			return fmt.Errorf("failed to serialize block: %v", err)
+		}
+		blockKey := db.CreateKey(db.BlockPrefix, []byte(block.Hash()))
+		if err := bc.db.Put(blockKey, blockData); err != nil {
+			return fmt.Errorf("failed to store block: %v", err)
+		}
+		if err := bc.db.Put([]byte("latest_block"), []byte(block.Hash())); err != nil {
+			return fmt.Errorf("failed to update latest block: %v", err)
+		}
+	}
+
+	log.Printf("✅ Block #%d added to chain", block.Header.BlockNumber)
 	return nil
 }
 
@@ -557,7 +610,7 @@ func (bc *Blockchain) GetBlockByHeight(height interface{}) *Block {
 	if h < uint64(len(bc.Chain)) {
 		block := &bc.Chain[h]
 		// Recalculate hash to ensure consistency
-		block.hash = block.CalculateHash()
+		block.hash = block.Hash()
 		return block
 	}
 
@@ -944,10 +997,11 @@ func (bc *Blockchain) InitializeChain() error {
 	genesisBlock := GenesisBlock()
 
 	// Set validator information if available
-	if bc.Node != nil && bc.Node.Host != nil {
-		nodeID := bc.Node.Host.ID().String()
-		genesisBlock.Header.ValidatedBy = nodeID
-		genesisBlock.Header.ValidatorAddress = nodeID
+	if bc.Node != nil && bc.Node.wallet != nil {
+		walletAddress := bc.Node.wallet.Address
+		genesisBlock.Header.ValidatedBy = walletAddress
+		genesisBlock.Header.ValidatorAddress = walletAddress
+		log.Printf("🔐 Setting genesis validator to wallet address: %s", walletAddress)
 	}
 
 	// Calculate state root for genesis block
