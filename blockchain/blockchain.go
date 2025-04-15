@@ -494,33 +494,7 @@ func (bc *Blockchain) AddBlockWithoutValidation(block *Block) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
-	// Special case for genesis block
-	if block.Header.BlockNumber == 0 {
-		// If this is the first block in the chain, add it
-		if len(bc.Chain) == 0 {
-			bc.Chain = append(bc.Chain, *block)
-			bc.currentHash = block.hash
-			log.Printf("✅ Added genesis block to chain")
-			return nil
-		}
-		// If we already have a genesis block, verify it matches
-		if bc.Chain[0].Hash() != block.Hash() {
-			return fmt.Errorf("genesis block mismatch")
-		}
-		return nil
-	}
-
-	// For non-genesis blocks, verify block number
-	if block.Header.BlockNumber != bc.GetHeight()+1 {
-		return fmt.Errorf("invalid block number: expected %d, got %d", bc.GetHeight()+1, block.Header.BlockNumber)
-	}
-
-	// Verify previous hash
-	prevBlock := bc.GetLatestBlock()
-	if prevBlock.hash != block.Header.PreviousHash {
-		return fmt.Errorf("invalid previous hash: expected %s, got %s", prevBlock.hash, block.Header.PreviousHash)
-	}
-
+	
 	// Add block to chain
 	bc.Chain = append(bc.Chain, *block)
 	bc.currentHash = block.hash
@@ -529,7 +503,6 @@ func (bc *Blockchain) AddBlockWithoutValidation(block *Block) error {
 	return nil
 }
 
-// Add these methods to the Blockchain struct
 
 // GetCheckpoints retrieves checkpoints between start and end heights
 func (bc *Blockchain) GetCheckpoints(startHeight, endHeight uint64) []*Checkpoint {
