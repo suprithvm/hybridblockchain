@@ -494,7 +494,6 @@ func (bc *Blockchain) AddBlockWithoutValidation(block *Block) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
-	
 	// Add block to chain
 	bc.Chain = append(bc.Chain, *block)
 	bc.currentHash = block.hash
@@ -502,7 +501,6 @@ func (bc *Blockchain) AddBlockWithoutValidation(block *Block) error {
 	log.Printf("✅ Added block #%d to chain without validation", block.Header.BlockNumber)
 	return nil
 }
-
 
 // GetCheckpoints retrieves checkpoints between start and end heights
 func (bc *Blockchain) GetCheckpoints(startHeight, endHeight uint64) []*Checkpoint {

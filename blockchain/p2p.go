@@ -2105,7 +2105,7 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 		}
 
 		// Process the block
-		if err := n.Blockchain.AddBlock(&block, n.Mempool, n.StakePool, n.UTXOSet.utxos, n.Host); err != nil {
+		if err := n.Blockchain.AddBlockWithoutValidation(&block); err != nil {
 			log.Printf("⚠️ Failed to add block: %v", err)
 			continue
 		}
