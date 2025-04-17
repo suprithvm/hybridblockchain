@@ -47,6 +47,7 @@ const (
 	ChainStateProtocol     = "/blockchain/state/1.0.0"
 	BlockProtocol          = "/blockchain/block/1.0.0"
 	SyncProtocol           = "/blockchain/sync/1.0.0"
+	StakeSyncProtocol      = "/stake/sync/1.0.0"
 )
 
 // Add message type constants at the top of the file
@@ -523,6 +524,7 @@ func (n *Node) registerProtocolHandlers() {
 	n.SetStreamHandler(HeartbeatProtocolID, n.handleHeartbeatStream)
 	n.SetStreamHandler(SyncProtocol, n.handleSyncRequest)
 	n.SetStreamHandler(ValidatorProtocolID, n.handleValidatorStream)
+	n.SetStreamHandler("/stake/sync/1.0.0", n.handleStakeSync)
 
 	// Initialize validator protocol if node is a validator
 	if n.validatorProtocol != nil {
@@ -1374,8 +1376,13 @@ func (n *Node) handleSyncRequest(stream network.Stream) {
 
 	// Calculate total blocks to send
 	totalBlocks := uint64(0)
-	if hasChain && req.Height < height {
-		totalBlocks = height - req.Height
+	if hasChain {
+		// Always send at least the genesis block if we have a chain
+		if req.Height == 0 {
+			totalBlocks = height + 1 // Include genesis block
+		} else if req.Height < height {
+			totalBlocks = height - req.Height
+		}
 	}
 
 	// Send initial response
@@ -1397,36 +1404,54 @@ func (n *Node) handleSyncRequest(stream network.Stream) {
 	log.Printf("   • Total blocks to send: %d", totalBlocks)
 
 	// Send blocks if available
-	if hasChain && req.Height <= height {
+	if hasChain && totalBlocks > 0 {
 		log.Printf("🔄 Starting block transfer...")
-		for i := req.Height + 1; i <= height; i++ {
-			block := n.Blockchain.GetBlockByHeight(i)
-			if block == nil {
-				log.Printf("❌ Error getting block %d: block not found", i)
-				continue
-			}
+		blocksSent := uint64(0)
 
-			// Log block details before sending
-			log.Printf("📦 Sending block #%d:", i)
-			log.Printf("   • Hash: %s", block.Hash())
-			log.Printf("   • Previous Hash: %s", block.Header.PreviousHash)
-			log.Printf("   • Validator: %s", block.Header.ValidatedBy)
-			log.Printf("   • Transaction Count: %d", len(block.Body.Transactions.GetAllTransactions()))
-			log.Printf("   • Timestamp: %s", time.Unix(block.Header.Timestamp, 0).Format(time.RFC3339))
-			log.Printf("   • Difficulty: %d", block.Header.Difficulty)
-			log.Printf("   • Gas Used: %d", block.Header.GasUsed)
-
-			if err := json.NewEncoder(stream).Encode(block); err != nil {
-				log.Printf("❌ Error sending block %d: %v", i, err)
-				return
+		// Always send genesis block if requested height is 0
+		if req.Height == 0 {
+			genesisBlock := n.Blockchain.GetBlockByHeight(0)
+			if genesisBlock != nil {
+				if err := json.NewEncoder(stream).Encode(genesisBlock); err != nil {
+					log.Printf("❌ Error sending genesis block: %v", err)
+					return
+				}
+				blocksSent++
+				log.Printf("✅ Sent genesis block")
 			}
 		}
 
-		// Send completion message
+		// Send remaining blocks if any
+		if req.Height < height {
+			for i := req.Height + 1; i <= height; i++ {
+				block := n.Blockchain.GetBlockByHeight(i)
+				if block == nil {
+					log.Printf("❌ Block not found at height %d", i)
+					continue
+				}
+				// Log block details before sending
+				log.Printf("📦 Sending block #%d:", i)
+				log.Printf("   • Hash: %s", block.Hash())
+				log.Printf("   • Previous Hash: %s", block.Header.PreviousHash)
+				log.Printf("   • Validator: %s", block.Header.ValidatedBy)
+				log.Printf("   • Transaction Count: %d", len(block.Body.Transactions.GetAllTransactions()))
+				log.Printf("   • Timestamp: %s", time.Unix(block.Header.Timestamp, 0).Format(time.RFC3339))
+				log.Printf("   • Difficulty: %d", block.Header.Difficulty)
+				log.Printf("   • Gas Used: %d", block.Header.GasUsed)
+
+				if err := json.NewEncoder(stream).Encode(block); err != nil {
+					log.Printf("❌ Error sending block %d: %v", i, err)
+					return
+				}
+				blocksSent++
+			}
+		}
+
+		// Send sync completion message
 		completeResp := SyncResponse{
 			Height:       height,
 			HasChain:     true,
-			TotalBlocks:  totalBlocks,
+			TotalBlocks:  blocksSent,
 			SyncComplete: true,
 		}
 		if err := json.NewEncoder(stream).Encode(completeResp); err != nil {
@@ -1435,7 +1460,7 @@ func (n *Node) handleSyncRequest(stream network.Stream) {
 		}
 
 		log.Printf("✅ Block sync completed successfully")
-		log.Printf("   • Total blocks sent: %d", totalBlocks)
+		log.Printf("   • Total blocks sent: %d", blocksSent)
 		log.Printf("   • Final height: %d", height)
 	}
 }
