@@ -16,6 +16,8 @@ import (
 	"blockchain-core/blockchain"
 	"blockchain-core/blockchain/db"
 	"blockchain-core/blockchain/sync"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 type NodeRole int
@@ -237,6 +239,8 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 	// Try peer discovery a few times to find validator
 	maxPeerDiscoveryAttempts := 4
 	validatorFound := false
+	var validatorPeer peer.ID
+
 	for i := 0; i < maxPeerDiscoveryAttempts; i++ {
 		log.Printf("👥 Peer discovery attempt %d/%d", i+1, maxPeerDiscoveryAttempts)
 		if err := node.DiscoverPeers(); err != nil {
@@ -246,29 +250,9 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 		// Check for validator peer
 		for _, peer := range node.Host.Network().Peers() {
 			if !node.IsPeerBootstrapNode(peer) {
-				// Sync blockchain
-				log.Printf("🔄 Syncing blockchain with peer %s", peer)
-				if err := node.SyncWithPeer(peer); err != nil {
-					log.Printf("⚠️ Failed to sync blockchain with peer %s: %v", peer, err)
-					continue
-				}
-
-				// Sync stake pool
-				log.Printf("🔄 Syncing stake pool with peer %s", peer)
-				if err := node.StakePool.SyncWithPeer(node, peer); err != nil {
-					log.Printf("⚠️ Failed to sync stake pool with peer %s: %v", peer, err)
-					continue
-				}
-
-				// Sync mempool
-				log.Printf("🔄 Syncing mempool with peer %s", peer)
-				if err := node.Mempool.SyncWithPeer(node, peer); err != nil {
-					log.Printf("⚠️ Failed to sync mempool with peer %s: %v", peer, err)
-					continue
-				}
-
+				validatorPeer = peer
 				validatorFound = true
-				log.Printf("✅ Successfully synced with validator peer %s", peer)
+				log.Printf("✅ Found validator peer: %s", peer)
 				break
 			}
 		}
@@ -286,6 +270,32 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 	if !validatorFound {
 		return fmt.Errorf("no validator peer found after %d attempts", maxPeerDiscoveryAttempts)
 	}
+
+	// Perform syncs with the found validator peer
+	log.Printf("🔄 Starting sync process with validator peer %s", validatorPeer)
+
+	// Sync blockchain
+	log.Printf("🔄 Syncing blockchain with validator peer %s", validatorPeer)
+	if err := node.SyncWithPeer(validatorPeer); err != nil {
+		log.Printf("⚠️ Failed to sync blockchain with validator peer %s: %v", validatorPeer, err)
+		return fmt.Errorf("blockchain sync failed: %v", err)
+	}
+
+	// Sync stake pool
+	log.Printf("🔄 Syncing stake pool with validator peer %s", validatorPeer)
+	if err := node.StakePool.SyncWithPeer(validatorPeer, node.Host); err != nil {
+		log.Printf("⚠️ Failed to sync stake pool with validator peer %s: %v", validatorPeer, err)
+		return fmt.Errorf("stake pool sync failed: %v", err)
+	}
+
+	// Sync mempool
+	log.Printf("🔄 Syncing mempool with validator peer %s", validatorPeer)
+	if err := node.Mempool.SyncWithPeer(node, validatorPeer); err != nil {
+		log.Printf("⚠️ Failed to sync mempool with validator peer %s: %v", validatorPeer, err)
+		return fmt.Errorf("mempool sync failed: %v", err)
+	}
+
+	log.Printf("✅ All syncs completed successfully with validator peer %s", validatorPeer)
 
 	// Start mining
 	log.Printf("⛏️ Starting mining process...")

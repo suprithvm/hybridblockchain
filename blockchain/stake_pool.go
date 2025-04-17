@@ -279,6 +279,9 @@ type StakeInfo struct {
 	Violations     int                   `json:"violations"`
 	Performance    *ValidatorPerformance `json:"performance"`
 	SelectionCount uint64                `json:"selection_count"`
+   	HostID         string                `json:"host_id"`
+	Timestamp      int64                 `json:"timestamp"`
+	IsValidator    bool                  `json:"is_validator"`
 }
 
 // Add these methods to StakePool
@@ -399,58 +402,59 @@ type StakePoolSync struct {
 	PeerID       string               `json:"peer_id"`
 }
 
-// SyncWithPeer synchronizes stake pool with a specific peer
-func (sp *StakePool) SyncWithPeer(node *Node, peer peer.ID) error {
-	log.Printf("🔄 Starting stake pool sync with peer %s", peer)
+// SyncWithPeer synchronizes the stake pool with a specific peer
+func (sp *StakePool) SyncWithPeer(peerID peer.ID, host host.Host) error {
+	log.Printf("🔄 Starting stake pool sync with peer %s", peerID)
 
 	// Create stream to peer
-	s, err := node.Host.NewStream(node.ctx, peer, "/stake/sync/1.0.0")
+	s, err := host.NewStream(context.Background(), peerID, "/stake/sync/1.0.0")
 	if err != nil {
-		log.Printf("❌ Failed to create stream to peer %s: %v", peer, err)
-		return err
+		log.Printf("❌ Failed to create stake sync stream: %v", err)
+		return fmt.Errorf("failed to create stake sync stream: %v", err)
 	}
 	defer s.Close()
 
 	// Send sync request
-	syncReq := struct {
+	req := struct {
 		Type      string `json:"type"`
 		Timestamp int64  `json:"timestamp"`
 	}{
-		Type:      "STAKE_SYNC_REQUEST",
+		Type:      "stake_sync",
 		Timestamp: time.Now().Unix(),
 	}
-
-	if err := json.NewEncoder(s).Encode(syncReq); err != nil {
-		log.Printf("❌ Failed to send sync request to peer %s: %v", peer, err)
-		return err
+	if err := json.NewEncoder(s).Encode(req); err != nil {
+		log.Printf("❌ Failed to send stake sync request: %v", err)
+		return fmt.Errorf("failed to send stake sync request: %v", err)
 	}
 
 	// Receive peer's stake pool
 	var peerStakes map[string]StakeInfo
 	if err := json.NewDecoder(s).Decode(&peerStakes); err != nil {
-		log.Printf("❌ Failed to receive stake pool from peer %s: %v", peer, err)
-		return err
+		log.Printf("❌ Failed to receive peer stakes: %v", err)
+		return fmt.Errorf("failed to receive peer stakes: %v", err)
 	}
 
-	// Verify and merge stakes
-	sp.mergeStakes(peerStakes)
-	log.Printf("✅ Successfully synced stake pool with peer %s", peer)
-	return nil
-}
-
-// mergeStakes merges peer's stakes with local stake pool
-func (sp *StakePool) mergeStakes(peerStakes map[string]StakeInfo) {
+	// Merge stakes
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
-	for validator, peerStake := range peerStakes {
-		localStake, exists := sp.Stakes[validator]
+	for addr, peerStake := range peerStakes {
+		localStake, exists := sp.Stakes[addr]
 		if !exists || peerStake.Amount > localStake.Amount {
-			// Update stake if peer has higher amount
-			sp.Stakes[validator] = &peerStake
-			log.Printf("📝 Updated stake for validator %s to %d", validator, peerStake.Amount)
+			// Update local stake if peer has higher amount
+			sp.Stakes[addr] = &StakeInfo{
+				Address:     peerStake.Address,
+				Amount:      peerStake.Amount,
+				HostID:      peerStake.HostID,
+				Timestamp:   peerStake.Timestamp,
+				IsValidator: peerStake.IsValidator,
+			}
+			log.Printf("✅ Updated stake for %s: %d", addr, peerStake.Amount)
 		}
 	}
+
+	log.Printf("✅ Completed stake pool sync with peer %s", peerID)
+	return nil
 }
 
 // GetValidatorInfo returns the current validator information

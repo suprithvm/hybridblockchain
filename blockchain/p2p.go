@@ -1864,6 +1864,9 @@ func (n *Node) RegisterBlockchainHandlers(bc *Blockchain) error {
 	// Register mempool sync
 	n.Host.SetStreamHandler("/mempool/sync/1.0.0", n.handleMempoolSync)
 
+	// Register stake pool sync
+	n.Host.SetStreamHandler("/stake/sync/1.0.0", n.handleStakeSync)
+
 	// Register state sync
 	n.setupStateSync()
 
@@ -1874,6 +1877,35 @@ func (n *Node) RegisterBlockchainHandlers(bc *Blockchain) error {
 	n.Host.SetStreamHandler("/state/verify/1.0.0", n.handleStateVerification)
 
 	return nil
+}
+
+// handleStakeSync processes stake pool sync requests
+func (n *Node) handleStakeSync(s network.Stream) {
+	defer s.Close()
+
+	// Read sync request
+	var req struct {
+		Type      string `json:"type"`
+		Timestamp int64  `json:"timestamp"`
+	}
+	if err := json.NewDecoder(s).Decode(&req); err != nil {
+		log.Printf("❌ Failed to decode stake sync request: %v", err)
+		return
+	}
+
+	// Get current stake pool state
+	stakes := make(map[string]StakeInfo)
+	for addr, stake := range n.StakePool.Stakes {
+		stakes[addr] = *stake
+	}
+
+	// Send stake pool state
+	if err := json.NewEncoder(s).Encode(stakes); err != nil {
+		log.Printf("❌ Failed to send stake pool state: %v", err)
+		return
+	}
+
+	log.Printf("✅ Sent stake pool state to peer %s", s.Conn().RemotePeer())
 }
 
 // NewNodeFromOptions creates a new node from NodeOptions
