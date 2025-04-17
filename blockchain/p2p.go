@@ -28,9 +28,9 @@ import (
 
 // Protocol IDs
 const (
-	BlockProtocolID         = "/blockchain/1.0.0/block"
-	TransactionProtocolID   = "/blockchain/1.0.0/transaction"
-	HeartbeatProtocolID     = "/blockchain/1.0.0/heartbeat"
+	BlockProtocolID         = "/blockchain/blocks/1.0.0"
+	TransactionProtocolID   = "/blockchain/txs/1.0.0"
+	HeartbeatProtocolID     = "/blockchain/heartbeat/1.0.0"
 	ReconnectInterval       = 10 * time.Second
 	MaxReconnectAttempts    = 5
 	ConnectionRetryInterval = 30 * time.Second
@@ -38,7 +38,7 @@ const (
 	WalletSetupTimeout      = 5 * time.Minute
 	ValidatorSelectionTopic = "/blockchain/validator/selection/1.0.0"
 	ValidatorVoteTopic      = "/blockchain/validator/vote/1.0.0"
-	ValidatorProtocolID     = "/blockchain/1.0.0/validator"
+	ValidatorProtocolID     = "/blockchain/validator/1.0.0"
 	ValidatorHeartbeatTopic = "/blockchain/validator/heartbeat/1.0.0"
 	ValidatorTimeoutTopic   = "/blockchain/validator/timeout/1.0.0"
 	ValidatorSetUpdateTopic = "/blockchain/validator/set/1.0.0"
@@ -47,7 +47,6 @@ const (
 	ChainStateProtocol     = "/blockchain/state/1.0.0"
 	BlockProtocol          = "/blockchain/block/1.0.0"
 	SyncProtocol           = "/blockchain/sync/1.0.0"
-	SyncProtocolID         = "/blockchain/1.0.0/sync" // Added sync protocol ID
 )
 
 // Add message type constants at the top of the file
@@ -2006,7 +2005,7 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 	log.Printf("🔄 Starting sync with peer %s", peerID)
 
 	// Create sync stream
-	stream, err := n.Host.NewStream(context.Background(), peerID, SyncProtocolID)
+	stream, err := n.Host.NewStream(context.Background(), peerID, SyncProtocol)
 	if err != nil {
 		return fmt.Errorf("failed to create sync stream: %v", err)
 	}
