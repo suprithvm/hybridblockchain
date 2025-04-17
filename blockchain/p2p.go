@@ -525,13 +525,14 @@ func (n *Node) registerProtocolHandlers() {
 	n.SetStreamHandler(SyncProtocol, n.handleSyncRequest)
 	n.SetStreamHandler(ValidatorProtocolID, n.handleValidatorStream)
 	n.SetStreamHandler("/stake/sync/1.0.0", n.handleStakeSync)
-
+	n.SetStreamHandler("/mempool/sync/1.0.0", n.handleMempoolSync)
 	// Initialize validator protocol if node is a validator
 	if n.validatorProtocol != nil {
 		n.validatorProtocol.Start()
 	}
 
 	log.Printf("✅ Protocol handlers registered successfully")
+
 }
 
 // handleValidatorStream processes incoming validator-related messages
@@ -1319,11 +1320,29 @@ func (n *Node) setupTransactionProtocol() {
 }
 
 func (n *Node) handleMempoolSync(s network.Stream) {
-	// Send mempool transactions
-	txs := n.Mempool.GetPrioritizedTransactions(100) // Get top 100 transactions
-	if err := json.NewEncoder(s).Encode(txs); err != nil {
-		log.Printf("Error sending mempool: %v", err)
+	log.Printf("📥 Received mempool sync request from peer %s", s.Conn().RemotePeer())
+	defer s.Close()
+
+	// Log local mempool state
+	n.Mempool.mu.RLock()
+	log.Printf("📊 Local Mempool State:")
+	log.Printf("   • Total Transactions: %d", len(n.Mempool.Transactions))
+	for txID, tx := range n.Mempool.Transactions {
+		log.Printf("   • Transaction %s:", txID)
+		log.Printf("     - Sender: %s", tx.Sender)
+		log.Printf("     - Receiver: %s", tx.Receiver)
+		log.Printf("     - Amount: %.4f", tx.Amount)
+		log.Printf("     - Timestamp: %s", time.Unix(tx.Timestamp, 0).Format(time.RFC3339))
 	}
+	n.Mempool.mu.RUnlock()
+
+	// Send mempool data
+	log.Printf("📤 Sending mempool data to peer %s", s.Conn().RemotePeer())
+	if err := json.NewEncoder(s).Encode(n.Mempool.Transactions); err != nil {
+		log.Printf("❌ Failed to send mempool data: %v", err)
+		return
+	}
+	log.Printf("✅ Successfully sent mempool data to peer %s", s.Conn().RemotePeer())
 }
 
 func (n *Node) setupStateSync() {
@@ -2055,10 +2074,10 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 		return nil
 	}
 
-	if resp.Height <= req.Height {
+	/*if resp.Height <= req.Height {
 		log.Printf("ℹ️ Peer %s has same or lower height (%d <= %d)", peerID, resp.Height, req.Height)
 		return nil
-	}
+	}*/
 
 	log.Printf("📊 Sync Progress:")
 	log.Printf("• Current Height: %d", req.Height)

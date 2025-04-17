@@ -279,7 +279,7 @@ type StakeInfo struct {
 	Violations     int                   `json:"violations"`
 	Performance    *ValidatorPerformance `json:"performance"`
 	SelectionCount uint64                `json:"selection_count"`
-   	HostID         string                `json:"host_id"`
+	HostID         string                `json:"host_id"`
 	Timestamp      int64                 `json:"timestamp"`
 	IsValidator    bool                  `json:"is_validator"`
 }
@@ -414,6 +414,19 @@ func (sp *StakePool) SyncWithPeer(peerID peer.ID, host host.Host) error {
 	}
 	defer s.Close()
 
+	// Log local stake pool state before sync
+	sp.mu.Lock()
+	log.Printf("📊 Local Stake Pool State:")
+	log.Printf("   • Total Validators: %d", len(sp.Stakes))
+	for addr, stake := range sp.Stakes {
+		log.Printf("   • Validator %s:", addr)
+		log.Printf("     - Stake Amount: %.4f", float64(stake.Amount))
+		log.Printf("     - Host ID: %s", stake.HostID)
+		log.Printf("     - Is Validator: %v", stake.IsValidator)
+		log.Printf("     - Last Active: %s", stake.LastActive.Format(time.RFC3339))
+	}
+	sp.mu.Unlock()
+
 	// Send sync request
 	req := struct {
 		Type      string `json:"type"`
@@ -422,6 +435,7 @@ func (sp *StakePool) SyncWithPeer(peerID peer.ID, host host.Host) error {
 		Type:      "stake_sync",
 		Timestamp: time.Now().Unix(),
 	}
+	log.Printf("📤 Sending stake sync request to peer %s", peerID)
 	if err := json.NewEncoder(s).Encode(req); err != nil {
 		log.Printf("❌ Failed to send stake sync request: %v", err)
 		return fmt.Errorf("failed to send stake sync request: %v", err)
@@ -429,15 +443,28 @@ func (sp *StakePool) SyncWithPeer(peerID peer.ID, host host.Host) error {
 
 	// Receive peer's stake pool
 	var peerStakes map[string]StakeInfo
+	log.Printf("📥 Waiting for peer's stake pool data...")
 	if err := json.NewDecoder(s).Decode(&peerStakes); err != nil {
 		log.Printf("❌ Failed to receive peer stakes: %v", err)
 		return fmt.Errorf("failed to receive peer stakes: %v", err)
+	}
+
+	// Log received stake pool data
+	log.Printf("📊 Received Stake Pool Data from peer %s:", peerID)
+	log.Printf("   • Total Validators Received: %d", len(peerStakes))
+	for addr, stake := range peerStakes {
+		log.Printf("   • Validator %s:", addr)
+		log.Printf("     - Stake Amount: %.4f", float64(stake.Amount))
+		log.Printf("     - Host ID: %s", stake.HostID)
+		log.Printf("     - Is Validator: %v", stake.IsValidator)
+		log.Printf("     - Last Active: %s", stake.LastActive.Format(time.RFC3339))
 	}
 
 	// Merge stakes
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
+	updates := 0
 	for addr, peerStake := range peerStakes {
 		localStake, exists := sp.Stakes[addr]
 		if !exists || peerStake.Amount > localStake.Amount {
@@ -448,9 +475,25 @@ func (sp *StakePool) SyncWithPeer(peerID peer.ID, host host.Host) error {
 				HostID:      peerStake.HostID,
 				Timestamp:   peerStake.Timestamp,
 				IsValidator: peerStake.IsValidator,
+				LastActive:  peerStake.LastActive,
 			}
-			log.Printf("✅ Updated stake for %s: %d", addr, peerStake.Amount)
+			updates++
+			log.Printf("✅ Updated stake for %s:", addr)
+			log.Printf("   • New Amount: %.4f", float64(peerStake.Amount))
+			log.Printf("   • New Host ID: %s", peerStake.HostID)
+			log.Printf("   • New Validator Status: %v", peerStake.IsValidator)
 		}
+	}
+
+	// Log final state
+	log.Printf("📊 Final Stake Pool State:")
+	log.Printf("   • Total Validators: %d", len(sp.Stakes))
+	log.Printf("   • Updates Applied: %d", updates)
+	for addr, stake := range sp.Stakes {
+		log.Printf("   • Validator %s:", addr)
+		log.Printf("     - Final Stake: %.4f", float64(stake.Amount))
+		log.Printf("     - Final Host ID: %s", stake.HostID)
+		log.Printf("     - Final Validator Status: %v", stake.IsValidator)
 	}
 
 	log.Printf("✅ Completed stake pool sync with peer %s", peerID)

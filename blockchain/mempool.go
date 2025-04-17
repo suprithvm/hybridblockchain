@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -79,7 +80,7 @@ func (m *Mempool) AddTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
 		return m.Transactions[i].GasFee > m.Transactions[j].GasFee
 	})
 
-	log.Printf("��� Transaction successfully added to mempool")
+	log.Printf("✅ Transaction successfully added to mempool")
 	log.Printf("   • Mempool size: %d/%d", len(m.Transactions), m.maxSize)
 	return true
 }
@@ -434,40 +435,92 @@ func (m *Mempool) SortByGasPrice() {
 }
 
 // SyncWithPeer synchronizes mempool with a specific peer
-func (m *Mempool) SyncWithPeer(node *Node, peer peer.ID) error {
-	log.Printf("🔄 Starting mempool sync with peer %s", peer)
+func (mp *Mempool) SyncWithPeer(node *Node, peerID peer.ID) error {
+	log.Printf("🔄 Starting mempool sync with peer %s", peerID)
 
 	// Create stream to peer
-	s, err := node.Host.NewStream(node.ctx, peer, "/mempool/sync/1.0.0")
+	s, err := node.Host.NewStream(context.Background(), peerID, "/mempool/sync/1.0.0")
 	if err != nil {
-		log.Printf("❌ Failed to create stream to peer %s: %v", peer, err)
-		return err
+		log.Printf("❌ Failed to create stream to peer %s: %v", peerID, err)
+		return fmt.Errorf("failed to create stream to peer: %v", err)
 	}
 	defer s.Close()
 
-	// Send sync request
-	syncReq := struct {
-		Type      string `json:"type"`
-		Timestamp int64  `json:"timestamp"`
-	}{
-		Type:      "MEMPOOL_SYNC_REQUEST",
-		Timestamp: time.Now().Unix(),
+	// Log local mempool state before sync
+	mp.mu.RLock()
+	log.Printf("📊 Local Mempool State Before Sync:")
+	log.Printf("   • Total Transactions: %d", len(mp.Transactions))
+	for _, tx := range mp.Transactions {
+		log.Printf("   • Transaction %s:", tx.TransactionID)
+		log.Printf("     - Sender: %s", tx.Sender)
+		log.Printf("     - Receiver: %s", tx.Receiver)
+		log.Printf("     - Amount: %.4f", tx.Amount)
+		log.Printf("     - Timestamp: %s", time.Unix(tx.Timestamp, 0).Format(time.RFC3339))
 	}
+	mp.mu.RUnlock()
 
-	if err := json.NewEncoder(s).Encode(syncReq); err != nil {
-		log.Printf("❌ Failed to send sync request to peer %s: %v", peer, err)
-		return err
+	// Send sync request
+	log.Printf("📤 Sending mempool sync request to peer %s", peerID)
+	if err := json.NewEncoder(s).Encode(struct{}{}); err != nil {
+		log.Printf("❌ Failed to send sync request: %v", err)
+		return fmt.Errorf("failed to send sync request: %v", err)
 	}
 
 	// Receive peer's mempool
-	var peerMempool []Transaction
-	if err := json.NewDecoder(s).Decode(&peerMempool); err != nil {
-		log.Printf("❌ Failed to receive mempool from peer %s: %v", peer, err)
-		return err
+	var peerTransactions []Transaction
+	log.Printf("📥 Waiting for peer's mempool data...")
+	if err := json.NewDecoder(s).Decode(&peerTransactions); err != nil {
+		log.Printf("❌ Failed to receive peer transactions: %v", err)
+		return fmt.Errorf("failed to receive peer transactions: %v", err)
 	}
 
-	// Sync mempools
-	m.SyncMempool(peerMempool)
-	log.Printf("✅ Successfully synced mempool with peer %s", peer)
+	// Log received mempool data
+	log.Printf("📊 Received Mempool Data from peer %s:", peerID)
+	log.Printf("   • Total Transactions Received: %d", len(peerTransactions))
+	for _, tx := range peerTransactions {
+		log.Printf("   • Transaction %s:", tx.TransactionID)
+		log.Printf("     - Sender: %s", tx.Sender)
+		log.Printf("     - Receiver: %s", tx.Receiver)
+		log.Printf("     - Amount: %.4f", tx.Amount)
+		log.Printf("     - Timestamp: %s", time.Unix(tx.Timestamp, 0).Format(time.RFC3339))
+	}
+
+	// Merge transactions
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+
+	updates := 0
+	for _, peerTx := range peerTransactions {
+		exists := false
+		for _, localTx := range mp.Transactions {
+			if localTx.TransactionID == peerTx.TransactionID {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			mp.Transactions = append(mp.Transactions, peerTx)
+			updates++
+			log.Printf("✅ Added new transaction %s:", peerTx.TransactionID)
+			log.Printf("   • Sender: %s", peerTx.Sender)
+			log.Printf("   • Receiver: %s", peerTx.Receiver)
+			log.Printf("   • Amount: %.4f", peerTx.Amount)
+			log.Printf("   • Timestamp: %s", time.Unix(peerTx.Timestamp, 0).Format(time.RFC3339))
+		}
+	}
+
+	// Log final state
+	log.Printf("📊 Final Mempool State:")
+	log.Printf("   • Total Transactions: %d", len(mp.Transactions))
+	log.Printf("   • New Transactions Added: %d", updates)
+	for _, tx := range mp.Transactions {
+		log.Printf("   • Transaction %s:", tx.TransactionID)
+		log.Printf("     - Sender: %s", tx.Sender)
+		log.Printf("     - Receiver: %s", tx.Receiver)
+		log.Printf("     - Amount: %.4f", tx.Amount)
+		log.Printf("     - Timestamp: %s", time.Unix(tx.Timestamp, 0).Format(time.RFC3339))
+	}
+
+	log.Printf("✅ Completed mempool sync with peer %s", peerID)
 	return nil
 }
