@@ -2097,7 +2097,7 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 
 		// Check if this is actually a sync completion message
 		var syncComplete SyncResponse
-		if err := json.Unmarshal([]byte(block.Hash()), &syncComplete); err == nil && syncComplete.SyncComplete {
+		if err := json.NewDecoder(stream).Decode(&syncComplete); err == nil && syncComplete.SyncComplete {
 			log.Printf("✅ Sync completed with peer %s", peerID)
 			log.Printf("📊 Final Stats:")
 			log.Printf("• Blocks Received: %d/%d", blocksReceived, resp.TotalBlocks)
