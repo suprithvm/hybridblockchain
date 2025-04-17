@@ -279,18 +279,13 @@ func (pm *PeerManager) GetBestPeers(n int) []peer.ID {
 	return result
 }
 
-// NeedMorePeers checks if we need more peer connections
+// NeedMorePeers checks if we need to discover more peers
 func (pm *PeerManager) NeedMorePeers() bool {
 	pm.mutex.RLock()
 	defer pm.mutex.RUnlock()
 
-	connectedCount := 0
-	for _, info := range pm.peers {
-		if info.Connected && !info.Blacklisted {
-			connectedCount++
-		}
-	}
-	return connectedCount < minPeers
+	// Only need more peers if we have less than 3 peers
+	return len(pm.peers) < 2
 }
 
 // GetConnectedPeers returns all connected peers

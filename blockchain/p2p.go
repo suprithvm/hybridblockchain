@@ -118,6 +118,7 @@ type Node struct {
 	mu                     sync.RWMutex
 	lastSyncTime           time.Time
 	syncComplete           bool
+	lastPeerDiscovery      time.Time
 }
 
 // publishMessage publishes a message to a specific topic using pubsub
@@ -601,7 +602,7 @@ func (n *Node) startKeepAlive() {
 
 // maintainConnections ensures minimum peer connections
 func (n *Node) maintainConnections() {
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(5 * time.Minute) // Increased from 1 minute to 5 minutes
 	defer ticker.Stop()
 
 	for {
@@ -614,10 +615,13 @@ func (n *Node) maintainConnections() {
 				log.Printf("🔄 No peers connected, attempting to reconnect...")
 				n.ConnectToBootstrapNodes(n.ctx)
 			} else {
-				if n.PeerManager.NeedMorePeers() {
+				// Only discover new peers if we have less than 3 peers
+				// and haven't discovered peers in the last 15 minutes
+				if len(peers) < 3 && time.Since(n.lastPeerDiscovery) > 15*time.Minute {
 					if err := n.DiscoverPeers(); err != nil {
 						log.Printf("⚠️ Peer discovery failed: %v", err)
 					}
+					n.lastPeerDiscovery = time.Now()
 				}
 			}
 		}
