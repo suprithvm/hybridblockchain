@@ -1761,31 +1761,32 @@ func (n *Node) IsSyncing() bool {
 // Start starts the node and initializes all necessary components
 func (n *Node) Start() error {
 	n.runningMu.Lock()
+	defer n.runningMu.Unlock()
+
 	if n.isRunning {
-		n.runningMu.Unlock()
 		return fmt.Errorf("node is already running")
 	}
+
+	// Initialize context
+	n.ctx, n.cancel = context.WithCancel(context.Background())
+	n.keepAliveCtx, n.keepAliveCancel = context.WithCancel(context.Background())
+
+	// Register protocol handlers
+	n.registerProtocolHandlers()
+
+	// Start keep-alive mechanism
+	go n.startKeepAlive()
+
+	// Start connection maintenance
+	go n.maintainConnections()
+
+	// Start heartbeat
+	go n.StartHeartbeat()
+
+	// Set running flag
 	n.isRunning = true
-	n.runningMu.Unlock()
 
-	// Bootstrap DHT
-	log.Printf("🔄 Starting DHT bootstrap...")
-	if err := n.bootstrapDHT(n.ctx); err != nil {
-		return fmt.Errorf("failed to bootstrap DHT: %v", err)
-	}
-
-	// Start peer discovery
-	log.Printf("🔍 Starting peer discovery...")
-	go n.discoverPeers()
-
-	// Only start blockchain sync if this is not a genesis validator
-	if !n.IsInitializedValidator() {
-		go n.startBlockchainSync()
-	} else {
-		log.Printf("🔐 Genesis validator detected - skipping blockchain sync")
-	}
-
-	log.Printf("✅ Node started successfully with ID: %s", n.Host.ID())
+	log.Printf("✅ Node started successfully")
 	return nil
 }
 
@@ -1947,22 +1948,55 @@ func parseChainID(networkID string) uint64 {
 }
 
 func (n *Node) startBlockchainSync() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(30 * time.Second) // Increased interval to 30 seconds
 	defer ticker.Stop()
+
+	lastSyncTime := time.Now()
+	minSyncInterval := 10 * time.Second // Minimum time between syncs
 
 	for {
 		select {
 		case <-n.ctx.Done():
 			return
 		case <-ticker.C:
-			// Get latest block from peers
-			for _, peer := range n.Host.Network().Peers() {
-				if err := n.SyncWithPeer(peer); err != nil {
-					log.Printf("⚠️ Failed to sync with peer %s: %v", peer.String(), err)
+			n.syncMu.RLock()
+			if !n.syncComplete {
+				n.syncMu.RUnlock()
+				continue
+			}
+			n.syncMu.RUnlock()
+
+			// Only sync if we have new peers or it's been a while since last sync
+			if n.hasNewPeers() || time.Since(lastSyncTime) > 5*time.Minute {
+				// Ensure minimum time between syncs
+				if time.Since(lastSyncTime) < minSyncInterval {
+					continue
 				}
+
+				// Get latest block from peers
+				for _, peer := range n.Host.Network().Peers() {
+					if err := n.SyncWithPeer(peer); err != nil {
+						log.Printf("⚠️ Failed to sync with peer %s: %v", peer.String(), err)
+					}
+				}
+				lastSyncTime = time.Now()
 			}
 		}
 	}
+}
+
+// Helper function to check if we have new peers since last sync
+func (n *Node) hasNewPeers() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	currentPeers := n.Host.Network().Peers()
+	for _, peer := range currentPeers {
+		if !n.knownPeers[peer] {
+			return true
+		}
+	}
+	return false
 }
 
 // SyncWithPeer synchronizes blockchain state with a peer
