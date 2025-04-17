@@ -537,20 +537,6 @@ func startSyncService(config *NodeConfig, bc *blockchain.Blockchain, store *bloc
 		return
 	}
 
-	// Only sync with non-bootnode peers
-	for _, peerID := range bc.Node.Host.Network().Peers() {
-		// Skip bootnode peers
-		if bc.Node.IsPeerBootstrapNode(peerID) {
-			continue
-		}
-
-		log.Printf("🔄 Attempting to sync with peer %s", peerID.String())
-		if err := syncService.SyncWithPeer(peerID); err != nil {
-			log.Printf("⚠️ Failed to sync with peer %s: %v", peerID.String(), err)
-			continue
-		}
-	}
-
 	log.Printf("✅ Sync service started on %s", config.ListenAddr)
 }
 
