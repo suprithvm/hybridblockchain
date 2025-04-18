@@ -8,7 +8,6 @@ import (
 	"log"
 	"math/rand"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -66,36 +65,44 @@ func (sp *StakePool) AddValidator(walletAddress string, stake float64, hostID st
 		return fmt.Errorf("stake amount cannot be negative")
 	}
 
-	// Log if using a temporary host ID for genesis validator
-	if strings.HasPrefix(hostID, "genesis-validator-") {
-		log.Printf("⚠️ Using temporary host ID for genesis validator: %s", hostID)
-	}
-
 	// Create or update stake info
 	if _, exists := sp.Stakes[walletAddress]; !exists {
 		log.Printf("📝 Creating new stake entry for validator %s", walletAddress)
 		sp.Stakes[walletAddress] = &StakeInfo{
-			Address:    walletAddress,
-			Amount:     uint64(stake),
-			StartTime:  time.Now(),
-			LastActive: time.Now(),
+			Address:        walletAddress,
+			Amount:         uint64(stake),
+			StartTime:      time.Now(),
+			LastActive:     time.Now(),
+			LastRewardTime: time.Now(),
 			Performance: &ValidatorPerformance{
 				LastUpdate: time.Now(),
 			},
+			HostID:      hostID,
+			Timestamp:   time.Now().Unix(),
+			IsValidator: true,
 		}
 	} else {
 		log.Printf("📝 Updating existing stake entry for validator %s", walletAddress)
 		sp.Stakes[walletAddress].Amount += uint64(stake)
 		sp.Stakes[walletAddress].LastActive = time.Now()
+		sp.Stakes[walletAddress].HostID = hostID
+		sp.Stakes[walletAddress].IsValidator = true
+		sp.Stakes[walletAddress].Timestamp = time.Now().Unix()
 	}
 
 	// Update host mapping
 	sp.WalletToHost[walletAddress] = hostID
 	log.Printf("✅ Successfully registered validator %s with host ID %s", walletAddress, hostID)
 
-	// For genesis validators, ensure they're immediately available
-	if len(sp.Stakes) == 1 {
-		log.Printf("🌟 First validator registered - ready for genesis block")
+	// Log the current state of the stake pool
+	log.Printf("📊 Current Stake Pool State:")
+	log.Printf("   • Total Validators: %d", len(sp.Stakes))
+	for addr, stake := range sp.Stakes {
+		log.Printf("   • Validator %s:", addr)
+		log.Printf("     - Stake Amount: %.4f", float64(stake.Amount))
+		log.Printf("     - Host ID: %s", stake.HostID)
+		log.Printf("     - Is Validator: %v", stake.IsValidator)
+		log.Printf("     - Last Active: %s", stake.LastActive.Format(time.RFC3339))
 	}
 
 	return nil

@@ -1936,7 +1936,21 @@ func (n *Node) handleStakeSync(s network.Stream) {
 	// Create a copy of the stakes to avoid race conditions
 	stakes := make(map[string]StakeInfo)
 	for addr, stake := range n.StakePool.Stakes {
-		stakes[addr] = *stake
+		// Create a deep copy of the stake info
+		stakes[addr] = StakeInfo{
+			Address:        stake.Address,
+			Amount:         stake.Amount,
+			StartTime:      stake.StartTime,
+			LastRewardTime: stake.LastRewardTime,
+			LastActive:     stake.LastActive,
+			WithdrawalReq:  stake.WithdrawalReq,
+			Violations:     stake.Violations,
+			Performance:    stake.Performance,
+			SelectionCount: stake.SelectionCount,
+			HostID:         stake.HostID,
+			Timestamp:      stake.Timestamp,
+			IsValidator:    stake.IsValidator,
+		}
 	}
 
 	// Log the stake pool state being sent
@@ -1982,12 +1996,18 @@ func (n *Node) handleStakeSync(s network.Stream) {
 		if !exists || peerStake.Amount > localStake.Amount {
 			// Update local stake if peer has higher amount
 			n.StakePool.Stakes[addr] = &StakeInfo{
-				Address:     peerStake.Address,
-				Amount:      peerStake.Amount,
-				HostID:      peerStake.HostID,
-				Timestamp:   peerStake.Timestamp,
-				IsValidator: peerStake.IsValidator,
-				LastActive:  peerStake.LastActive,
+				Address:        peerStake.Address,
+				Amount:         peerStake.Amount,
+				StartTime:      peerStake.StartTime,
+				LastRewardTime: peerStake.LastRewardTime,
+				LastActive:     peerStake.LastActive,
+				WithdrawalReq:  peerStake.WithdrawalReq,
+				Violations:     peerStake.Violations,
+				Performance:    peerStake.Performance,
+				SelectionCount: peerStake.SelectionCount,
+				HostID:         peerStake.HostID,
+				Timestamp:      peerStake.Timestamp,
+				IsValidator:    peerStake.IsValidator,
 			}
 			updates++
 			log.Printf("✅ Updated stake for %s:", addr)
