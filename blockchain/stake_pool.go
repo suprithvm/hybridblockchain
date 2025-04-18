@@ -26,8 +26,6 @@ type Stake struct {
 	Amount uint64 `json:"amount"`
 }
 
-
-
 // ValidatorNode represents a node that can validate blocks
 type ValidatorNode struct {
 	Address string
@@ -58,6 +56,7 @@ func NewStakePool(bc *Blockchain) *StakePool {
 		Stakes:       make(map[string]*StakeInfo),
 		WalletToHost: make(map[string]string),
 		blockchain:   bc,
+		stateRoot:    "", // Initialize with empty state root
 	}
 	return sp
 }
@@ -452,7 +451,7 @@ func (sp *StakePool) SyncWithPeer(peerID peer.ID) error {
 	}
 
 	// Receive peer's stake pool data
- 	var peerStakes map[string]*StakeInfo
+	var peerStakes map[string]*StakeInfo
 	if err := json.NewDecoder(stream).Decode(&peerStakes); err != nil {
 		return fmt.Errorf("failed to decode peer stakes: %v", err)
 	}
