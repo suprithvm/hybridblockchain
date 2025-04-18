@@ -86,6 +86,8 @@ type SyncResponse struct {
 	SyncComplete bool   `json:"sync_complete"` // Flag indicating sync completion
 }
 
+
+
 // Node represents a blockchain network node
 type Node struct {
 	Host                   host.Host
@@ -196,7 +198,7 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		Blockchain:        config.Blockchain,
 		Mempool:           NewMempool(nil),
 		UTXOSet:           NewUTXOPool(config.Blockchain.db),
-		StakePool:         NewStakePool(config.Blockchain),
+		StakePool:         config.Blockchain.StakePool, // Use blockchain's stake pool
 		config:            config,
 		ctx:               ctx,
 		cancel:            cancel,
@@ -1916,119 +1918,36 @@ func (n *Node) RegisterBlockchainHandlers(bc *Blockchain) error {
 }
 
 // handleStakeSync processes stake pool sync requests
-func (n *Node) handleStakeSync(s network.Stream) {
-	defer s.Close()
+func (n *Node) handleStakeSync(stream network.Stream) {
+	defer stream.Close()
 
-	// Read sync request
-	var req struct {
-		Type      string `json:"type"`
-		Timestamp int64  `json:"timestamp"`
-	}
-	if err := json.NewDecoder(s).Decode(&req); err != nil {
-		log.Printf("❌ Failed to decode stake sync request: %v", err)
+	// Decode the request
+	var request StakeSyncRequest
+	if err := json.NewDecoder(stream).Decode(&request); err != nil {
+		log.Printf("Error decoding stake sync request: %v", err)
 		return
 	}
 
 	// Get current stake pool state
 	n.StakePool.mu.Lock()
-	defer n.StakePool.mu.Unlock()
-
-	// Create a copy of the stakes to avoid race conditions
-	stakes := make(map[string]StakeInfo)
-	for addr, stake := range n.StakePool.Stakes {
-		// Create a deep copy of the stake info
-		stakes[addr] = StakeInfo{
-			Address:        stake.Address,
-			Amount:         stake.Amount,
-			StartTime:      stake.StartTime,
-			LastRewardTime: stake.LastRewardTime,
-			LastActive:     stake.LastActive,
-			WithdrawalReq:  stake.WithdrawalReq,
-			Violations:     stake.Violations,
-			Performance:    stake.Performance,
-			SelectionCount: stake.SelectionCount,
-			HostID:         stake.HostID,
-			Timestamp:      stake.Timestamp,
-			IsValidator:    stake.IsValidator,
-		}
+	stakes := make(map[string]*StakeInfo)
+	for wallet, stake := range n.StakePool.Stakes {
+		stakes[wallet] = stake
 	}
+	n.StakePool.mu.Unlock()
 
-	// Log the stake pool state being sent
-	log.Printf("📊 Sending stake pool state to peer %s:", s.Conn().RemotePeer())
-	log.Printf("   • Total Validators: %d", len(stakes))
-	for addr, stake := range stakes {
-		log.Printf("   • Validator %s:", addr)
-		log.Printf("     - Stake Amount: %.4f", float64(stake.Amount))
-		log.Printf("     - Host ID: %s", stake.HostID)
-		log.Printf("     - Is Validator: %v", stake.IsValidator)
-		log.Printf("     - Last Active: %s", stake.LastActive.Format(time.RFC3339))
+	// Log stake pool state being sent
+	log.Printf("Sending stake pool state to peer:")
+	log.Printf("Total validators: %d", len(stakes))
+	for wallet, stake := range stakes {
+		log.Printf("Validator %s: Stake %.4f", wallet, stake.Amount)
 	}
 
 	// Send stake pool state
-	if err := json.NewEncoder(s).Encode(stakes); err != nil {
-		log.Printf("❌ Failed to send stake pool state: %v", err)
+	if err := json.NewEncoder(stream).Encode(stakes); err != nil {
+		log.Printf("Error sending stake pool state: %v", err)
 		return
 	}
-
-	// Receive peer's stake pool
-	var peerStakes map[string]StakeInfo
-	log.Printf("📥 Waiting for peer's stake pool data...")
-	if err := json.NewDecoder(s).Decode(&peerStakes); err != nil {
-		log.Printf("❌ Failed to receive peer stakes: %v", err)
-		return
-	}
-
-	// Log received stake pool data
-	log.Printf("📊 Received Stake Pool Data from peer %s:", s.Conn().RemotePeer())
-	log.Printf("   • Total Validators Received: %d", len(peerStakes))
-	for addr, stake := range peerStakes {
-		log.Printf("   • Validator %s:", addr)
-		log.Printf("     - Stake Amount: %.4f", float64(stake.Amount))
-		log.Printf("     - Host ID: %s", stake.HostID)
-		log.Printf("     - Is Validator: %v", stake.IsValidator)
-		log.Printf("     - Last Active: %s", stake.LastActive.Format(time.RFC3339))
-	}
-
-	// Merge stakes
-	updates := 0
-	for addr, peerStake := range peerStakes {
-		localStake, exists := n.StakePool.Stakes[addr]
-		if !exists || peerStake.Amount > localStake.Amount {
-			// Update local stake if peer has higher amount
-			n.StakePool.Stakes[addr] = &StakeInfo{
-				Address:        peerStake.Address,
-				Amount:         peerStake.Amount,
-				StartTime:      peerStake.StartTime,
-				LastRewardTime: peerStake.LastRewardTime,
-				LastActive:     peerStake.LastActive,
-				WithdrawalReq:  peerStake.WithdrawalReq,
-				Violations:     peerStake.Violations,
-				Performance:    peerStake.Performance,
-				SelectionCount: peerStake.SelectionCount,
-				HostID:         peerStake.HostID,
-				Timestamp:      peerStake.Timestamp,
-				IsValidator:    peerStake.IsValidator,
-			}
-			updates++
-			log.Printf("✅ Updated stake for %s:", addr)
-			log.Printf("   • New Amount: %.4f", float64(peerStake.Amount))
-			log.Printf("   • New Host ID: %s", peerStake.HostID)
-			log.Printf("   • New Validator Status: %v", peerStake.IsValidator)
-		}
-	}
-
-	// Log final state
-	log.Printf("📊 Final Stake Pool State:")
-	log.Printf("   • Total Validators: %d", len(n.StakePool.Stakes))
-	log.Printf("   • Updates Applied: %d", updates)
-	for addr, stake := range n.StakePool.Stakes {
-		log.Printf("   • Validator %s:", addr)
-		log.Printf("     - Final Stake: %.4f", float64(stake.Amount))
-		log.Printf("     - Final Host ID: %s", stake.HostID)
-		log.Printf("     - Final Validator Status: %v", stake.IsValidator)
-	}
-
-	log.Printf("✅ Completed stake pool sync with peer %s", s.Conn().RemotePeer())
 }
 
 // NewNodeFromOptions creates a new node from NodeOptions

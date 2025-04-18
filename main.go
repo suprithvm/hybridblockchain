@@ -283,7 +283,7 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 
 	// Sync stake pool
 	log.Printf("🔄 Syncing stake pool with validator peer %s", validatorPeer)
-	if err := node.StakePool.SyncWithPeer(validatorPeer, node.Host); err != nil {
+	if err := node.StakePool.SyncWithPeer(validatorPeer); err != nil {
 		log.Printf("⚠️ Failed to sync stake pool with validator peer %s: %v", validatorPeer, err)
 		return fmt.Errorf("stake pool sync failed: %v", err)
 	}
