@@ -1930,9 +1930,24 @@ func (n *Node) handleStakeSync(s network.Stream) {
 	}
 
 	// Get current stake pool state
+	n.StakePool.mu.Lock()
+	defer n.StakePool.mu.Unlock()
+
+	// Create a copy of the stakes to avoid race conditions
 	stakes := make(map[string]StakeInfo)
 	for addr, stake := range n.StakePool.Stakes {
 		stakes[addr] = *stake
+	}
+
+	// Log the stake pool state being sent
+	log.Printf("📊 Sending stake pool state to peer %s:", s.Conn().RemotePeer())
+	log.Printf("   • Total Validators: %d", len(stakes))
+	for addr, stake := range stakes {
+		log.Printf("   • Validator %s:", addr)
+		log.Printf("     - Stake Amount: %.4f", float64(stake.Amount))
+		log.Printf("     - Host ID: %s", stake.HostID)
+		log.Printf("     - Is Validator: %v", stake.IsValidator)
+		log.Printf("     - Last Active: %s", stake.LastActive.Format(time.RFC3339))
 	}
 
 	// Send stake pool state
@@ -1941,7 +1956,59 @@ func (n *Node) handleStakeSync(s network.Stream) {
 		return
 	}
 
-	log.Printf("✅ Sent stake pool state to peer %s", s.Conn().RemotePeer())
+	// Receive peer's stake pool
+	var peerStakes map[string]StakeInfo
+	log.Printf("📥 Waiting for peer's stake pool data...")
+	if err := json.NewDecoder(s).Decode(&peerStakes); err != nil {
+		log.Printf("❌ Failed to receive peer stakes: %v", err)
+		return
+	}
+
+	// Log received stake pool data
+	log.Printf("📊 Received Stake Pool Data from peer %s:", s.Conn().RemotePeer())
+	log.Printf("   • Total Validators Received: %d", len(peerStakes))
+	for addr, stake := range peerStakes {
+		log.Printf("   • Validator %s:", addr)
+		log.Printf("     - Stake Amount: %.4f", float64(stake.Amount))
+		log.Printf("     - Host ID: %s", stake.HostID)
+		log.Printf("     - Is Validator: %v", stake.IsValidator)
+		log.Printf("     - Last Active: %s", stake.LastActive.Format(time.RFC3339))
+	}
+
+	// Merge stakes
+	updates := 0
+	for addr, peerStake := range peerStakes {
+		localStake, exists := n.StakePool.Stakes[addr]
+		if !exists || peerStake.Amount > localStake.Amount {
+			// Update local stake if peer has higher amount
+			n.StakePool.Stakes[addr] = &StakeInfo{
+				Address:     peerStake.Address,
+				Amount:      peerStake.Amount,
+				HostID:      peerStake.HostID,
+				Timestamp:   peerStake.Timestamp,
+				IsValidator: peerStake.IsValidator,
+				LastActive:  peerStake.LastActive,
+			}
+			updates++
+			log.Printf("✅ Updated stake for %s:", addr)
+			log.Printf("   • New Amount: %.4f", float64(peerStake.Amount))
+			log.Printf("   • New Host ID: %s", peerStake.HostID)
+			log.Printf("   • New Validator Status: %v", peerStake.IsValidator)
+		}
+	}
+
+	// Log final state
+	log.Printf("📊 Final Stake Pool State:")
+	log.Printf("   • Total Validators: %d", len(n.StakePool.Stakes))
+	log.Printf("   • Updates Applied: %d", updates)
+	for addr, stake := range n.StakePool.Stakes {
+		log.Printf("   • Validator %s:", addr)
+		log.Printf("     - Final Stake: %.4f", float64(stake.Amount))
+		log.Printf("     - Final Host ID: %s", stake.HostID)
+		log.Printf("     - Final Validator Status: %v", stake.IsValidator)
+	}
+
+	log.Printf("✅ Completed stake pool sync with peer %s", s.Conn().RemotePeer())
 }
 
 // NewNodeFromOptions creates a new node from NodeOptions
@@ -2095,14 +2162,11 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 			return fmt.Errorf("failed to read block: %v", err)
 		}
 
-		// Check if this is actually a sync completion message
-		var syncComplete SyncResponse
-		if err := json.NewDecoder(stream).Decode(&syncComplete); err == nil && syncComplete.SyncComplete {
-			log.Printf("✅ Sync completed with peer %s", peerID)
-			log.Printf("📊 Final Stats:")
-			log.Printf("• Blocks Received: %d/%d", blocksReceived, resp.TotalBlocks)
-			return nil
-		}
+		// Log block details before adding
+		log.Printf("📦 Received block:")
+		log.Printf("   • Block Number: %d", block.Header.BlockNumber)
+		log.Printf("   • Hash: %s", block.Hash())
+		log.Printf("   • Previous Hash: %s", block.Header.PreviousHash)
 
 		// Process the block
 		if err := n.Blockchain.AddBlockWithoutValidation(&block); err != nil {
@@ -2111,10 +2175,17 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 		}
 
 		blocksReceived++
-		if blocksReceived%10 == 0 {
-			log.Printf("📦 Received %d/%d blocks (%.1f%%)",
-				blocksReceived, resp.TotalBlocks,
-				float64(blocksReceived)/float64(resp.TotalBlocks)*100)
+		log.Printf("✅ Added block %d/%d (%.1f%%)",
+			blocksReceived, resp.TotalBlocks,
+			float64(blocksReceived)/float64(resp.TotalBlocks)*100)
+
+		// Check if this is actually a sync completion message
+		var syncComplete SyncResponse
+		if err := json.NewDecoder(stream).Decode(&syncComplete); err == nil && syncComplete.SyncComplete {
+			log.Printf("✅ Sync completed with peer %s", peerID)
+			log.Printf("📊 Final Stats:")
+			log.Printf("• Blocks Received: %d/%d", blocksReceived, resp.TotalBlocks)
+			return nil
 		}
 	}
 
