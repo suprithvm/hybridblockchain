@@ -209,6 +209,10 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 	// Log node ID
 	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
 
+	// Set the node in the blockchain
+	bc.Node = node
+	log.Printf("🔗 Blockchain node connection established with ID: %s", node.Host.ID())
+
 	// Connect to bootstrap nodes with retries
 	log.Printf("🔄 Connecting to bootstrap nodes...")
 	maxRetries := 5

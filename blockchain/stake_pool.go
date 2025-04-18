@@ -435,7 +435,25 @@ func (sp *StakePool) SyncWithPeer(peerID peer.ID) error {
 		log.Printf("Validator %s: Stake %.4f", wallet, stake.Amount)
 	}
 
-	// Create a stream to the peer
+	// Comprehensive safety checks
+	if sp.blockchain == nil {
+		return fmt.Errorf("blockchain is nil in StakePool.SyncWithPeer")
+	}
+
+	if sp.blockchain.Node == nil {
+		return fmt.Errorf("blockchain.Node is nil in StakePool.SyncWithPeer")
+	}
+
+	if sp.blockchain.Node.Host == nil {
+		return fmt.Errorf("blockchain.Node.Host is nil in StakePool.SyncWithPeer")
+	}
+
+	if sp.blockchain.Node.ctx == nil {
+		return fmt.Errorf("blockchain.Node.ctx is nil in StakePool.SyncWithPeer")
+	}
+
+	// Safely proceed with stream creation
+	log.Printf("Creating stream to peer %s for stake sync", peerID)
 	stream, err := sp.blockchain.Node.Host.NewStream(sp.blockchain.Node.ctx, peerID, protocol.ID(StakeSyncProtocol))
 	if err != nil {
 		return fmt.Errorf("failed to create stream: %v", err)
@@ -465,10 +483,27 @@ func (sp *StakePool) SyncWithPeer(peerID peer.ID) error {
 
 	// Merge stakes from peer
 	for wallet, peerStake := range peerStakes {
-		// If we don't have this validator or peer has higher stake, update our stake
-		if existingStake, exists := sp.Stakes[wallet]; !exists || peerStake.Amount > existingStake.Amount {
+		// Skip invalid stake info
+		if peerStake == nil {
+			log.Printf("⚠️ Received nil stake info for %s, skipping", wallet)
+			continue
+		}
+
+		// First check if we have this validator
+		existingStake, exists := sp.Stakes[wallet]
+
+		// If we don't have this validator, add it
+		if !exists {
+			log.Printf("➕ Adding new validator %s with stake %.4f", wallet, peerStake.Amount)
 			sp.Stakes[wallet] = peerStake
-			log.Printf("Updated stake for validator %s to %.4f", wallet, peerStake.Amount)
+			continue
+		}
+
+		// If peer has higher stake, update our stake
+		if peerStake.Amount > existingStake.Amount {
+			log.Printf("🔄 Updating stake for %s from %.4f to %.4f",
+				wallet, existingStake.Amount, peerStake.Amount)
+			sp.Stakes[wallet] = peerStake
 		}
 	}
 
