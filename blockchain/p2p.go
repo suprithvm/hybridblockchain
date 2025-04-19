@@ -86,8 +86,6 @@ type SyncResponse struct {
 	SyncComplete bool   `json:"sync_complete"` // Flag indicating sync completion
 }
 
-
-
 // Node represents a blockchain network node
 type Node struct {
 	Host                   host.Host

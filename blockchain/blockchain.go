@@ -841,11 +841,11 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	}
 
 	// Mine the block using the existing MineBlock function from block.go
-	stakePool := NewStakePool(bc)
 	log.Printf("⛏️ Mining block #%d - searching for valid hash...", newBlock.Header.BlockNumber)
 	startTime := time.Now()
 
-	if err := MineBlock(&newBlock, previousBlock, stakePool, difficulty, bc.p2pHost); err != nil {
+	// Use the blockchain's existing StakePool instead of creating a new one
+	if err := MineBlock(&newBlock, previousBlock, bc.StakePool, difficulty, bc.p2pHost); err != nil {
 		log.Printf("❌ Mining failed: %v", err)
 		return nil, err
 	}

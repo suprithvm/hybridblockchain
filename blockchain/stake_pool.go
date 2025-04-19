@@ -66,7 +66,7 @@ func (sp *StakePool) AddValidator(walletAddress string, stake float64, hostID st
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
-	log.Printf("🔐 Adding validator %s with stake %.4f", walletAddress, stake)
+	log.Printf("🔐 Adding validator %s with stake %.4f", walletAddress, float64(stake))
 
 	// Validate inputs
 	if walletAddress == "" {
@@ -250,12 +250,16 @@ func (sp *StakePool) GetValidators(count int) ([]ValidatorNode, error) {
 
 	validators := make([]ValidatorNode, 0)
 	for addr, stake := range sp.Stakes {
-		if stake.Amount > 0 && time.Since(stake.StartTime) >= MinStakeAge {
+		if stake.Amount >= 0 && time.Since(stake.StartTime) >= MinStakeAge {
 			validators = append(validators, ValidatorNode{
 				Address: addr,
 				Stake:   float64(stake.Amount),
 				hostID:  sp.WalletToHost[addr],
 			})
+			log.Printf("🔍 Found eligible validator %s with stake %.4f", addr, float64(stake.Amount))
+		} else {
+			log.Printf("⚠️ Skipping validator %s - insufficient stake or age (amount: %d, age: %v)",
+				addr, stake.Amount, time.Since(stake.StartTime))
 		}
 	}
 
@@ -432,7 +436,7 @@ func (sp *StakePool) SyncWithPeer(peerID peer.ID) error {
 	log.Printf("Local stake pool state before sync:")
 	log.Printf("Total validators: %d", len(sp.Stakes))
 	for wallet, stake := range sp.Stakes {
-		log.Printf("Validator %s: Stake %.4f", wallet, stake.Amount)
+		log.Printf("Validator %s: Stake %.4f", wallet, float64(stake.Amount))
 	}
 
 	// Comprehensive safety checks
@@ -478,7 +482,7 @@ func (sp *StakePool) SyncWithPeer(peerID peer.ID) error {
 	log.Printf("Received stake pool state from peer:")
 	log.Printf("Total validators: %d", len(peerStakes))
 	for wallet, stake := range peerStakes {
-		log.Printf("Validator %s: Stake %.4f", wallet, stake.Amount)
+		log.Printf("Validator %s: Stake %.4f", wallet, float64(stake.Amount))
 	}
 
 	// Merge stakes from peer
@@ -511,7 +515,7 @@ func (sp *StakePool) SyncWithPeer(peerID peer.ID) error {
 	log.Printf("Final stake pool state after sync:")
 	log.Printf("Total validators: %d", len(sp.Stakes))
 	for wallet, stake := range sp.Stakes {
-		log.Printf("Validator %s: Stake %.4f", wallet, stake.Amount)
+		log.Printf("Validator %s: Stake %.4f", wallet, float64(stake.Amount))
 	}
 
 	return nil
