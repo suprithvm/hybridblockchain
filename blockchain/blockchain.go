@@ -827,7 +827,7 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 		Header: &BlockHeader{
 			Version:      1,
 			BlockNumber:  previousBlock.Header.BlockNumber + 1,
-			PreviousHash: previousBlock.Hash(),
+			PreviousHash: previousBlock.hash,
 			Timestamp:    time.Now().Unix(),
 			Difficulty:   difficulty,
 			GasLimit:     BaseGasLimit,

@@ -43,11 +43,12 @@ const (
 	ValidatorTimeoutTopic   = "/blockchain/validator/timeout/1.0.0"
 	ValidatorSetUpdateTopic = "/blockchain/validator/set/1.0.0"
 	// Protocol paths
-	BlockchainSyncProtocol = "/blockchain/sync/1.0.0"
-	ChainStateProtocol     = "/blockchain/state/1.0.0"
-	BlockProtocol          = "/blockchain/block/1.0.0"
-	SyncProtocol           = "/blockchain/sync/1.0.0"
-	StakeSyncProtocol      = "/stake/sync/1.0.0"
+	BlockchainSyncProtocol    = "/blockchain/sync/1.0.0"
+	ChainStateProtocol        = "/blockchain/state/1.0.0"
+	BlockProtocol             = "/blockchain/block/1.0.0"
+	SyncProtocol              = "/blockchain/sync/1.0.0"
+	StakeSyncProtocol         = "/stake/sync/1.0.0"
+	BlockValidationProtocolID = "/miner-validator/block-validation/1.0.0"
 )
 
 // Add message type constants at the top of the file
@@ -530,9 +531,10 @@ func (n *Node) registerProtocolHandlers() {
 	if n.validatorProtocol != nil {
 		n.validatorProtocol.Start()
 	}
-
+	n.Host.SetStreamHandler(BlockValidationProtocolID, n.handleMinerBlockValidationRequest)
 	log.Printf("✅ Protocol handlers registered successfully")
 
+	// Register validator handle
 }
 
 // handleValidatorStream processes incoming validator-related messages
@@ -2375,4 +2377,100 @@ func (n *Node) SendMessage(peerID peer.ID, msg *Message) error {
 
 	_, err = stream.Write(data)
 	return err
+}
+
+// handleValidationRequest processes block validation requests from miners
+func (n *Node) handleMinerBlockValidationRequest(stream network.Stream) {
+	defer stream.Close()
+
+	remotePeer := stream.Conn().RemotePeer()
+	log.Printf("📥 Received block validation request from miner %s", remotePeer.String())
+
+	// Read block data
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		log.Printf("❌ Error reading block data: %v", err)
+		n.sendValidatorVerificationResponse(stream, false, fmt.Sprintf("Error reading block data: %v", err))
+		return
+	}
+
+	// Deserialize the block
+	var block Block
+	if err := json.Unmarshal(data, &block); err != nil {
+		log.Printf("❌ Error deserializing block: %v", err)
+		n.sendValidatorVerificationResponse(stream, false, fmt.Sprintf("Error deserializing block: %v", err))
+		return
+	}
+
+	// Log block info
+	log.Printf("🔍 Validating block #%d from miner", block.Header.BlockNumber)
+
+	// Perform validation checks
+	isValid := true
+	var validationError string
+
+	// 1. Verify we are a registered validator
+	if n.wallet == nil {
+		isValid = false
+		validationError = "validator wallet not configured"
+		log.Printf("❌ Validation failed: %s", validationError)
+		n.sendValidatorVerificationResponse(stream, isValid, validationError)
+		return
+	}
+
+	validatorAddress := n.wallet.Address
+
+	// 2. Verify we are in the validators list
+	validators, err := n.Blockchain.StakePool.GetValidators(0) // 0 to get all validators
+	isRegistered := false
+	for _, validator := range validators {
+		if validator.Address == validatorAddress {
+			isRegistered = true
+			break
+		}
+	}
+
+	if !isRegistered {
+		isValid = false
+		validationError = fmt.Sprintf("not a registered validator: %s", validatorAddress)
+		log.Printf("❌ Validation failed: %s", validationError)
+		n.sendValidatorVerificationResponse(stream, isValid, validationError)
+		return
+	}
+
+	// 3. Basic block validation
+	if block.Header.BlockNumber > 0 {
+		prevBlock, err := n.Blockchain.GetBlock(block.Header.PreviousHash)
+		if err != nil {
+			isValid = false
+			validationError = fmt.Sprintf("previous block not found: %v", err)
+		} else if block.Header.PreviousHash != prevBlock.Hash() {
+			isValid = false
+			validationError = "invalid previous block hash"
+		}
+	}
+
+	// Send validation response
+	if !isValid {
+		log.Printf("❌ Block validation failed: %s", validationError)
+	} else {
+		log.Printf("✅ Block #%d validated successfully", block.Header.BlockNumber)
+	}
+
+	n.sendValidatorVerificationResponse(stream, isValid, validationError)
+}
+
+// sendValidatorVerificationResponse formats and sends a validation result back to the miner
+func (n *Node) sendValidatorVerificationResponse(stream network.Stream, valid bool, errMsg string) {
+	response := struct {
+		Valid bool   `json:"valid"`
+		Error string `json:"error,omitempty"`
+	}{
+		Valid: valid,
+		Error: errMsg,
+	}
+
+	if err := json.NewEncoder(stream).Encode(response); err != nil {
+		log.Printf("❌ Error sending validator verification response: %v", err)
+	}
 }

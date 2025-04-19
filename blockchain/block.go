@@ -13,7 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"context"
+
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 const (
@@ -516,7 +519,7 @@ func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, difficul
 
 	// Calculate hash
 	for {
-		hash := block.CalculateHash()
+		hash := block.Hash()
 		if isHashValid(hash, difficulty) {
 			block.hash = hash
 			miningTime := time.Since(startTime)
@@ -671,21 +674,65 @@ func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host
 		return true, nil
 	}
 
-	// In a real network, we would send the block to the validator
-	// and wait for their response
+	// Get the validator's host ID
 	hostID, exists := validator.HostID()
 	if !exists {
 		return false, fmt.Errorf("validator host ID not found")
 	}
 
-	// Here we would use the peer host to send the validation request
-	// This is a simplified implementation
-	log.Printf("📡 Sending validation request to host %s", hostID)
+	// Parse the host ID
+	validatorPeerID, err := peer.Decode(hostID)
+	if err != nil {
+		return false, fmt.Errorf("invalid validator host ID: %v", err)
+	}
 
-	// Simulate network delay
-	time.Sleep(100 * time.Millisecond)
+	log.Printf("📡 Connecting to validator %s at peer ID %s", validator.Address, validatorPeerID.String())
 
-	// For now, just return success
+	// Create a stream to the validator
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Using the miner-validator block validation protocol ID
+	// Must match the constant BlockValidationProtocolID defined in p2p.go
+	stream, err := peerHost.NewStream(ctx, validatorPeerID, "/miner-validator/block-validation/1.0.0")
+	if err != nil {
+		return false, fmt.Errorf("failed to create stream to validator: %v", err)
+	}
+	defer stream.Close()
+
+	log.Printf("🔗 Connected to validator, sending block #%d for validation", block.Header.BlockNumber)
+
+	// Serialize the block and send it to the validator
+	blockData, err := json.Marshal(block)
+	if err != nil {
+		return false, fmt.Errorf("failed to serialize block: %v", err)
+	}
+
+	if _, err := stream.Write(blockData); err != nil {
+		return false, fmt.Errorf("failed to send block to validator: %v", err)
+	}
+
+	// Wait for and read the validation response
+	log.Printf("⏳ Waiting for validation response from validator %s", validator.Address)
+
+	// Read the response
+	var response struct {
+		Valid bool   `json:"valid"`
+		Error string `json:"error,omitempty"`
+	}
+
+	// Use json decoder to read response
+	if err := json.NewDecoder(stream).Decode(&response); err != nil {
+		return false, fmt.Errorf("failed to read validation response: %v", err)
+	}
+
+	// Check the validation result
+	if !response.Valid {
+		log.Printf("❌ Block rejected by validator %s: %s", validator.Address, response.Error)
+		return false, fmt.Errorf("validation rejected: %s", response.Error)
+	}
+
+	log.Printf("✅ Block validated by validator %s", validator.Address)
 	return true, nil
 }
 
