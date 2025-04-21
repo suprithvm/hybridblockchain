@@ -211,6 +211,7 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 
 	// Set the node in the blockchain
 	bc.Node = node
+	
 	log.Printf("🔗 Blockchain node connection established with ID: %s", node.Host.ID())
 
 	// Connect to bootstrap nodes with retries
@@ -376,6 +377,7 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) error {
 
 	// Set the node in the blockchain
 	bc.Node = node
+	
 	log.Printf("🔗 Connected node to blockchain with ID: %s", node.Host.ID())
 
 	// 5. Connect to bootstrap nodes with retries

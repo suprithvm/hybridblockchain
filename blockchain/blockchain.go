@@ -64,6 +64,7 @@ func InitialiseBlockchain(dbConfig *DatabaseConfig) *Blockchain {
 		Validators:    make(map[string]*Validator),
 		communityPool: 0,
 		balances:      make(map[string]float64),
+		p2pHost:       nil,
 	}
 
 	genesis := GenesisBlock()
@@ -740,6 +741,7 @@ func InitialiseBlockchainWithStore(store *Store) *Blockchain {
 		Validators:    make(map[string]*Validator),
 		communityPool: 0,
 		balances:      make(map[string]float64),
+		p2pHost:       nil,
 	}
 
 	genesis := GenesisBlock()
@@ -845,7 +847,7 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	startTime := time.Now()
 
 	// Use the blockchain's existing StakePool instead of creating a new one
-	if err := MineBlock(&newBlock, previousBlock, bc.StakePool, difficulty, bc.p2pHost); err != nil {
+	if err := MineBlock(&newBlock, previousBlock, bc.StakePool, difficulty, bc.Node.Host); err != nil {
 		log.Printf("❌ Mining failed: %v", err)
 		return nil, err
 	}

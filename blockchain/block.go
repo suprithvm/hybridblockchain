@@ -518,7 +518,7 @@ func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, difficul
 	block.Header.Difficulty = difficulty
 
 	// Calculate hash
- 	for {
+	for {
 		hash := block.CalculateHash()
 		if isHashValid(hash, difficulty) {
 			block.hash = hash
@@ -668,8 +668,6 @@ func isHashValid(hash string, difficulty uint32) bool {
 func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host) (bool, error) {
 	log.Printf("📤 Requesting validation from validator %s", validator.Address)
 
-	
-
 	// Get the validator's host ID
 	hostID, exists := validator.HostID()
 	if !exists {
@@ -688,8 +686,7 @@ func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Using the miner-validator block validation protocol ID
-	// Must match the constant BlockValidationProtocolID defined in p2p.go
+	// Create stream to validator
 	stream, err := peerHost.NewStream(ctx, validatorPeerID, "/miner-validator/block-validation/1.0.0")
 	if err != nil {
 		return false, fmt.Errorf("failed to create stream to validator: %v", err)
@@ -711,24 +708,28 @@ func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host
 	// Wait for and read the validation response
 	log.Printf("⏳ Waiting for validation response from validator %s", validator.Address)
 
-	// Read the response
-	var response struct {
-		Valid bool   `json:"valid"`
-		Error string `json:"error,omitempty"`
-	}
-
-	// Use json decoder to read response
-	if err := json.NewDecoder(stream).Decode(&response); err != nil {
+	// Read the validation response
+	response := make([]byte, 1024)
+	n, err := stream.Read(response)
+	if err != nil {
 		return false, fmt.Errorf("failed to read validation response: %v", err)
 	}
 
-	// Check the validation result
-	if !response.Valid {
-		log.Printf("❌ Block rejected by validator %s: %s", validator.Address, response.Error)
-		return false, fmt.Errorf("validation rejected: %s", response.Error)
+	// Parse the validation response
+	var validationResponse struct {
+		Valid bool   `json:"valid"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(response[:n], &validationResponse); err != nil {
+		return false, fmt.Errorf("failed to parse validation response: %v", err)
 	}
 
-	log.Printf("✅ Block validated by validator %s", validator.Address)
+	if !validationResponse.Valid {
+		log.Printf("❌ Validator %s rejected block: %s", validator.Address, validationResponse.Error)
+		return false, nil
+	}
+
+	log.Printf("✅ Validator %s accepted block", validator.Address)
 	return true, nil
 }
 
