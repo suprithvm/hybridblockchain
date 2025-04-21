@@ -701,8 +701,12 @@ func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host
 		return false, fmt.Errorf("failed to serialize block: %v", err)
 	}
 
+	// Write the block data and close the write side
 	if _, err := stream.Write(blockData); err != nil {
 		return false, fmt.Errorf("failed to send block to validator: %v", err)
+	}
+	if err := stream.CloseWrite(); err != nil {
+		return false, fmt.Errorf("failed to close write side of stream: %v", err)
 	}
 
 	// Wait for and read the validation response
