@@ -2104,7 +2104,7 @@ func (n *Node) SyncWithPeer(peerID peer.ID) error {
 		// Log block details before adding
 		log.Printf("📦 Received block:")
 		log.Printf("   • Block Number: %d", block.Header.BlockNumber)
-		log.Printf("   • Hash: %s", block.Hash())
+		log.Printf("   • Hash: %s", block.hash)
 		log.Printf("   • Previous Hash: %s", block.Header.PreviousHash)
 
 		// Process the block
@@ -2387,20 +2387,25 @@ func (n *Node) handleMinerBlockValidationRequest(stream network.Stream) {
 	log.Printf("📥 Received block validation request from miner %s", remotePeer.String())
 
 	// Read block data
+	log.Printf("📥 Attempting to read block data from stream...")
 	data, err := io.ReadAll(stream)
 	if err != nil {
 		log.Printf("❌ Error reading block data: %v", err)
 		n.sendValidatorVerificationResponse(stream, false, fmt.Sprintf("Error reading block data: %v", err))
 		return
 	}
+	log.Printf("✅ Successfully read %d bytes of block data", len(data))
 
 	// Deserialize the block
+	log.Printf("🔄 Attempting to deserialize block data...")
 	var block Block
 	if err := json.Unmarshal(data, &block); err != nil {
 		log.Printf("❌ Error deserializing block: %v", err)
+		log.Printf("❌ Block data content: %s", string(data))
 		n.sendValidatorVerificationResponse(stream, false, fmt.Sprintf("Error deserializing block: %v", err))
 		return
 	}
+	log.Printf("✅ Successfully deserialized block #%d", block.Header.BlockNumber)
 
 	// Log block info
 	log.Printf("🔍 Validating block #%d from miner", block.Header.BlockNumber)
@@ -2422,6 +2427,14 @@ func (n *Node) handleMinerBlockValidationRequest(stream network.Stream) {
 
 	// 2. Verify we are in the validators list
 	validators, err := n.Blockchain.StakePool.GetValidators(0) // 0 to get all validators
+	if err != nil {
+		isValid = false
+		validationError = fmt.Sprintf("failed to get validators: %v", err)
+		log.Printf("❌ Validation failed: %s", validationError)
+		n.sendValidatorVerificationResponse(stream, isValid, validationError)
+		return
+	}
+
 	isRegistered := false
 	for _, validator := range validators {
 		if validator.Address == validatorAddress {
@@ -2447,6 +2460,23 @@ func (n *Node) handleMinerBlockValidationRequest(stream network.Stream) {
 		} else if block.Header.PreviousHash != prevBlock.Hash() {
 			isValid = false
 			validationError = "invalid previous block hash"
+		}
+	}
+
+	// 4. Validate block structure and transactions
+	if isValid {
+		if err := validateBlockStructure(&block); err != nil {
+			isValid = false
+			validationError = fmt.Sprintf("invalid block structure: %v", err)
+		} else {
+			// Validate transactions
+			for _, tx := range block.Body.Transactions.GetAllTransactions() {
+				if !tx.VerifySignature() {
+					isValid = false
+					validationError = fmt.Sprintf("invalid transaction signature in tx %s", tx.TransactionID)
+					break
+				}
+			}
 		}
 	}
 
