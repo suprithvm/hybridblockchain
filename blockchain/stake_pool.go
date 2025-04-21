@@ -498,16 +498,18 @@ func (sp *StakePool) SyncWithPeer(peerID peer.ID) error {
 
 		// If we don't have this validator, add it
 		if !exists {
-			log.Printf("➕ Adding new validator %s with stake %.4f", wallet, peerStake.Amount)
+			log.Printf("➕ Adding new validator %s with stake %.4f and host ID %s", wallet, peerStake.Amount, peerStake.HostID)
 			sp.Stakes[wallet] = peerStake
+			sp.WalletToHost[wallet] = peerStake.HostID
 			continue
 		}
 
 		// If peer has higher stake, update our stake
 		if peerStake.Amount > existingStake.Amount {
-			log.Printf("🔄 Updating stake for %s from %.4f to %.4f",
-				wallet, existingStake.Amount, peerStake.Amount)
+			log.Printf("🔄 Updating stake for %s from %.4f to %.4f and host ID from %s to %s",
+				wallet, existingStake.Amount, peerStake.Amount, existingStake.HostID, peerStake.HostID)
 			sp.Stakes[wallet] = peerStake
+			sp.WalletToHost[wallet] = peerStake.HostID
 		}
 	}
 

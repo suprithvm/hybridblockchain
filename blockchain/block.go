@@ -518,8 +518,8 @@ func MineBlock(block *Block, previousBlock Block, stakePool *StakePool, difficul
 	block.Header.Difficulty = difficulty
 
 	// Calculate hash
-	for {
-		hash := block.Hash()
+ 	for {
+		hash := block.CalculateHash()
 		if isHashValid(hash, difficulty) {
 			block.hash = hash
 			miningTime := time.Since(startTime)
@@ -668,11 +668,7 @@ func isHashValid(hash string, difficulty uint32) bool {
 func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host) (bool, error) {
 	log.Printf("📤 Requesting validation from validator %s", validator.Address)
 
-	// If we're in test mode or local mode without networking
-	if peerHost == nil {
-		log.Printf("🔄 Local validation mode - simulating validator response")
-		return true, nil
-	}
+	
 
 	// Get the validator's host ID
 	hostID, exists := validator.HostID()
