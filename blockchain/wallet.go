@@ -3,6 +3,7 @@ package blockchain
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -273,4 +274,30 @@ func (w *Wallet) SaveToFile(filename string) error {
 	}
 
 	return nil
+}
+
+// SignBlock signs the block hash using validator's private key
+func (w *Wallet) SignBlock(block *Block) ([]byte, error) {
+	// Get the raw bytes of the block hash
+	hashBytes, err := hex.DecodeString(block.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("invalid block hash: %v", err)
+	}
+
+	// Sign using ECDSA
+	r, s, err := ecdsa.Sign(rand.Reader, w.PrivateKey, hashBytes)
+	if err != nil {
+		return nil, fmt.Errorf("signing failed: %v", err)
+	}
+
+	// Encode the signature (45 bytes for P-256: 32-byte R + 32-byte S + 1-byte header)
+	signature := append(r.Bytes(), s.Bytes()...)
+
+	// Pad to fixed length if needed (optional)
+	if len(signature) < 64 {
+		padding := make([]byte, 64-len(signature))
+		signature = append(padding, signature...)
+	}
+
+	return signature, nil
 }

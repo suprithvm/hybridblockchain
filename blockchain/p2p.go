@@ -2391,7 +2391,7 @@ func (n *Node) handleMinerBlockValidationRequest(stream network.Stream) {
 	data, err := io.ReadAll(stream)
 	if err != nil {
 		log.Printf("❌ Error reading block data: %v", err)
-		n.sendValidatorVerificationResponse(stream, false, fmt.Sprintf("Error reading block data: %v", err))
+		n.sendValidatorVerificationResponse(stream, nil, false, fmt.Sprintf("Error reading block data: %v", err))
 		return
 	}
 	log.Printf("✅ Successfully read %d bytes of block data", len(data))
@@ -2402,7 +2402,7 @@ func (n *Node) handleMinerBlockValidationRequest(stream network.Stream) {
 	if err := json.Unmarshal(data, &block); err != nil {
 		log.Printf("❌ Error deserializing block: %v", err)
 		log.Printf("❌ Block data content: %s", string(data))
-		n.sendValidatorVerificationResponse(stream, false, fmt.Sprintf("Error deserializing block: %v", err))
+		n.sendValidatorVerificationResponse(stream, nil, false, fmt.Sprintf("Error deserializing block: %v", err))
 		return
 	}
 	log.Printf("✅ Successfully deserialized block #%d", block.Header.BlockNumber)
@@ -2419,7 +2419,7 @@ func (n *Node) handleMinerBlockValidationRequest(stream network.Stream) {
 		isValid = false
 		validationError = "validator wallet not configured"
 		log.Printf("❌ Validation failed: %s", validationError)
-		n.sendValidatorVerificationResponse(stream, isValid, validationError)
+		n.sendValidatorVerificationResponse(stream, &block, isValid, validationError)
 		return
 	}
 
@@ -2431,7 +2431,7 @@ func (n *Node) handleMinerBlockValidationRequest(stream network.Stream) {
 		isValid = false
 		validationError = fmt.Sprintf("failed to get validators: %v", err)
 		log.Printf("❌ Validation failed: %s", validationError)
-		n.sendValidatorVerificationResponse(stream, isValid, validationError)
+		n.sendValidatorVerificationResponse(stream, &block, isValid, validationError)
 		return
 	}
 
@@ -2447,7 +2447,7 @@ func (n *Node) handleMinerBlockValidationRequest(stream network.Stream) {
 		isValid = false
 		validationError = fmt.Sprintf("not a registered validator: %s", validatorAddress)
 		log.Printf("❌ Validation failed: %s", validationError)
-		n.sendValidatorVerificationResponse(stream, isValid, validationError)
+		n.sendValidatorVerificationResponse(stream, &block, isValid, validationError)
 		return
 	}
 
@@ -2487,20 +2487,38 @@ func (n *Node) handleMinerBlockValidationRequest(stream network.Stream) {
 		log.Printf("✅ Block #%d validated successfully", block.Header.BlockNumber)
 	}
 
-	n.sendValidatorVerificationResponse(stream, isValid, validationError)
+	// Send the validation response with signature and address
+	n.sendValidatorVerificationResponse(stream, &block, isValid, validationError)
 }
 
 // sendValidatorVerificationResponse formats and sends a validation result back to the miner
-func (n *Node) sendValidatorVerificationResponse(stream network.Stream, valid bool, errMsg string) {
+func (n *Node) sendValidatorVerificationResponse(stream network.Stream, block *Block, valid bool, errMsg string) {
 	response := struct {
-		Valid bool   `json:"valid"`
-		Error string `json:"error,omitempty"`
+		Valid     bool   `json:"valid"`
+		Error     string `json:"error,omitempty"`
+		Signature []byte `json:"signature,omitempty"`
+		Address   string `json:"address,omitempty"`
+		BlockHash string `json:"block_hash,omitempty"`
 	}{
 		Valid: valid,
 		Error: errMsg,
 	}
 
+	// If validation is successful, add signature and address
+	if valid && n.wallet != nil {
+		signature, err := n.wallet.SignBlock(block)
+		if err != nil {
+			log.Printf("❌ Block signing error: %v", err)
+			response.Valid = false
+			response.Error = "failed to create validator signature"
+		} else {
+			response.Signature = signature
+			response.Address = n.wallet.Address
+			response.BlockHash = block.Hash()
+		}
+	}
+
 	if err := json.NewEncoder(stream).Encode(response); err != nil {
-		log.Printf("❌ Error sending validator verification response: %v", err)
+		log.Printf("❌ Validation response send failed: %v", err)
 	}
 }

@@ -287,11 +287,7 @@ func (b *Block) Hash() string {
 	log.Printf("    • Difficulty: %d", header.Difficulty)
 	log.Printf("    • GasLimit: %d", header.GasLimit)
 	log.Printf("    • MinedBy: %s", header.MinedBy)
-	log.Printf("    • ValidatedBy: %s", header.ValidatedBy)
-	log.Printf("    • ValidatorAddress: %s", header.ValidatorAddress)
 	log.Printf("    • ExtraData: %v", header.ExtraData)
-	log.Printf("    • ValidatorProof: %v", header.ValidatorProof)
-	log.Printf("    • ValidatorSig: %v", header.ValidatorSig)
 
 	// Create a consistent string representation of the block
 	var data strings.Builder
@@ -307,28 +303,12 @@ func (b *Block) Hash() string {
 	data.WriteString(fmt.Sprintf("%d|", header.Difficulty))
 	data.WriteString(fmt.Sprintf("%d|", header.GasLimit))
 	data.WriteString(fmt.Sprintf("%s|", header.MinedBy))
-	data.WriteString(fmt.Sprintf("%s|", header.ValidatedBy))
-	data.WriteString(fmt.Sprintf("%s|", header.ValidatorAddress))
 
 	// Handle ExtraData consistently
 	if len(header.ExtraData) == 0 {
-		data.WriteString("[]|")
-	} else {
-		data.WriteString(fmt.Sprintf("%v|", header.ExtraData))
-	}
-
-	// Handle ValidatorProof consistently
-	if header.ValidatorProof == nil {
-		data.WriteString("<nil>|")
-	} else {
-		data.WriteString(fmt.Sprintf("%v|", header.ValidatorProof))
-	}
-
-	// Handle ValidatorSig consistently
-	if len(header.ValidatorSig) == 0 {
 		data.WriteString("[]")
 	} else {
-		data.WriteString(fmt.Sprintf("%v", header.ValidatorSig))
+		data.WriteString(fmt.Sprintf("%v", header.ExtraData))
 	}
 
 	hashInput := data.String()
@@ -721,8 +701,10 @@ func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host
 
 	// Parse the validation response
 	var validationResponse struct {
-		Valid bool   `json:"valid"`
-		Error string `json:"error,omitempty"`
+		Valid     bool   `json:"valid"`
+		Error     string `json:"error,omitempty"`
+		Signature []byte `json:"signature,omitempty"`
+		Address   string `json:"address,omitempty"`
 	}
 	if err := json.Unmarshal(response[:n], &validationResponse); err != nil {
 		return false, fmt.Errorf("failed to parse validation response: %v", err)
@@ -733,7 +715,12 @@ func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host
 		return false, nil
 	}
 
-	log.Printf("✅ Validator %s accepted block", validator.Address)
+	// Update block header with validator information
+	block.Header.ValidatedBy = validationResponse.Address
+	block.Header.ValidatorSig = validationResponse.Signature
+	block.Header.ValidatorAddress = validator.Address
+
+	log.Printf("✅ Validator %s accepted block and provided signature", validator.Address)
 	return true, nil
 }
 
