@@ -119,27 +119,48 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
+	// Check if this is a coinbase transaction
+	isCoinbase := false
+	if tx.TxType == TX_COINBASE {
+		isCoinbase = true
+		log.Printf("🌱 Processing coinbase transaction %s for block #%d", tx.TransactionID, blockHeight)
+	}
+
 	// Add new UTXOs from transaction outputs
 	for i, output := range tx.Outputs {
-		utxoKey := fmt.Sprintf("%s-%d", tx.Hash(), i)
+		utxoKey := fmt.Sprintf("%s-%d", tx.TransactionID, i)
+
+		// For coinbase transactions, the Owner is always the Receiver (miner's address)
+		owner := output.Receiver
+
 		utxo := UTXO{
-			TransactionID: tx.Hash(),
+			TransactionID: tx.TransactionID,
 			OutputIndex:   i,
 			Amount:        output.Amount,
-			Owner:         tx.Receiver, // Use Receiver instead of Address
+			Owner:         owner,
 			BlockHeight:   blockHeight,
 			Timestamp:     tx.Timestamp,
 			ScriptPubKey:  output.ScriptPubKey,
 		}
+
 		pool.utxos[utxoKey] = utxo
+
+		if isCoinbase {
+			log.Printf("💎 Created UTXO from coinbase: %s", utxoKey)
+			log.Printf("   • Amount: %.8f", output.Amount)
+			log.Printf("   • Owner: %s", owner)
+		}
 	}
 
-	// Mark spent inputs
-	for _, input := range tx.Inputs {
-		inputKey := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
-		if utxo, exists := pool.utxos[inputKey]; exists {
-			utxo.Spent = true
-			pool.utxos[inputKey] = utxo
+	// Only mark inputs as spent for non-coinbase transactions
+	if !isCoinbase {
+		// Mark spent inputs
+		for _, input := range tx.Inputs {
+			inputKey := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
+			if utxo, exists := pool.utxos[inputKey]; exists {
+				utxo.Spent = true
+				pool.utxos[inputKey] = utxo
+			}
 		}
 	}
 
@@ -160,9 +181,9 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 	// Update account states
 	accountStates := make(map[string]*AccountState)
 	for _, output := range tx.Outputs {
-		state, _ := pool.node.accountManager.GetAccountState(tx.Receiver)
+		state, _ := pool.node.accountManager.GetAccountState(output.Receiver)
 		state.Balance += output.Amount
-		accountStates[tx.Receiver] = state
+		accountStates[output.Receiver] = state
 	}
 	pool.node.accountManager.BatchUpdateAccounts(accountStates)
 }
@@ -206,21 +227,27 @@ func (pool *UTXOPool) ValidateTransaction(tx *Transaction) bool {
 }
 
 func UpdateUTXOSet(tx Transaction, utxoSet map[string]UTXO) {
-	// Remove spent UTXOs
-	for _, input := range tx.Inputs {
-		key := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
-		delete(utxoSet, key)
+	// Check if this is a coinbase transaction
+	isCoinbase := tx.TxType == TX_COINBASE
+
+	// Only remove spent UTXOs for non-coinbase transactions
+	if !isCoinbase {
+		// Remove spent UTXOs
+		for _, input := range tx.Inputs {
+			key := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
+			delete(utxoSet, key)
+		}
 	}
 
 	// Add new UTXOs
-	for index := range tx.Outputs {
+	for index, output := range tx.Outputs {
 		key := fmt.Sprintf("%s-%d", tx.TransactionID, index)
 		utxoSet[key] = UTXO{
 			TransactionID: tx.TransactionID,
 			OutputIndex:   index,
-			Owner:         tx.Receiver, // Use tx.Receiver directly
-			Amount:        tx.Amount,   // Use tx.Amount directly
-			ScriptPubKey:  tx.Outputs[index].ScriptPubKey,
+			Owner:         output.Receiver,
+			Amount:        output.Amount,
+			ScriptPubKey:  output.ScriptPubKey,
 		}
 	}
 }

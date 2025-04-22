@@ -17,28 +17,37 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 )
 
+// Constants for block rewards
+const (
+	InitialBlockReward        = 50.0   // Initial reward for mining a block
+	RewardHalvingBlocks       = 210000 // Number of blocks between reward halvings
+	MinerRewardPercentage     = 0.7    // 70% of the block reward goes to miners
+	ValidatorRewardPercentage = 0.3    // 30% of the block reward goes to validators
+)
+
 // chain of blocks are stored
 type Blockchain struct {
-	Chain            []Block
-	Node             *Node
-	mu               sync.RWMutex
-	currentHash      string
-	utxoPool         *UTXOPool
-	db               db.Database
-	mempool          *Mempool
-	p2pHost          host.Host
-	ctx              context.Context
-	cancel           context.CancelFunc
-	StakePool        *StakePool
-	utxoSet          map[string]UTXO
-	Validators       map[string]*Validator
-	consensus        *ConsensusEngine
-	rewardCalculator *RewardCalculator
-	slashingManager  *SlashingManager
-	communityPool    float64
-	balances         map[string]float64
-	validator        *Validator
-	node             *Node
+	Chain                []Block
+	Node                 *Node
+	mu                   sync.RWMutex
+	currentHash          string
+	utxoPool             *UTXOPool
+	db                   db.Database
+	mempool              *Mempool
+	p2pHost              host.Host
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	StakePool            *StakePool
+	utxoSet              map[string]UTXO
+	Validators           map[string]*Validator
+	consensus            *ConsensusEngine
+	rewardCalculator     *RewardCalculator
+	slashingManager      *SlashingManager
+	communityPool        float64
+	balances             map[string]float64
+	validator            *Validator
+	node                 *Node
+	lastValidatorAddress string // Address of the validator who validated the last block
 }
 
 //intializes the blockchain with the genesis block
@@ -214,6 +223,13 @@ func (bc *Blockchain) addBlockWithoutValidation(block *Block) error {
 		if block.Header.PreviousHash != bc.Chain[len(bc.Chain)-1].Hash() {
 			return fmt.Errorf("invalid previous hash")
 		}
+	}
+
+	// Record validator information from block header
+	if block.Header.ValidatedBy != "" {
+		bc.lastValidatorAddress = block.Header.ValidatedBy
+		log.Printf("📝 Recorded validator %s for block #%d",
+			block.Header.ValidatedBy, block.Header.BlockNumber)
 	}
 
 	// Add block to chain
@@ -838,8 +854,45 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 		pendingTxs = []Transaction{}
 	}
 
+	// Calculate total block reward
+	blockHeight := previousBlock.Header.BlockNumber + 1
+	totalBlockReward := calculateBlockReward(previousBlock)
+
+	// Split reward between miner and validator
+	minerReward := calculateMinerReward(totalBlockReward)
+	log.Printf("💰 Calculated miner reward: %.8f tokens (%.0f%% of block reward)",
+		minerReward, MinerRewardPercentage*100)
+
+	// Create coinbase transaction for miner's reward
+	coinbaseTx := NewCoinbaseTransaction(minerAddress, minerReward, blockHeight)
+	log.Printf("💰 Created coinbase transaction with reward %.8f tokens for miner %s", minerReward, minerAddress)
+
 	// Create transaction trie
 	txTrie := NewPatriciaTrie()
+
+	// Add coinbase transaction first
+	txTrie.Insert(*coinbaseTx)
+
+	// Check for previous validator to reward
+	lastValidatorAddress := bc.getLastValidator()
+	if lastValidatorAddress != "" && blockHeight > 1 {
+		// Calculate validator's reward
+		validatorReward := calculateValidatorReward(totalBlockReward)
+		log.Printf("💰 Calculated validator reward: %.8f tokens (%.0f%% of block reward)",
+			validatorReward, ValidatorRewardPercentage*100)
+
+		// Create validator reward transaction
+		validatorRewardTx := NewValidatorRewardTransaction(lastValidatorAddress, validatorReward, blockHeight)
+		log.Printf("💰 Created validator reward transaction with reward %.8f tokens for validator %s",
+			validatorReward, lastValidatorAddress)
+
+		// Add validator reward transaction
+		txTrie.Insert(*validatorRewardTx)
+	} else {
+		log.Printf("ℹ️ No previous validator to reward for block #%d", blockHeight)
+	}
+
+	// Then add other transactions
 	for _, tx := range pendingTxs {
 		txTrie.Insert(tx)
 	}
@@ -848,7 +901,7 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	newBlock := Block{
 		Header: &BlockHeader{
 			Version:      1,
-			BlockNumber:  previousBlock.Header.BlockNumber + 1,
+			BlockNumber:  blockHeight,
 			PreviousHash: previousBlock.hash,
 			Timestamp:    time.Now().Unix(),
 			Difficulty:   difficulty,
@@ -867,6 +920,19 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 
 	// Process transactions and update UTXO set with nil check
 	if bc.utxoPool != nil {
+		// Add the coinbase transaction to UTXO set first
+		bc.utxoPool.AddUTXO(coinbaseTx, newBlock.Header.BlockNumber)
+
+		// Add validator reward transaction if it exists
+		if lastValidatorAddress != "" && blockHeight > 1 {
+			validatorRewardTx := txTrie.GetAllTransactions()[1] // The second transaction should be the validator reward
+			if validatorRewardTx.TxType == TX_VALIDATOR_REWARD {
+				bc.utxoPool.AddUTXO(&validatorRewardTx, newBlock.Header.BlockNumber)
+				log.Printf("💸 Added validator reward UTXO for %s", lastValidatorAddress)
+			}
+		}
+
+		// Then process other transactions
 		for _, tx := range pendingTxs {
 			bc.utxoPool.AddUTXO(&tx, newBlock.Header.BlockNumber)
 		}
@@ -916,9 +982,24 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 		bc.updateUTXOSet(newBlock)
 	}
 
-	// Calculate and log mining reward
-	reward := calculateBlockReward(newBlock)
-	log.Printf("💰 Mining reward of %.8f tokens sent to %s", reward, minerAddress)
+	// Add mining reward to the miner's balance
+	if err := bc.AddBalance(minerAddress, minerReward); err != nil {
+		log.Printf("⚠️ Warning: Failed to update miner balance: %v", err)
+	}
+
+	// Add validator reward if applicable
+	if lastValidatorAddress != "" && blockHeight > 1 {
+		validatorReward := calculateValidatorReward(totalBlockReward)
+		if err := bc.AddBalance(lastValidatorAddress, validatorReward); err != nil {
+			log.Printf("⚠️ Warning: Failed to update validator balance: %v", err)
+		}
+		log.Printf("💰 Validator reward of %.8f tokens sent to %s via validator reward transaction",
+			validatorReward, lastValidatorAddress)
+	}
+
+	// Log the mining reward
+	log.Printf("💰 Mining reward of %.8f tokens sent to %s via coinbase transaction", minerReward, minerAddress)
+	log.Printf("   Transaction ID: %s", coinbaseTx.TransactionID)
 
 	return &newBlock, nil
 }
@@ -1342,4 +1423,85 @@ func (bc *Blockchain) GetBlock(hash string) (*Block, error) {
 
 	log.Printf("❌ Database not initialized")
 	return nil, fmt.Errorf("block with hash %s not found", hash)
+}
+
+// calculateBlockReward calculates the reward for mining a block
+func calculateBlockReward(block Block) float64 {
+	// For genesis block, return initial reward
+	if block.Header.BlockNumber == 0 {
+		return InitialBlockReward
+	}
+
+	// Calculate how many halvings have occurred
+	halvings := block.Header.BlockNumber / RewardHalvingBlocks
+
+	// Calculate reward with halvings
+	reward := InitialBlockReward
+	for i := uint64(0); i < halvings; i++ {
+		reward /= 2
+	}
+
+	// Calculate transaction fees
+	fees := 0.0
+	for _, tx := range block.Body.Transactions.GetAllTransactions() {
+		// Skip coinbase transactions when calculating fees
+		if tx.TxType != TX_COINBASE {
+			fees += tx.GasFee
+		}
+	}
+
+	// Add fees to the block reward
+	reward += fees
+
+	// Ensure reward doesn't go below minimum (0.00000001)
+	if reward < 0.00000001 {
+		reward = 0.00000001
+	}
+
+	return reward
+}
+
+// calculateValidatorReward calculates the reward for validating a block
+func calculateValidatorReward(blockReward float64) float64 {
+	// Validator gets a percentage of the total block reward
+	reward := blockReward * ValidatorRewardPercentage
+
+	// Ensure reward doesn't go below minimum (0.00000001)
+	if reward < 0.00000001 {
+		reward = 0.00000001
+	}
+
+	return reward
+}
+
+// calculateMinerReward calculates the reward for mining a block
+func calculateMinerReward(blockReward float64) float64 {
+	// Miner gets a percentage of the total block reward
+	reward := blockReward * MinerRewardPercentage
+
+	// Ensure reward doesn't go below minimum (0.00000001)
+	if reward < 0.00000001 {
+		reward = 0.00000001
+	}
+
+	return reward
+}
+
+// setLastValidator updates the last validator address
+func (bc *Blockchain) setLastValidator(validatorAddress string) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	if validatorAddress != "" {
+		bc.lastValidatorAddress = validatorAddress
+		log.Printf("✅ Updated last validator to: %s", validatorAddress)
+	}
+}
+
+// getLastValidator retrieves the last validator address
+func (bc *Blockchain) getLastValidator() string {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	return bc.lastValidatorAddress
 }

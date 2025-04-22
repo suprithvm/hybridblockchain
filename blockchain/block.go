@@ -689,39 +689,56 @@ func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host
 		return false, fmt.Errorf("failed to close write side of stream: %v", err)
 	}
 
-	// Wait for and read the validation response
-	log.Printf("⏳ Waiting for validation response from validator %s", validator.Address)
+	// Wait for the validation response
+	log.Printf("⏳ Waiting for validation response from %s...", validator.Address)
 
-	// Read the validation response
-	response := make([]byte, 1024)
-	n, err := stream.Read(response)
-	if err != nil {
+	// Read response
+	var response map[string]interface{}
+	if err := json.NewDecoder(stream).Decode(&response); err != nil {
 		return false, fmt.Errorf("failed to read validation response: %v", err)
 	}
 
-	// Parse the validation response
-	var validationResponse struct {
-		Valid     bool   `json:"valid"`
-		Error     string `json:"error,omitempty"`
-		Signature []byte `json:"signature,omitempty"`
-		Address   string `json:"address,omitempty"`
-	}
-	if err := json.Unmarshal(response[:n], &validationResponse); err != nil {
-		return false, fmt.Errorf("failed to parse validation response: %v", err)
+	// Handle the response
+	valid, ok := response["valid"].(bool)
+	if !ok {
+		return false, fmt.Errorf("invalid response format")
 	}
 
-	if !validationResponse.Valid {
-		log.Printf("❌ Validator %s rejected block: %s", validator.Address, validationResponse.Error)
-		return false, nil
+	errorMsg, _ := response["error"].(string)
+	if errorMsg != "" {
+		log.Printf("⚠️ Validator reported error: %s", errorMsg)
 	}
 
-	// Update block header with validator information
-	block.Header.ValidatedBy = validationResponse.Address
-	block.Header.ValidatorSig = validationResponse.Signature
-	block.Header.ValidatorAddress = validator.Address
+	if valid {
+		// Set the validator's address in the block header for record-keeping
+		block.Header.ValidatedBy = validator.Address
 
-	log.Printf("✅ Validator %s accepted block and provided signature", validator.Address)
-	return true, nil
+		// Set the validator's signature from the response
+		if signature, ok := response["signature"].([]byte); ok {
+			log.Printf("✅ Setting validator signature for block #%d", block.Header.BlockNumber)
+			block.Header.ValidatorSig = signature
+		} else {
+			log.Printf("⚠️ Validator signature not found in response or has invalid format")
+		}
+
+		log.Printf("✅ Block #%d validated by %s", block.Header.BlockNumber, validator.Address)
+
+		// Update the last validator address in blockchain if we can access it
+		// Get instance of blockchain from peerHost
+		if node, ok := peerHost.Network().(interface{ GetBlockchain() *Blockchain }); ok {
+			if bc := node.GetBlockchain(); bc != nil {
+				// Update the last validator in the blockchain
+				bc.setLastValidator(validator.Address)
+				log.Printf("🔄 Updated last validator in blockchain: %s", validator.Address)
+			}
+		} else {
+			log.Printf("⚠️ Could not update lastValidatorAddress in blockchain, will rely on ValidatedBy field")
+		}
+	} else {
+		log.Printf("❌ Block #%d rejected by %s: %s", block.Header.BlockNumber, validator.Address, errorMsg)
+	}
+
+	return valid, nil
 }
 
 // Add this method to Block

@@ -2522,3 +2522,8 @@ func (n *Node) sendValidatorVerificationResponse(stream network.Stream, block *B
 		log.Printf("❌ Validation response send failed: %v", err)
 	}
 }
+
+// GetBlockchain returns the reference to the blockchain
+func (n *Node) GetBlockchain() *Blockchain {
+	return n.Blockchain
+}

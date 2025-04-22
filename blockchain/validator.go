@@ -329,6 +329,7 @@ func (v *Validator) slash() {
 }
 
 func (v *Validator) distributeRewards(block Block) {
+	// Use blockchain's calculateBlockReward function
 	reward := calculateBlockReward(block)
 	v.rewards += reward
 	v.config.Stake += reward
@@ -337,16 +338,6 @@ func (v *Validator) distributeRewards(block Block) {
 		reward, block.Header.BlockNumber)
 	log.Printf("📈 Updated validator stake: %.8f tokens (total rewards: %.8f)",
 		v.config.Stake, v.rewards)
-}
-
-func calculateBlockReward(block Block) float64 {
-	// Base reward + transaction fees
-	baseReward := 1.0 // Example base reward
-	fees := 0.0
-	for _, tx := range block.Body.Transactions.GetAllTransactions() {
-		fees += tx.GasFee
-	}
-	return baseReward + fees
 }
 
 // Stop stops the validation process
