@@ -52,14 +52,20 @@ func InitialiseBlockchain(dbConfig *DatabaseConfig) *Blockchain {
 		}
 	}
 
+	// Initialize database
+	db := initDB(dbConfig)
+	if db == nil {
+		log.Fatalf("❌ Failed to initialize database")
+	}
+
 	// Initialize blockchain with database
 	bc := &Blockchain{
 		Chain:         []Block{},
 		Node:          nil,
 		mu:            sync.RWMutex{},
 		currentHash:   "",
-		utxoPool:      nil,
-		db:            initDB(dbConfig),
+		utxoPool:      NewUTXOPool(db), // Initialize UTXOPool with database
+		db:            db,
 		utxoSet:       make(map[string]UTXO),
 		Validators:    make(map[string]*Validator),
 		communityPool: 0,
@@ -738,7 +744,7 @@ func InitialiseBlockchainWithStore(store *Store) *Blockchain {
 		Node:          nil,
 		mu:            sync.RWMutex{},
 		currentHash:   "",
-		utxoPool:      nil,
+		utxoPool:      NewUTXOPool(store.db), // Initialize UTXOPool with database
 		db:            store.db,
 		utxoSet:       make(map[string]UTXO),
 		Validators:    make(map[string]*Validator),
@@ -827,7 +833,7 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 		txTrie.Insert(tx)
 	}
 
-	// Create a new block
+	// Create a new block with safe state root handling
 	newBlock := Block{
 		Header: &BlockHeader{
 			Version:      1,
@@ -837,15 +843,27 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 			Difficulty:   difficulty,
 			GasLimit:     BaseGasLimit,
 			MinedBy:      minerAddress,
-			MerkleRoot:   txTrie.GenerateRootHash(),  // Set Merkle root from transaction trie
-			StateRoot:    bc.GetState().RootHash,     // Get current state root from blockchain
-			ReceiptsRoot: bc.GetUTXOState().RootHash, // Get receipts root from UTXO state
+			MerkleRoot:   txTrie.GenerateRootHash(),
+			StateRoot:    bc.GetState().RootHash,
+			ReceiptsRoot: "", // Initialize as empty, will be set after UTXO processing
 		},
 		Body: &BlockBody{
 			Transactions: txTrie,
 			Receipts:     make([]*TxReceipt, 0),
 		},
 		CumulativeDifficulty: previousBlock.CumulativeDifficulty + uint64(difficulty),
+	}
+
+	// Process transactions and update UTXO set with nil check
+	if bc.utxoPool != nil {
+		for _, tx := range pendingTxs {
+			bc.utxoPool.AddUTXO(&tx, newBlock.Header.BlockNumber)
+		}
+		// Set ReceiptsRoot after processing transactions
+		newBlock.Header.ReceiptsRoot = bc.utxoPool.GetRootHash()
+	} else {
+		log.Printf("⚠️ No UTXOPool available, using empty receipts root")
+		newBlock.Header.ReceiptsRoot = "0x0000000000000000000000000000000000000000000000000000000000000000"
 	}
 
 	// Mine the block using the existing MineBlock function from block.go
@@ -1199,9 +1217,24 @@ func (bc *Blockchain) GetState() *ChainState {
 func (bc *Blockchain) GetUTXOState() *ChainState {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
+
+	// Add safety check for nil utxoPool
+	if bc.utxoPool == nil {
+		return &ChainState{
+			Height:      bc.GetHeight(),
+			RootHash:    "", // Return empty string for nil pool
+			UTXOSetRoot: "",
+			StateRoot:   "",
+			Timestamp:   time.Now().Unix(),
+		}
+	}
+
 	return &ChainState{
-		RootHash:  bc.utxoPool.GetRootHash(),
-		Timestamp: time.Now().Unix(),
+		Height:      bc.GetHeight(),
+		RootHash:    bc.utxoPool.GetRootHash(),
+		UTXOSetRoot: bc.utxoPool.GetRootHash(),
+		StateRoot:   bc.GetState().RootHash,
+		Timestamp:   time.Now().Unix(),
 	}
 }
 
