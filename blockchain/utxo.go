@@ -178,14 +178,28 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 	// Persist changes
 	pool.saveState()
 
-	// Update account states
-	accountStates := make(map[string]*AccountState)
-	for _, output := range tx.Outputs {
-		state, _ := pool.node.accountManager.GetAccountState(output.Receiver)
-		state.Balance += output.Amount
-		accountStates[output.Receiver] = state
+	// Update account states only if node and accountManager are available
+	if pool.node != nil && pool.node.accountManager != nil {
+		accountStates := make(map[string]*AccountState)
+		for _, output := range tx.Outputs {
+			state, err := pool.node.accountManager.GetAccountState(output.Receiver)
+			if err != nil || state == nil {
+				// Create a new account state if none exists
+				log.Printf("Creating new account state for %s", output.Receiver)
+				state = &AccountState{
+					Address: output.Receiver,
+					Balance: output.Amount,
+					Nonce:   0,
+				}
+			} else {
+				state.Balance += output.Amount
+			}
+			accountStates[output.Receiver] = state
+		}
+		pool.node.accountManager.BatchUpdateAccounts(accountStates)
+	} else {
+		log.Printf("⚠️ Skipping account state update: node or accountManager not initialized")
 	}
-	pool.node.accountManager.BatchUpdateAccounts(accountStates)
 }
 
 // RemoveUTXO removes a spent UTXO

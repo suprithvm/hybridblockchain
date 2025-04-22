@@ -1802,6 +1802,17 @@ func (n *Node) Start() error {
 	n.isRunning = true
 	n.runningMu.Unlock()
 
+	// Connect UTXO pools with the node instance
+	if n.UTXOSet != nil {
+		n.UTXOSet.node = n
+		log.Printf("📝 UTXOSet node reference updated")
+	}
+
+	if n.UTXOPool != nil {
+		n.UTXOPool.node = n
+		log.Printf("📝 UTXOPool node reference updated")
+	}
+
 	// Bootstrap DHT
 	log.Printf("🔄 Starting DHT bootstrap...")
 	if err := n.bootstrapDHT(n.ctx); err != nil {
