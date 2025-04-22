@@ -3,9 +3,9 @@ package blockchain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"sync"
 	"time"
-	"log"
 )
 
 // PatriciaNode represents a node in the Patricia Trie with caching.
@@ -17,7 +17,7 @@ type PatriciaNode struct {
 	IsLeaf     bool
 	hashCache  string
 	cacheMutex sync.RWMutex
-	mu         sync.Mutex   // Protects Children
+	mu         sync.Mutex // Protects Children
 	Parent     *PatriciaNode
 }
 
@@ -37,7 +37,6 @@ func NewPatriciaTrie() *PatriciaTrie {
 	}
 }
 
-
 // Insert adds a batch of transactions into the trie.
 func (t *PatriciaTrie) InsertBatch(transactions []Transaction) {
 	for _, tx := range transactions {
@@ -47,35 +46,36 @@ func (t *PatriciaTrie) InsertBatch(transactions []Transaction) {
 
 // Insert adds a transaction into the Patricia Trie.
 func (t *PatriciaTrie) Insert(tx Transaction) {
-    hash := sha256.Sum256([]byte(tx.TransactionID))
-    key := hash[:]
-    current := t.Root
+	hash := sha256.Sum256([]byte(tx.TransactionID))
+	key := hash[:]
+	current := t.Root
 
-    for _, b := range key {
-        current.mu.Lock()
-        if _, exists := current.Children[b]; !exists {
-            current.Children[b] = &PatriciaNode{
-                Children: make(map[byte]*PatriciaNode),
-                IsLeaf:   false,
-                Parent:   current,
-            }
-        }
-        next := current.Children[b]
-        current.mu.Unlock() // Unlock the parent before moving to the child
-        current = next
-    }
+	for _, b := range key {
+		current.mu.Lock()
+		if _, exists := current.Children[b]; !exists {
+			current.Children[b] = &PatriciaNode{
+				Children: make(map[byte]*PatriciaNode),
+				IsLeaf:   false,
+				Parent:   current,
+			}
+		}
+		next := current.Children[b]
+		current.mu.Unlock() // Unlock the parent before moving to the child
+		current = next
+	}
 
-    current.Value = &tx
-    current.IsLeaf = true
-    current.Hash = hex.EncodeToString(hash[:])
-    t.MarkDirty(current)
+	current.Value = &tx
+	current.IsLeaf = true
+	current.Hash = hex.EncodeToString(hash[:])
+	t.MarkDirty(current)
 }
-
 
 // GenerateRootHash lazily computes the hash of the root node.
 func (t *PatriciaTrie) GenerateRootHash() string {
 	if t.Root == nil || len(t.Root.Children) == 0 {
-		return "" // Empty trie
+		// For empty tries, return a hash of an empty string
+		hash := sha256.Sum256([]byte(""))
+		return hex.EncodeToString(hash[:])
 	}
 	return t.computeHash(t.Root)
 }
@@ -176,7 +176,6 @@ func (t *PatriciaTrie) MarkDirty(node *PatriciaNode) {
 	}
 }
 
-
 // ProfileOperation profiles the duration of a function execution.
 func ProfileOperation(operationName string, fn func()) {
 	start := time.Now()
@@ -192,24 +191,23 @@ func (t *PatriciaTrie) ProfiledInsert(tx Transaction) {
 	})
 }
 
-
 // Len returns the number of transactions in the Patricia Trie.
 func (t *PatriciaTrie) Len() int {
-    var count int
+	var count int
 
-    var traverse func(node *PatriciaNode)
-    traverse = func(node *PatriciaNode) {
-        if node == nil {
-            return
-        }
-        if node.IsLeaf && node.Value != nil {
-            count++
-        }
-        for _, child := range node.Children {
-            traverse(child)
-        }
-    }
+	var traverse func(node *PatriciaNode)
+	traverse = func(node *PatriciaNode) {
+		if node == nil {
+			return
+		}
+		if node.IsLeaf && node.Value != nil {
+			count++
+		}
+		for _, child := range node.Children {
+			traverse(child)
+		}
+	}
 
-    traverse(t.Root)
-    return count
+	traverse(t.Root)
+	return count
 }
