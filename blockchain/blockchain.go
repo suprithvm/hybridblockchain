@@ -77,6 +77,9 @@ func InitialiseBlockchain(dbConfig *DatabaseConfig) *Blockchain {
 	selector := NewValidatorSelector(bc.StakePool)
 	bc.consensus = NewConsensusEngine(bc, selector)
 
+	// Initialize mempool
+	bc.mempool = NewMempool(nil) // Will be set properly when node is created
+
 	return bc
 }
 

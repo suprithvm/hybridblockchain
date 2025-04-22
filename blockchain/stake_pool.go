@@ -273,7 +273,9 @@ func (sp *StakePool) GetValidators(count int) ([]ValidatorNode, error) {
 	})
 
 	// Return requested number of validators
-	if count > len(validators) {
+	if count == 0 {
+		count = len(validators)
+	}else if count > len(validators) {
 		count = len(validators)
 	}
 
