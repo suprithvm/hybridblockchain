@@ -837,6 +837,9 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 			Difficulty:   difficulty,
 			GasLimit:     BaseGasLimit,
 			MinedBy:      minerAddress,
+			MerkleRoot:   txTrie.GenerateRootHash(),  // Set Merkle root from transaction trie
+			StateRoot:    bc.GetState().RootHash,     // Get current state root from blockchain
+			ReceiptsRoot: bc.GetUTXOState().RootHash, // Get receipts root from UTXO state
 		},
 		Body: &BlockBody{
 			Transactions: txTrie,
