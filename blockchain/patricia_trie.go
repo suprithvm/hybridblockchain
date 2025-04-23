@@ -10,15 +10,15 @@ import (
 
 // PatriciaNode represents a node in the Patricia Trie with caching.
 type PatriciaNode struct {
-	Key        []byte
-	Children   map[byte]*PatriciaNode
-	Value      *Transaction
-	Hash       string
-	IsLeaf     bool
-	hashCache  string
+	Key        []byte                  `json:"Key"`
+	Children   map[byte]*PatriciaNode  `json:"Children"`
+	Value      *Transaction            `json:"Value"`
+	Hash       string                  `json:"Hash"`
+	IsLeaf     bool                    `json:"IsLeaf"`
+	hashCache  string                  
 	cacheMutex sync.RWMutex
-	mu         sync.Mutex // Protects Children
-	Parent     *PatriciaNode
+	mu         sync.Mutex              // Protects Children
+	Parent     *PatriciaNode           `json:"-"` // Exclude from JSON serialization to prevent cycles
 }
 
 // PatriciaTrie represents the trie structure with caching.

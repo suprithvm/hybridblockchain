@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -73,61 +74,55 @@ type Block struct {
 	originalHash         string // Store the original hash to prevent recalculation
 }
 
-// MarshalJSON implements json.Marshaler interface
+// MarshalJSON implements the json.Marshaler interface
 func (b *Block) MarshalJSON() ([]byte, error) {
 	log.Printf("🔑 [SERIALIZATION] Starting MarshalJSON:")
-	log.Printf("    • Block ptr: %p", b)
-	log.Printf("    • Current hash: %s (ptr: %p)", b.hash, &b.hash)
-	log.Printf("    • Original hash: %s", b.originalHash)
-	log.Printf("    • Header ptr: %p", b.Header)
-	log.Printf("    • Body ptr: %p", b.Body)
-	log.Printf("    • Call stack: %s", getCallerInfo())
+	log.Printf("• Block ptr: %p", b)
+	log.Printf("• Current hash: %s (ptr: %p)", b.hash, &b.hash)
+	log.Printf("• Original hash: %s", b.originalHash)
+	log.Printf("• Header ptr: %p", b.Header)
+	log.Printf("• Body ptr: %p", b.Body)
+	log.Printf("• Call stack: %s", string(debug.Stack()))
 
-	// Create a simplified block structure for consistent serialization
+	// Build a simplified representation to avoid cycles
 	type SimplifiedBlock struct {
 		Hash         string       `json:"hash"`
 		OriginalHash string       `json:"originalHash"`
 		Header       *BlockHeader `json:"header"`
 		Body         struct {
-			Transactions *PatriciaTrie `json:"transactions"`
-			Receipts     []*TxReceipt  `json:"receipts"`
+			Transactions struct {
+				RootHash string        `json:"rootHash"`
+				TxList   []Transaction `json:"txList"`
+			} `json:"transactions"`
+			Receipts []*TxReceipt `json:"receipts"`
 		} `json:"body"`
 		CumulativeDifficulty uint64 `json:"cumulativeDifficulty"`
 	}
 
-	// Use original hash if available, otherwise use current hash
-	hashToUse := b.originalHash
-	if hashToUse == "" {
-		hashToUse = b.hash
-	}
-
 	simplified := SimplifiedBlock{
-		Hash:                 hashToUse,
-		OriginalHash:         hashToUse,
+		Hash:                 b.hash,
+		OriginalHash:         b.originalHash,
 		Header:               b.Header,
 		CumulativeDifficulty: b.CumulativeDifficulty,
 	}
 
-	// Add transactions and receipts
-	simplified.Body.Transactions = b.Body.Transactions
-	simplified.Body.Receipts = b.Body.Receipts
-
-	// Use a consistent JSON encoder with sorted keys
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "")
-
-	if err := encoder.Encode(simplified); err != nil {
-		log.Printf("🔑 [SERIALIZATION] Error during encoding: %v", err)
-		return nil, err
+	// Use a flat list of transactions instead of the full trie structure
+	if b.Body != nil && b.Body.Transactions != nil {
+		simplified.Body.Transactions.RootHash = b.Header.MerkleRoot
+		simplified.Body.Transactions.TxList = b.Body.Transactions.GetAllTransactions()
+		simplified.Body.Receipts = b.Body.Receipts
 	}
 
-	data := buf.Bytes()
+	data, err := json.Marshal(simplified)
+	if err != nil {
+		log.Printf("🔑 [SERIALIZATION] Error during encoding: %v", err)
+		return nil, fmt.Errorf("json: error calling MarshalJSON for type *Block: %v", err)
+	}
+
 	log.Printf("🔑 [SERIALIZATION] Serialization complete:")
-	log.Printf("    • Serialized data length: %d bytes", len(data))
-	log.Printf("    • Final hash: %s (ptr: %p)", hashToUse, &hashToUse)
-	log.Printf("    • Serialized data: %s", string(data))
+	log.Printf("• Serialized data length: %d bytes", len(data))
+	log.Printf("• Final hash: %s (ptr: %p)", b.hash, &b.hash)
+	log.Printf("• Serialized data: %s", string(data))
 	return data, nil
 }
 
@@ -147,8 +142,11 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 		OriginalHash string       `json:"originalHash"`
 		Header       *BlockHeader `json:"header"`
 		Body         struct {
-			Transactions *PatriciaTrie `json:"transactions"`
-			Receipts     []*TxReceipt  `json:"receipts"`
+			Transactions struct {
+				RootHash string        `json:"rootHash"`
+				TxList   []Transaction `json:"txList"`
+			} `json:"transactions"`
+			Receipts []*TxReceipt `json:"receipts"`
 		} `json:"body"`
 		CumulativeDifficulty uint64 `json:"cumulativeDifficulty"`
 	}
@@ -165,10 +163,20 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 	b.originalHash = simplified.OriginalHash
 	b.CumulativeDifficulty = simplified.CumulativeDifficulty
 
-	// Create new body with the deserialized transactions and receipts
+	// Create new body with a fresh Patricia Trie
 	b.Body = &BlockBody{
-		Transactions: simplified.Body.Transactions,
+		Transactions: NewPatriciaTrie(),
 		Receipts:     simplified.Body.Receipts,
+	}
+
+	// Insert all transactions into the trie
+	for _, tx := range simplified.Body.Transactions.TxList {
+		b.Body.Transactions.Insert(tx)
+	}
+
+	// Verify the Merkle root matches after rebuilding
+	if b.Header.MerkleRoot != "" && b.Body.Transactions.GenerateRootHash() != b.Header.MerkleRoot {
+		log.Printf("🔑 [DESERIALIZATION] Warning: Merkle root mismatch after rebuilding trie")
 	}
 
 	log.Printf("🔑 [DESERIALIZATION] Deserialization complete:")
@@ -176,6 +184,7 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 	log.Printf("    • Restored original hash: %s", b.originalHash)
 	log.Printf("    • Header ptr: %p", b.Header)
 	log.Printf("    • Body ptr: %p", b.Body)
+	log.Printf("    • Transactions count: %d", len(simplified.Body.Transactions.TxList))
 	return nil
 }
 
