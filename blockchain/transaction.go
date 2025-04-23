@@ -288,6 +288,11 @@ func (tx *Transaction) GetData() []byte {
 
 // VerifySignature verifies the transaction signature
 func (tx *Transaction) VerifySignature() bool {
+	// Special case for coinbase transactions - they don't need signatures
+	if tx.IsCoinbase() || tx.IsValidatorReward() {
+		return true
+	}
+
 	// Create message hash
 	message := fmt.Sprintf("%s%s%f%d%d", tx.Sender, tx.Receiver, tx.Amount, tx.Nonce, tx.Timestamp)
 	messageHash := sha256.Sum256([]byte(message))

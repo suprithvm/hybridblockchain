@@ -448,6 +448,12 @@ func (n *Node) handleTransactionStream(s network.Stream) {
 
 // validateTransaction performs comprehensive transaction validation
 func (n *Node) validateTransaction(tx *Transaction) bool {
+	// Skip validation for system transactions (coinbase, validator rewards)
+	if tx.IsCoinbase() || tx.IsValidatorReward() {
+		log.Printf("System transaction detected (type: %d), skipping standard validation", tx.TxType)
+		return true
+	}
+
 	// Check if transaction already exists in mempool
 	for _, memTx := range n.Mempool.GetTransactions() {
 		if memTx.TransactionID == tx.TransactionID {
@@ -456,7 +462,7 @@ func (n *Node) validateTransaction(tx *Transaction) bool {
 	}
 
 	// Verify transaction signature
-	if !tx.ValidateSignatures(&Wallet{}, nil) {
+	if !tx.VerifySignature() {
 		log.Printf("Transaction signature verification failed")
 		return false
 	}
@@ -1525,6 +1531,13 @@ func (n *Node) handleNewTransaction(s network.Stream, payload interface{}) {
 	var tx Transaction
 	if err := json.Unmarshal(txData, &tx); err != nil {
 		log.Printf("Error unmarshaling transaction: %v", err)
+		return
+	}
+
+	// Skip validation for system transactions
+	if tx.IsCoinbase() || tx.IsValidatorReward() {
+		log.Printf("Received system transaction %s (type: %d), cannot add directly to mempool",
+			tx.TransactionID, tx.TxType)
 		return
 	}
 

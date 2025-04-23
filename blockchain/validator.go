@@ -263,20 +263,50 @@ func (v *Validator) validateBlock(block Block) error {
 }
 
 func (v *Validator) validateTransaction(tx Transaction) error {
-	// Verify signature
+	// Special handling for system transactions (coinbase and validator rewards)
+	if tx.IsCoinbase() {
+		// Verify basic coinbase requirements
+		if tx.Sender != "coinbase" {
+			return fmt.Errorf("invalid coinbase sender: %s", tx.Sender)
+		}
+		if len(tx.Outputs) != 1 {
+			return fmt.Errorf("coinbase must have exactly one output")
+		}
+		if tx.Outputs[0].Amount <= 0 {
+			return fmt.Errorf("coinbase amount must be positive")
+		}
+		return nil
+	}
+
+	if tx.IsValidatorReward() {
+		// Verify basic validator reward requirements
+		if tx.Sender != "system" {
+			return fmt.Errorf("invalid system sender: %s", tx.Sender)
+		}
+		if len(tx.Outputs) != 1 {
+			return fmt.Errorf("validator reward must have exactly one output")
+		}
+		if tx.Outputs[0].Amount <= 0 {
+			return fmt.Errorf("validator reward amount must be positive")
+		}
+		return nil
+	}
+
+	// Verify signature for regular transactions
 	if !tx.VerifySignature() {
-		return fmt.Errorf("invalid transaction signature")
+		return fmt.Errorf("invalid transaction signature in tx %s", tx.TransactionID)
 	}
 
 	// Verify balance
 	if !v.blockchain.VerifyBalance(tx.Sender, tx.Amount+tx.GasFee) {
-		return fmt.Errorf("insufficient balance")
+		return fmt.Errorf("insufficient balance for tx %s", tx.TransactionID)
 	}
 
 	// Verify nonce
 	expectedNonce := v.blockchain.GetNonce(tx.Sender)
 	if tx.Nonce != expectedNonce {
-		return fmt.Errorf("invalid nonce: expected %d, got %d", expectedNonce, tx.Nonce)
+		return fmt.Errorf("invalid nonce in tx %s: expected %d, got %d",
+			tx.TransactionID, expectedNonce, tx.Nonce)
 	}
 
 	return nil

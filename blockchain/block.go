@@ -584,11 +584,40 @@ func ValidateBlock(block Block, previousBlock Block, validatorAddress string, st
 	for i, tx := range block.Body.Transactions.GetAllTransactions() {
 		log.Printf("  ↳ Validating transaction %d/%d: %s",
 			i+1, len(block.Body.Transactions.GetAllTransactions()), tx.TransactionID)
-		if !tx.VerifySignature() {
-			log.Printf("  ❌ Transaction %s has invalid signature", tx.TransactionID)
-			return false
+
+		// Validate based on transaction type
+		if tx.IsCoinbase() {
+			// Validate coinbase transaction specifics
+			if tx.Sender != "coinbase" {
+				log.Printf("  ❌ Invalid coinbase sender: %s", tx.Sender)
+				return false
+			}
+			// Ensure coinbase structure is valid
+			if len(tx.Outputs) != 1 {
+				log.Printf("  ❌ Coinbase must have exactly one output")
+				return false
+			}
+			log.Printf("  ✓ Coinbase transaction %s valid", tx.TransactionID)
+		} else if tx.IsValidatorReward() {
+			// Validate validator reward transaction
+			if tx.Sender != "system" {
+				log.Printf("  ❌ Invalid system sender: %s", tx.Sender)
+				return false
+			}
+			// Check validator reward structure
+			if len(tx.Outputs) != 1 {
+				log.Printf("  ❌ Validator reward must have exactly one output")
+				return false
+			}
+			log.Printf("  ✓ Validator reward transaction %s valid", tx.TransactionID)
+		} else {
+			// Regular transaction validation
+			if !tx.VerifySignature() {
+				log.Printf("  ❌ Transaction %s has invalid signature", tx.TransactionID)
+				return false
+			}
+			log.Printf("  ✓ Regular transaction %s valid", tx.TransactionID)
 		}
-		log.Printf("  ✓ Transaction %s valid", tx.TransactionID)
 	}
 
 	log.Printf("✅ Block #%d successfully validated", block.Header.BlockNumber)
