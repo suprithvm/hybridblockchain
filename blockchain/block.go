@@ -4,6 +4,7 @@ import (
 	"blockchain-core/blockchain/gas"
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -752,26 +753,23 @@ func requestValidation(block *Block, validator ValidatorNode, peerHost host.Host
 		block.Header.ValidatedBy = validator.Address
 
 		// Set the validator's signature from the response
-		if signature, ok := response["signature"].([]byte); ok {
-			log.Printf("✅ Setting validator signature for block #%d", block.Header.BlockNumber)
-			block.Header.ValidatorSig = signature
+		if sigStr, ok := response["signature"].(string); ok {
+			// Decode base64 string to []byte
+			signature, err := base64.StdEncoding.DecodeString(sigStr)
+			if err != nil {
+				log.Printf("⚠️ Failed to decode validator signature: %v", err)
+			} else {
+				log.Printf("✅ Setting validator signature for block #%d", block.Header.BlockNumber)
+				block.Header.ValidatorSig = signature
+			}
 		} else {
 			log.Printf("⚠️ Validator signature not found in response or has invalid format")
 		}
 
 		log.Printf("✅ Block #%d validated by %s", block.Header.BlockNumber, validator.Address)
 
-		// Update the last validator address in blockchain if we can access it
-		// Get instance of blockchain from peerHost
-		if node, ok := peerHost.Network().(interface{ GetBlockchain() *Blockchain }); ok {
-			if bc := node.GetBlockchain(); bc != nil {
-				// Update the last validator in the blockchain
-				bc.setLastValidator(validator.Address)
-				log.Printf("🔄 Updated last validator in blockchain: %s", validator.Address)
-			}
-		} else {
-			log.Printf("⚠️ Could not update lastValidatorAddress in blockchain, will rely on ValidatedBy field")
-		}
+		// Remove the blockchain state update - we'll rely on the block header instead
+		log.Printf("🔄 Validator %s recorded in block header for future rewards", validator.Address)
 	} else {
 		log.Printf("❌ Block #%d rejected by %s: %s", block.Header.BlockNumber, validator.Address, errorMsg)
 	}

@@ -874,7 +874,7 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	txTrie.Insert(*coinbaseTx)
 
 	// Check for previous validator to reward
-	lastValidatorAddress := bc.getLastValidator()
+	lastValidatorAddress := previousBlock.Header.ValidatedBy
 	if lastValidatorAddress != "" && blockHeight > 1 {
 		// Calculate validator's reward
 		validatorReward := calculateValidatorReward(totalBlockReward)
@@ -1485,25 +1485,6 @@ func calculateMinerReward(blockReward float64) float64 {
 	}
 
 	return reward
-}
-
-// setLastValidator updates the last validator address
-func (bc *Blockchain) setLastValidator(validatorAddress string) {
-	bc.mu.Lock()
-	defer bc.mu.Unlock()
-
-	if validatorAddress != "" {
-		bc.lastValidatorAddress = validatorAddress
-		log.Printf("✅ Updated last validator to: %s", validatorAddress)
-	}
-}
-
-// getLastValidator retrieves the last validator address
-func (bc *Blockchain) getLastValidator() string {
-	bc.mu.RLock()
-	defer bc.mu.RUnlock()
-
-	return bc.lastValidatorAddress
 }
 
 // GetUTXOPool returns the blockchain's UTXO pool
