@@ -11,6 +11,7 @@ import (
 	"log"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -453,8 +454,24 @@ func calculateStateRoot(utxoSet map[string]UTXO) string {
 
 	// Create merkle tree from UTXO states
 	utxoHashes := make([]string, 0, len(utxoSet))
-	for _, utxo := range utxoSet {
-		hash := sha256.Sum256([]byte(fmt.Sprintf("%v", utxo)))
+
+	// Get all keys and sort them for deterministic ordering
+	keys := make([]string, 0, len(utxoSet))
+	for key := range utxoSet {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	// Create hashes in deterministic order
+	for _, key := range keys {
+		utxo := utxoSet[key]
+		data := fmt.Sprintf("%s-%d-%s-%.8f",
+			utxo.TransactionID,
+			utxo.OutputIndex,
+			utxo.Owner,
+			utxo.Amount,
+		)
+		hash := sha256.Sum256([]byte(data))
 		utxoHashes = append(utxoHashes, hex.EncodeToString(hash[:]))
 	}
 

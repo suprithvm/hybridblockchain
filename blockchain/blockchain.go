@@ -835,6 +835,18 @@ func NewBlockchain(dataDir string) (*Blockchain, error) {
 func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	log.Printf("🔄 Starting mining process for miner %s", minerAddress)
 
+
+	//[TEST] Test to check whether balances are updated correctly
+	  
+	// Get initial balance before mining
+	  var initialBalance float64
+	  if bc.utxoPool != nil {
+		  initialBalance = bc.utxoPool.GetBalance(minerAddress)
+		  log.Printf("🧾 Miner %s initial balance: %.8f tokens", minerAddress, initialBalance)
+	  }
+
+	//[/Test]
+
 	// Get the latest block
 	bc.mu.RLock()
 	previousBlock := bc.GetLatestBlock()
@@ -908,8 +920,8 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 			GasLimit:     BaseGasLimit,
 			MinedBy:      minerAddress,
 			MerkleRoot:   txTrie.GenerateRootHash(),
-			StateRoot:    bc.GetState().RootHash,
-			ReceiptsRoot: "", // Initialize as empty, will be set after UTXO processing
+			StateRoot:    "", // Initialize with previous hash, will update after processing transactions
+			ReceiptsRoot: "",                 // Initialize as empty, will be set after UTXO processing
 		},
 		Body: &BlockBody{
 			Transactions: txTrie,
@@ -923,12 +935,40 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 		// Add the coinbase transaction to UTXO set first
 		bc.utxoPool.AddUTXO(coinbaseTx, newBlock.Header.BlockNumber)
 
+		//[TEST] Test to check whether balances are updated correctly
+		  // Immediate UTXO verification
+		  utxoKey := fmt.Sprintf("%s-0", coinbaseTx.TransactionID)
+		  if utxo, exists := bc.utxoPool.GetUTXOs()[utxoKey]; exists {
+			  log.Printf("✅ Verified coinbase UTXO in pool:")
+			  log.Printf("   • TX ID: %s", utxo.TransactionID)
+			  log.Printf("   • Index: %d", utxo.OutputIndex)
+			  log.Printf("   • Amount: %.8f", utxo.Amount)
+			  log.Printf("   • Owner: %s", utxo.Owner)
+		  } else {
+			  log.Printf("❌ CRITICAL: Coinbase UTXO not found in pool!")
+		  }
+
+          // Log balance after coinbase UTXO addition
+		  postCoinbaseBalance := bc.utxoPool.GetBalance(minerAddress)
+		  log.Printf("📊 Miner balance after coinbase UTXO: %.8f tokens (Δ +%.8f)", 
+			  postCoinbaseBalance, postCoinbaseBalance-initialBalance)
+
+		//[/Test]  
+
 		// Add validator reward transaction if it exists
 		if lastValidatorAddress != "" && blockHeight > 1 {
 			validatorRewardTx := txTrie.GetAllTransactions()[1] // The second transaction should be the validator reward
 			if validatorRewardTx.TxType == TX_VALIDATOR_REWARD {
 				bc.utxoPool.AddUTXO(&validatorRewardTx, newBlock.Header.BlockNumber)
 				log.Printf("💸 Added validator reward UTXO for %s", lastValidatorAddress)
+
+				//[TEST] Test to check whether balances are updated correctly
+                 // Log validator balance update
+                valBalance := bc.utxoPool.GetBalance(lastValidatorAddress)
+                log.Printf("📈 Validator %s balance: %.8f tokens", lastValidatorAddress, valBalance)
+
+				//[/Test]
+				
 			}
 		}
 
@@ -936,8 +976,11 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 		for _, tx := range pendingTxs {
 			bc.utxoPool.AddUTXO(&tx, newBlock.Header.BlockNumber)
 		}
-		// Set ReceiptsRoot after processing transactions
-		newBlock.Header.ReceiptsRoot = bc.utxoPool.GetRootHash()
+
+		// Set StateRoot and ReceiptsRoot after processing transactions
+		utxoRootHash := bc.utxoPool.GetRootHash()
+		newBlock.Header.StateRoot = utxoRootHash
+		newBlock.Header.ReceiptsRoot = utxoRootHash
 	} else {
 		log.Printf("⚠️ No UTXOPool available, using empty receipts root")
 		newBlock.Header.ReceiptsRoot = "0x0000000000000000000000000000000000000000000000000000000000000000"
@@ -980,6 +1023,35 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	// Update UTXO set if available
 	if bc.utxoPool != nil {
 		bc.updateUTXOSet(newBlock)
+
+
+		//[TEST] Test to check whether balances are updated correctly
+
+		// Final balance verification
+        finalBalance := bc.utxoPool.GetBalance(minerAddress)
+        log.Printf("🏦 Final miner balance verification:")
+        log.Printf("   • Address: %s", minerAddress)
+        log.Printf("   • Block Reward: +%.8f", minerReward)
+        log.Printf("   • Total Balance: %.8f tokens", finalBalance)
+        log.Printf("   • Balance Components:")
+        
+        minerUTXOs := bc.utxoPool.GetUTXOsForAddress(minerAddress)
+        for i, utxo := range minerUTXOs {
+            log.Printf("     %d. %s-%d: %.8f tokens (block %d)", 
+                i+1, utxo.TransactionID, utxo.OutputIndex, utxo.Amount, utxo.BlockHeight)
+        }
+
+        // Account manager verification
+        if bc.node != nil && bc.node.accountManager != nil {
+            if accState, err := bc.node.accountManager.GetAccountState(minerAddress); err == nil {
+                log.Printf("🔐 Account Manager Verification:")
+                log.Printf("   • Stored Balance: %.8f tokens", accState.Balance)
+                log.Printf("   • UTXO-Calculated Balance: %.8f tokens", finalBalance)
+                log.Printf("   • Status: %t", accState.Balance == finalBalance)
+            }
+        }
+
+		//[/Test]
 	}
 
 	// Add mining reward to the miner's balance
@@ -1301,7 +1373,7 @@ func (bc *Blockchain) GetState() *ChainState {
 		Height:      bc.GetHeight(),
 		RootHash:    bc.currentHash,
 		UTXOSetRoot: bc.utxoPool.GetRootHash(),
-		StateRoot:   bc.currentHash,
+		StateRoot:   bc.utxoPool.GetRootHash(),
 		Timestamp:   time.Now().Unix(),
 	}
 }
@@ -1321,11 +1393,12 @@ func (bc *Blockchain) GetUTXOState() *ChainState {
 		}
 	}
 
+	utxoRootHash := bc.utxoPool.GetRootHash()
 	return &ChainState{
 		Height:      bc.GetHeight(),
-		RootHash:    bc.utxoPool.GetRootHash(),
-		UTXOSetRoot: bc.utxoPool.GetRootHash(),
-		StateRoot:   bc.GetState().RootHash,
+		RootHash:    utxoRootHash,
+		UTXOSetRoot: utxoRootHash,
+		StateRoot:   utxoRootHash, // Use UTXO root directly instead of calling GetState()
 		Timestamp:   time.Now().Unix(),
 	}
 }
@@ -1491,3 +1564,6 @@ func calculateMinerReward(blockReward float64) float64 {
 func (bc *Blockchain) GetUTXOPool() *UTXOPool {
 	return bc.utxoPool
 }
+
+
+
