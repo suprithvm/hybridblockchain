@@ -195,15 +195,15 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		DHT:               kadDHT,
 		PeerManager:       peerManager,
 		Blockchain:        config.Blockchain,
-		Mempool:           NewMempool(nil),
-		UTXOSet:           NewUTXOPool(config.Blockchain.db),
+		Mempool:           NewMempool(nil),             // Temporarily set to nil, will update below
+		UTXOSet:           config.Blockchain.utxoPool,  // Use blockchain's UTXOPool instead of creating a new one
 		StakePool:         config.Blockchain.StakePool, // Use blockchain's stake pool
 		config:            config,
 		ctx:               ctx,
 		cancel:            cancel,
 		keepAliveCtx:      keepAliveCtx,
 		keepAliveCancel:   keepAliveCancel,
-		UTXOPool:          NewUTXOPool(config.Blockchain.db),
+		UTXOPool:          config.Blockchain.utxoPool, // Use blockchain's UTXOPool for Node.UTXOPool as well
 		isSyncing:         false,
 		syncMu:            sync.RWMutex{},
 		gasModel:          gas.NewGasModel(1000000, 100000),
@@ -221,6 +221,14 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		validatorProtocol: nil,
 		bootstrapNodes:    make(map[peer.ID]bool),
 		wg:                sync.WaitGroup{},
+	}
+
+	// Create and properly initialize mempool with node reference
+	node.Mempool = NewMempool(node)
+
+	// Also update the blockchain's mempool reference to use the same instance
+	if config.Blockchain != nil {
+		config.Blockchain.mempool = node.Mempool
 	}
 
 	// Set validator mode if specified
@@ -1826,6 +1834,16 @@ func (n *Node) Start() error {
 		log.Printf("📝 UTXOPool node reference updated")
 	}
 
+	// Critical fix: Link Blockchain's UTXOPool to this node
+	if n.Blockchain != nil && n.Blockchain.utxoPool != nil {
+		n.Blockchain.utxoPool.node = n
+		log.Printf("🔗 Linked Blockchain's UTXOPool to node")
+	}
+
+	// Add debug logs to track UTXOPool-node associations
+	log.Printf("📌 Blockchain UTXOPool node association: %v", n.Blockchain.utxoPool.node != nil)
+	log.Printf("📌 Node UTXOPool instance: %p", n.UTXOPool)
+
 	// Bootstrap DHT
 	log.Printf("🔄 Starting DHT bootstrap...")
 	if err := n.bootstrapDHT(n.ctx); err != nil {
@@ -2550,4 +2568,9 @@ func (n *Node) sendValidatorVerificationResponse(stream network.Stream, block *B
 // GetBlockchain returns the reference to the blockchain
 func (n *Node) GetBlockchain() *Blockchain {
 	return n.Blockchain
+}
+
+// GetAccountManager returns the node's account manager
+func (n *Node) GetAccountManager() *AccountManager {
+	return n.accountManager
 }

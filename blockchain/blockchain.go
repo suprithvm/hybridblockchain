@@ -1505,3 +1505,8 @@ func (bc *Blockchain) getLastValidator() string {
 
 	return bc.lastValidatorAddress
 }
+
+// GetUTXOPool returns the blockchain's UTXO pool
+func (bc *Blockchain) GetUTXOPool() *UTXOPool {
+	return bc.utxoPool
+}

@@ -201,6 +201,16 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 		log.Fatalf("❌ Failed to create node: %v", err)
 	}
 
+	// Set the node in the blockchain BEFORE starting the node
+	bc.Node = node
+	log.Printf("🔗 Blockchain node connection established with ID: %s", node.Host.ID())
+
+	// Additional debug logs
+	log.Printf("🔍 Verifying blockchain components:")
+	log.Printf("   • Blockchain UTXOPool: %v", bc.GetUTXOPool() != nil)
+	log.Printf("   • Node UTXOPool: %v", node.UTXOPool != nil)
+	log.Printf("   • Node AccountManager: %v", node.GetAccountManager() != nil)
+
 	// Start the node
 	if err := node.Start(); err != nil {
 		log.Fatalf("❌ Failed to start node: %v", err)
@@ -208,11 +218,6 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 
 	// Log node ID
 	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
-
-	// Set the node in the blockchain
-	bc.Node = node
-	
-	log.Printf("🔗 Blockchain node connection established with ID: %s", node.Host.ID())
 
 	// Connect to bootstrap nodes with retries
 	log.Printf("🔄 Connecting to bootstrap nodes...")
@@ -366,6 +371,17 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) error {
 		return fmt.Errorf("failed to create node: %v", err)
 	}
 
+	// Set the node in the blockchain BEFORE starting the node
+	bc.Node = node
+	log.Printf("🔗 Connected node to blockchain with ID: %s", node.Host.ID())
+
+	// Additional debug logs
+	log.Printf("🔍 Verifying blockchain components for validator node:")
+	log.Printf("   • Blockchain UTXOPool: %v", bc.GetUTXOPool() != nil)
+	log.Printf("   • Node UTXOPool: %v", node.UTXOPool != nil)
+	log.Printf("   • Node AccountManager: %v", node.GetAccountManager() != nil)
+	log.Printf("   • StakePool: %v", bc.StakePool != nil)
+
 	// Start the node
 	if err := node.Start(); err != nil {
 		return fmt.Errorf("failed to start node: %v", err)
@@ -374,11 +390,6 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) error {
 	// Log node information
 	log.Printf("🌐 P2P node initialized with ID: %s", node.Host.ID())
 	log.Printf("📡 Listening on: %s", config.ListenAddr)
-
-	// Set the node in the blockchain
-	bc.Node = node
-	
-	log.Printf("🔗 Connected node to blockchain with ID: %s", node.Host.ID())
 
 	// 5. Connect to bootstrap nodes with retries
 	maxRetries := 5
