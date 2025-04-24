@@ -835,15 +835,14 @@ func NewBlockchain(dataDir string) (*Blockchain, error) {
 func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	log.Printf("🔄 Starting mining process for miner %s", minerAddress)
 
-
 	//[TEST] Test to check whether balances are updated correctly
-	  
+
 	// Get initial balance before mining
-	  var initialBalance float64
-	  if bc.utxoPool != nil {
-		  initialBalance = bc.utxoPool.GetBalance(minerAddress)
-		  log.Printf("🧾 Miner %s initial balance: %.8f tokens", minerAddress, initialBalance)
-	  }
+	var initialBalance float64
+	if bc.utxoPool != nil {
+		initialBalance = bc.utxoPool.GetBalance(minerAddress)
+		log.Printf("🧾 Miner %s initial balance: %.8f tokens", minerAddress, initialBalance)
+	}
 
 	//[/Test]
 
@@ -921,7 +920,7 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 			MinedBy:      minerAddress,
 			MerkleRoot:   txTrie.GenerateRootHash(),
 			StateRoot:    "", // Initialize with previous hash, will update after processing transactions
-			ReceiptsRoot: "",                 // Initialize as empty, will be set after UTXO processing
+			ReceiptsRoot: "", // Initialize as empty, will be set after UTXO processing
 		},
 		Body: &BlockBody{
 			Transactions: txTrie,
@@ -936,24 +935,24 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 		bc.utxoPool.AddUTXO(coinbaseTx, newBlock.Header.BlockNumber)
 
 		//[TEST] Test to check whether balances are updated correctly
-		  // Immediate UTXO verification
-		  utxoKey := fmt.Sprintf("%s-0", coinbaseTx.TransactionID)
-		  if utxo, exists := bc.utxoPool.GetUTXOs()[utxoKey]; exists {
-			  log.Printf("✅ Verified coinbase UTXO in pool:")
-			  log.Printf("   • TX ID: %s", utxo.TransactionID)
-			  log.Printf("   • Index: %d", utxo.OutputIndex)
-			  log.Printf("   • Amount: %.8f", utxo.Amount)
-			  log.Printf("   • Owner: %s", utxo.Owner)
-		  } else {
-			  log.Printf("❌ CRITICAL: Coinbase UTXO not found in pool!")
-		  }
+		// Immediate UTXO verification
+		utxoKey := fmt.Sprintf("%s-0", coinbaseTx.TransactionID)
+		if utxo, exists := bc.utxoPool.GetUTXOs()[utxoKey]; exists {
+			log.Printf("✅ Verified coinbase UTXO in pool:")
+			log.Printf("   • TX ID: %s", utxo.TransactionID)
+			log.Printf("   • Index: %d", utxo.OutputIndex)
+			log.Printf("   • Amount: %.8f", utxo.Amount)
+			log.Printf("   • Owner: %s", utxo.Owner)
+		} else {
+			log.Printf("❌ CRITICAL: Coinbase UTXO not found in pool!")
+		}
 
-          // Log balance after coinbase UTXO addition
-		  postCoinbaseBalance := bc.utxoPool.GetBalance(minerAddress)
-		  log.Printf("📊 Miner balance after coinbase UTXO: %.8f tokens (Δ +%.8f)", 
-			  postCoinbaseBalance, postCoinbaseBalance-initialBalance)
+		// Log balance after coinbase UTXO addition
+		postCoinbaseBalance := bc.utxoPool.GetBalance(minerAddress)
+		log.Printf("📊 Miner balance after coinbase UTXO: %.8f tokens (Δ +%.8f)",
+			postCoinbaseBalance, postCoinbaseBalance-initialBalance)
 
-		//[/Test]  
+		//[/Test]
 
 		// Add validator reward transaction if it exists
 		if lastValidatorAddress != "" && blockHeight > 1 {
@@ -963,12 +962,12 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 				log.Printf("💸 Added validator reward UTXO for %s", lastValidatorAddress)
 
 				//[TEST] Test to check whether balances are updated correctly
-                 // Log validator balance update
-                valBalance := bc.utxoPool.GetBalance(lastValidatorAddress)
-                log.Printf("📈 Validator %s balance: %.8f tokens", lastValidatorAddress, valBalance)
+				// Log validator balance update
+				valBalance := bc.utxoPool.GetBalance(lastValidatorAddress)
+				log.Printf("📈 Validator %s balance: %.8f tokens", lastValidatorAddress, valBalance)
 
 				//[/Test]
-				
+
 			}
 		}
 
@@ -1024,54 +1023,53 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	if bc.utxoPool != nil {
 		bc.updateUTXOSet(newBlock)
 
-
 		//[TEST] Test to check whether balances are updated correctly
 
 		// Final balance verification
-        finalBalance := bc.utxoPool.GetBalance(minerAddress)
-        log.Printf("🏦 Final miner balance verification:")
-        log.Printf("   • Address: %s", minerAddress)
-        log.Printf("   • Block Reward: +%.8f", minerReward)
-        log.Printf("   • Total Balance: %.8f tokens", finalBalance)
-        log.Printf("   • Balance Components:")
-        
-        minerUTXOs := bc.utxoPool.GetUTXOsForAddress(minerAddress)
-        for i, utxo := range minerUTXOs {
-            log.Printf("     %d. %s-%d: %.8f tokens (block %d)", 
-                i+1, utxo.TransactionID, utxo.OutputIndex, utxo.Amount, utxo.BlockHeight)
-        }
+		finalBalance := bc.utxoPool.GetBalance(minerAddress)
+		log.Printf("🏦 Final miner balance verification:")
+		log.Printf("   • Address: %s", minerAddress)
+		log.Printf("   • Block Reward: +%.8f", minerReward)
+		log.Printf("   • Total Balance: %.8f tokens", finalBalance)
+		log.Printf("   • Balance Components:")
 
-        // Account manager verification
-        if bc.node != nil && bc.node.accountManager != nil {
-            if accState, err := bc.node.accountManager.GetAccountState(minerAddress); err == nil {
-                log.Printf("🔐 Account Manager Verification:")
-                log.Printf("   • Stored Balance: %.8f tokens", accState.Balance)
-                log.Printf("   • UTXO-Calculated Balance: %.8f tokens", finalBalance)
-                log.Printf("   • Status: %t", accState.Balance == finalBalance)
-            }
-        }
+		minerUTXOs := bc.utxoPool.GetUTXOsForAddress(minerAddress)
+		for i, utxo := range minerUTXOs {
+			log.Printf("     %d. %s-%d: %.8f tokens (block %d)",
+				i+1, utxo.TransactionID, utxo.OutputIndex, utxo.Amount, utxo.BlockHeight)
+		}
+
+		// Account manager verification
+		if bc.node != nil && bc.node.accountManager != nil {
+			if accState, err := bc.node.accountManager.GetAccountState(minerAddress); err == nil {
+				log.Printf("🔐 Account Manager Verification:")
+				log.Printf("   • Stored Balance: %.8f tokens", accState.Balance)
+				log.Printf("   • UTXO-Calculated Balance: %.8f tokens", finalBalance)
+				log.Printf("   • Status: %t", accState.Balance == finalBalance)
+			}
+		}
 
 		//[/Test]
 	}
 
-	// Add mining reward to the miner's balance
-	if err := bc.AddBalance(minerAddress, minerReward); err != nil {
-		log.Printf("⚠️ Warning: Failed to update miner balance: %v", err)
-	}
-
 	// Add validator reward if applicable
 	if lastValidatorAddress != "" && blockHeight > 1 {
-		validatorReward := calculateValidatorReward(totalBlockReward)
-		if err := bc.AddBalance(lastValidatorAddress, validatorReward); err != nil {
-			log.Printf("⚠️ Warning: Failed to update validator balance: %v", err)
-		}
+		valBalance := bc.utxoPool.GetBalance(lastValidatorAddress)
 		log.Printf("💰 Validator reward of %.8f tokens sent to %s via validator reward transaction",
-			validatorReward, lastValidatorAddress)
+			valBalance, lastValidatorAddress)
 	}
 
 	// Log the mining reward
 	log.Printf("💰 Mining reward of %.8f tokens sent to %s via coinbase transaction", minerReward, minerAddress)
 	log.Printf("   Transaction ID: %s", coinbaseTx.TransactionID)
+
+	// Broadcast the new block to the network if Node is available
+	if bc.node != nil && bc.node.Host != nil {
+		log.Printf("📣 Broadcasting newly mined block #%d to the network", newBlock.Header.BlockNumber)
+		if err := bc.node.BroadcastBlock(newBlock); err != nil {
+			log.Printf("⚠️ Warning: Failed to broadcast block: %v", err)
+		}
+	}
 
 	return &newBlock, nil
 }
@@ -1564,6 +1562,3 @@ func calculateMinerReward(blockReward float64) float64 {
 func (bc *Blockchain) GetUTXOPool() *UTXOPool {
 	return bc.utxoPool
 }
-
-
-

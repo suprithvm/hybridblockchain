@@ -124,6 +124,8 @@ type Node struct {
 	lastSyncTime           time.Time
 	syncComplete           bool
 	lastPeerDiscovery      time.Time
+	broadcastedBlocks      map[string]bool // Track broadcasted blocks by hash
+	broadcastMu            sync.RWMutex    // Mutex for broadcasted blocks map
 }
 
 // publishMessage publishes a message to a specific topic using pubsub
@@ -221,6 +223,7 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		validatorProtocol: nil,
 		bootstrapNodes:    make(map[peer.ID]bool),
 		wg:                sync.WaitGroup{},
+		broadcastedBlocks: make(map[string]bool), // Initialize the map
 	}
 
 	// Create and properly initialize mempool with node reference
@@ -388,17 +391,74 @@ func (n *Node) handleBlockStream(s network.Stream) {
 	defer s.Close()
 
 	peerID := s.Conn().RemotePeer()
+	log.Printf("📥 Received block from peer %s", peerID.String())
 
-	// Read the block data
-	buf := make([]byte, 1024*1024) // 1MB buffer
-	_, err := io.ReadFull(s, buf)
-	if err != nil {
+	// Block data structure that matches what we send in BroadcastBlock
+	var blockData struct {
+		Header    *BlockHeader
+		Body      *BlockBody
+		Hash      string
+		Timestamp int64
+	}
+
+	// Read and decode the block data
+	if err := json.NewDecoder(s).Decode(&blockData); err != nil {
+		log.Printf("❌ Error decoding block data: %v", err)
 		n.handleStreamError(s, err)
 		return
 	}
 
-	// Process the block (implement your block processing logic here)
-	// ...
+	// Verify we can process this block
+	if blockData.Header == nil || blockData.Body == nil {
+		log.Printf("❌ Received invalid block with nil header or body")
+		n.handleStreamError(s, fmt.Errorf("invalid block data"))
+		return
+	}
+
+	// Recreate the block from received data
+	block := Block{
+		Header:               blockData.Header,
+		Body:                 blockData.Body,
+		hash:                 blockData.Hash,
+		originalHash:         blockData.Hash,
+		CumulativeDifficulty: 0, // This should be recalculated
+	}
+
+	// Check if we've already processed this block
+	n.broadcastMu.RLock()
+	_, alreadyProcessed := n.broadcastedBlocks[blockData.Hash]
+	n.broadcastMu.RUnlock()
+
+	if alreadyProcessed {
+		log.Printf("⚠️ Block #%d with hash %s already processed - skipping",
+			blockData.Header.BlockNumber, blockData.Hash)
+		return
+	}
+
+	// Mark this block as processed to prevent rebroadcasting
+	n.broadcastMu.Lock()
+	n.broadcastedBlocks[blockData.Hash] = true
+	n.broadcastMu.Unlock()
+
+	log.Printf("✅ Received new block #%d with hash %s",
+		blockData.Header.BlockNumber, blockData.Hash)
+
+	// Validate the block
+	err := n.Blockchain.ValidateBlock(&block)
+	if err != nil {
+		log.Printf("❌ Block validation failed: %v", err)
+		n.handleStreamError(s, err)
+		return
+	}
+
+	// Add the block to the blockchain without validation (already validated)
+	if err := n.Blockchain.AddBlockWithoutValidation(&block); err != nil {
+		log.Printf("❌ Failed to add block to blockchain: %v", err)
+		n.handleStreamError(s, err)
+		return
+	}
+
+	log.Printf("✅ Successfully added block #%d to the blockchain", block.Header.BlockNumber)
 
 	// Update peer score positively for good behavior
 	n.PeerManager.UpdatePeerScore(peerID, 5)
@@ -652,7 +712,32 @@ func (n *Node) maintainConnections() {
 
 // BroadcastBlock broadcasts a block to all connected peers
 func (n *Node) BroadcastBlock(block Block) error {
+	blockHash := block.Hash()
+
+	// Check if this block has already been broadcasted
+	n.broadcastMu.RLock()
+	_, alreadyBroadcasted := n.broadcastedBlocks[blockHash]
+	n.broadcastMu.RUnlock()
+
+	if alreadyBroadcasted {
+		log.Printf("⚠️ Block #%d with hash %s has already been broadcasted - skipping",
+			block.Header.BlockNumber, blockHash)
+		return nil
+	}
+
+	// Mark this block as broadcasted
+	n.broadcastMu.Lock()
+	n.broadcastedBlocks[blockHash] = true
+	n.broadcastMu.Unlock()
+
+	// Limit the size of the broadcastedBlocks map to prevent memory leaks
+	n.cleanupBroadcastedBlocks()
+
+	// Continue with normal broadcast logic
 	peers := n.PeerManager.GetConnectedPeers()
+	log.Printf("📢 Broadcasting block #%d with hash %s to %d peers",
+		block.Header.BlockNumber, blockHash, len(peers))
+
 	for _, peerID := range peers {
 		if peerID == n.Host.ID() {
 			continue
@@ -673,7 +758,7 @@ func (n *Node) BroadcastBlock(block Block) error {
 		}{
 			Header:    block.Header,
 			Body:      block.Body,
-			Hash:      block.Hash(),
+			Hash:      blockHash,
 			Timestamp: time.Now().Unix(),
 		}
 
@@ -686,6 +771,25 @@ func (n *Node) BroadcastBlock(block Block) error {
 		stream.Close()
 	}
 	return nil
+}
+
+// Add a new function to clean up old blocks from the broadcasted blocks map
+func (n *Node) cleanupBroadcastedBlocks() {
+	const maxTrackedBlocks = 1000 // Set a reasonable limit
+
+	n.broadcastMu.Lock()
+	defer n.broadcastMu.Unlock()
+
+	// If we haven't reached the limit, do nothing
+	if len(n.broadcastedBlocks) <= maxTrackedBlocks {
+		return
+	}
+
+	// Simple cleanup - just reset the map when it gets too large
+	// In a production system, you might want a more sophisticated cleanup
+	// strategy that considers block height or timestamps
+	n.broadcastedBlocks = make(map[string]bool)
+	log.Printf("🧹 Cleared broadcasted blocks tracking map - it exceeded %d entries", maxTrackedBlocks)
 }
 
 // SendHeartbeat sends a heartbeat to a specific peer
