@@ -391,14 +391,14 @@ func (n *Node) handleBlockStream(s network.Stream) {
 	defer s.Close()
 
 	peerID := s.Conn().RemotePeer()
-	log.Printf("📥 Received block from peer %s", peerID.String())
+	log.Printf("📥 Received  Broadcasting block from peer %s", peerID.String())
 
 	// Block data structure that matches what we send in BroadcastBlock
 	var blockData struct {
 		Header    *BlockHeader
 		Body      *BlockBody
 		Hash      string
-		Timestamp int64
+		BroadcastTimestamp int64
 	}
 
 	// Read and decode the block data
@@ -415,13 +415,33 @@ func (n *Node) handleBlockStream(s network.Stream) {
 		return
 	}
 
+	// Create a temporary block to calculate cumulative difficulty
+	tempBlock := &Block{
+		Header: blockData.Header,
+	}
+
+	// Calculate cumulative difficulty
+	cumulativeDifficulty, err := n.Blockchain.CalculateCumulativeDifficulty(tempBlock)
+	if err != nil {
+		log.Printf("Error calculating cumulative difficulty: %v", err)
+		return
+	}
+
 	// Recreate the block from received data
 	block := Block{
 		Header:               blockData.Header,
 		Body:                 blockData.Body,
 		hash:                 blockData.Hash,
 		originalHash:         blockData.Hash,
-		CumulativeDifficulty: 0, // This should be recalculated
+		CumulativeDifficulty: cumulativeDifficulty, // Use the calculated value
+	}
+
+	// Validate the block
+	err = n.Blockchain.ValidateBlock(&block)
+	if err != nil {
+		log.Printf("❌ Block validation failed: %v", err)
+		n.handleStreamError(s, err)
+		return
 	}
 
 	// Check if we've already processed this block
@@ -442,14 +462,6 @@ func (n *Node) handleBlockStream(s network.Stream) {
 
 	log.Printf("✅ Received new block #%d with hash %s",
 		blockData.Header.BlockNumber, blockData.Hash)
-
-	// Validate the block
-	err := n.Blockchain.ValidateBlock(&block)
-	if err != nil {
-		log.Printf("❌ Block validation failed: %v", err)
-		n.handleStreamError(s, err)
-		return
-	}
 
 	// Add the block to the blockchain without validation (already validated)
 	if err := n.Blockchain.AddBlockWithoutValidation(&block); err != nil {
@@ -754,12 +766,12 @@ func (n *Node) BroadcastBlock(block Block) error {
 			Header    *BlockHeader
 			Body      *BlockBody
 			Hash      string
-			Timestamp int64
+			BroadcastTimestamp int64
 		}{
 			Header:    block.Header,
 			Body:      block.Body,
 			Hash:      blockHash,
-			Timestamp: time.Now().Unix(),
+			BroadcastTimestamp: time.Now().Unix(),
 		}
 
 		// Encode and send block data

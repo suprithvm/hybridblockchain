@@ -46,7 +46,6 @@ type Blockchain struct {
 	communityPool        float64
 	balances             map[string]float64
 	validator            *Validator
-	node                 *Node
 	lastValidatorAddress string // Address of the validator who validated the last block
 }
 
@@ -139,7 +138,7 @@ func (bc *Blockchain) AddBlock(block *Block, mempool *Mempool, stakePool *StakeP
 	previousBlock := bc.GetLatestBlock()
 
 	// Skip validator selection for miner nodes
-	if bc.node != nil && !bc.node.IsInitializedValidator() {
+	if bc.Node != nil && !bc.Node.IsInitializedValidator() {
 		log.Printf("⛏️ Miner node skipping validator selection")
 		return bc.addBlockWithoutValidation(block)
 	}
@@ -149,7 +148,7 @@ func (bc *Blockchain) AddBlock(block *Block, mempool *Mempool, stakePool *StakeP
 		log.Printf("⚠️ No validators available in stake pool, attempting to sync...")
 		if host != nil {
 			// Broadcast a request for validator information
-			if err := bc.node.BroadcastValidatorRequest(); err != nil {
+			if err := bc.Node.BroadcastValidatorRequest(); err != nil {
 				log.Printf("Failed to broadcast validator request: %v", err)
 			}
 		}
@@ -1040,8 +1039,8 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 		}
 
 		// Account manager verification
-		if bc.node != nil && bc.node.accountManager != nil {
-			if accState, err := bc.node.accountManager.GetAccountState(minerAddress); err == nil {
+		if bc.Node != nil && bc.Node.accountManager != nil {
+			if accState, err := bc.Node.accountManager.GetAccountState(minerAddress); err == nil {
 				log.Printf("🔐 Account Manager Verification:")
 				log.Printf("   • Stored Balance: %.8f tokens", accState.Balance)
 				log.Printf("   • UTXO-Calculated Balance: %.8f tokens", finalBalance)
@@ -1064,9 +1063,9 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	log.Printf("   Transaction ID: %s", coinbaseTx.TransactionID)
 
 	// Broadcast the new block to the network if Node is available
-	if bc.node != nil && bc.node.Host != nil {
+	if bc.Node != nil && bc.Node.Host != nil {
 		log.Printf("📣 Broadcasting newly mined block #%d to the network", newBlock.Header.BlockNumber)
-		if err := bc.node.BroadcastBlock(newBlock); err != nil {
+		if err := bc.Node.BroadcastBlock(newBlock); err != nil {
 			log.Printf("⚠️ Warning: Failed to broadcast block: %v", err)
 		}
 	}
@@ -1561,4 +1560,25 @@ func calculateMinerReward(blockReward float64) float64 {
 // GetUTXOPool returns the blockchain's UTXO pool
 func (bc *Blockchain) GetUTXOPool() *UTXOPool {
 	return bc.utxoPool
+}
+
+func (bc *Blockchain) CalculateCumulativeDifficulty(newBlock *Block) (uint64, error) {
+	// Get ACTUAL parent block (not just latest)
+	parentBlock, err := bc.GetBlock(newBlock.Header.PreviousHash)
+	if err != nil {
+		return 0, fmt.Errorf("parent block %s not found: %w", newBlock.Header.PreviousHash, err)
+	}
+
+	// Genesis block case
+	if newBlock.Header.BlockNumber == 0 {
+		return uint64(newBlock.Header.Difficulty), nil
+	}
+
+	// Verify chain continuity
+	if parentBlock.Header.BlockNumber+1 != newBlock.Header.BlockNumber {
+		return 0, fmt.Errorf("block number mismatch: parent %d, new %d",
+			parentBlock.Header.BlockNumber, newBlock.Header.BlockNumber)
+	}
+
+	return parentBlock.CumulativeDifficulty + uint64(newBlock.Header.Difficulty), nil
 }
