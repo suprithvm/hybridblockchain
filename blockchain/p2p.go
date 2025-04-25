@@ -746,7 +746,7 @@ func (n *Node) BroadcastBlock(block Block) error {
 	n.cleanupBroadcastedBlocks()
 
 	// Continue with normal broadcast logic
-	peers := n.PeerManager.GetConnectedPeers()
+	peers := n.Host.Network().Peers()
 	log.Printf("📢 Broadcasting block #%d with hash %s to %d peers",
 		block.Header.BlockNumber, blockHash, len(peers))
 
