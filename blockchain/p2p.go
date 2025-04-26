@@ -395,9 +395,9 @@ func (n *Node) handleBlockStream(s network.Stream) {
 
 	// Block data structure that matches what we send in BroadcastBlock
 	var blockData struct {
-		Header    *BlockHeader
-		Body      *BlockBody
-		Hash      string
+		Header             *BlockHeader
+		Body               *BlockBody
+		Hash               string
 		BroadcastTimestamp int64
 	}
 
@@ -471,6 +471,21 @@ func (n *Node) handleBlockStream(s network.Stream) {
 	}
 
 	log.Printf("✅ Successfully added block #%d to the blockchain", block.Header.BlockNumber)
+
+	// Process UTXO state updates for this block
+	if n.Blockchain.utxoPool != nil {
+		if err := n.Blockchain.ProcessBlockUTXOs(&block); err != nil {
+			log.Printf("⚠️ Warning: Error processing UTXOs for block %d: %v",
+				block.Header.BlockNumber, err)
+			// Don't fail the entire block processing, just log the warning
+		} else {
+			log.Printf("✅ Successfully updated UTXO state for block #%d",
+				block.Header.BlockNumber)
+		}
+	} else {
+		log.Printf("⚠️ Warning: UTXO pool not initialized, skipping UTXO processing for block #%d",
+			block.Header.BlockNumber)
+	}
 
 	// Update peer score positively for good behavior
 	n.PeerManager.UpdatePeerScore(peerID, 5)
@@ -767,14 +782,14 @@ func (n *Node) BroadcastBlock(block Block) error {
 
 		// Serialize block data
 		blockData := struct {
-			Header    *BlockHeader
-			Body      *BlockBody
-			Hash      string
+			Header             *BlockHeader
+			Body               *BlockBody
+			Hash               string
 			BroadcastTimestamp int64
 		}{
-			Header:    block.Header,
-			Body:      block.Body,
-			Hash:      blockHash,
+			Header:             block.Header,
+			Body:               block.Body,
+			Hash:               blockHash,
 			BroadcastTimestamp: time.Now().Unix(),
 		}
 

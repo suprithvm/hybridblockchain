@@ -893,7 +893,14 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	// Add coinbase transaction first
 	txTrie.Insert(*coinbaseTx)
 
+	// Create a temporary UTXO pool for processing transactions
+	var tempUTXOPool *UTXOPool
+	if bc.utxoPool != nil {
+		tempUTXOPool = bc.utxoPool.Clone()
+	}
+
 	// Check for previous validator to reward
+	var validatorRewardTx *Transaction
 	lastValidatorAddress := previousBlock.Header.ValidatedBy
 	if lastValidatorAddress != "" && blockHeight > 1 {
 		// Calculate validator's reward
@@ -902,7 +909,7 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 			validatorReward, ValidatorRewardPercentage*100)
 
 		// Create validator reward transaction
-		validatorRewardTx := NewValidatorRewardTransaction(lastValidatorAddress, validatorReward, blockHeight)
+		validatorRewardTx = NewValidatorRewardTransaction(lastValidatorAddress, validatorReward, blockHeight)
 		log.Printf("💰 Created validator reward transaction with reward %.8f tokens for validator %s",
 			validatorReward, lastValidatorAddress)
 
@@ -938,15 +945,15 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 		CumulativeDifficulty: previousBlock.CumulativeDifficulty + uint64(difficulty),
 	}
 
-	// Process transactions and update UTXO set with nil check
-	if bc.utxoPool != nil {
+	// Process transactions in the temporary UTXO pool if available
+	if tempUTXOPool != nil {
 		// Add the coinbase transaction to UTXO set first
-		bc.utxoPool.AddUTXO(coinbaseTx, newBlock.Header.BlockNumber)
+		tempUTXOPool.AddUTXO(coinbaseTx, newBlock.Header.BlockNumber)
 
 		//[TEST] Test to check whether balances are updated correctly
 		// Immediate UTXO verification
 		utxoKey := fmt.Sprintf("%s-0", coinbaseTx.TransactionID)
-		if utxo, exists := bc.utxoPool.GetUTXOs()[utxoKey]; exists {
+		if utxo, exists := tempUTXOPool.GetUTXOs()[utxoKey]; exists {
 			log.Printf("✅ Verified coinbase UTXO in pool:")
 			log.Printf("   • TX ID: %s", utxo.TransactionID)
 			log.Printf("   • Index: %d", utxo.OutputIndex)
@@ -957,36 +964,32 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 		}
 
 		// Log balance after coinbase UTXO addition
-		postCoinbaseBalance := bc.utxoPool.GetBalance(minerAddress)
+		postCoinbaseBalance := tempUTXOPool.GetBalance(minerAddress)
 		log.Printf("📊 Miner balance after coinbase UTXO: %.8f tokens (Δ +%.8f)",
 			postCoinbaseBalance, postCoinbaseBalance-initialBalance)
 
 		//[/Test]
 
 		// Add validator reward transaction if it exists
-		if lastValidatorAddress != "" && blockHeight > 1 {
-			validatorRewardTx := txTrie.GetAllTransactions()[1] // The second transaction should be the validator reward
-			if validatorRewardTx.TxType == TX_VALIDATOR_REWARD {
-				bc.utxoPool.AddUTXO(&validatorRewardTx, newBlock.Header.BlockNumber)
-				log.Printf("💸 Added validator reward UTXO for %s", lastValidatorAddress)
+		if validatorRewardTx != nil && lastValidatorAddress != "" {
+			tempUTXOPool.AddUTXO(validatorRewardTx, newBlock.Header.BlockNumber)
+			log.Printf("💸 Added validator reward UTXO for %s", lastValidatorAddress)
 
-				//[TEST] Test to check whether balances are updated correctly
-				// Log validator balance update
-				valBalance := bc.utxoPool.GetBalance(lastValidatorAddress)
-				log.Printf("📈 Validator %s balance: %.8f tokens", lastValidatorAddress, valBalance)
+			//[TEST] Test to check whether balances are updated correctly
+			// Log validator balance update
+			valBalance := tempUTXOPool.GetBalance(lastValidatorAddress)
+			log.Printf("📈 Validator %s balance: %.8f tokens", lastValidatorAddress, valBalance)
 
-				//[/Test]
-
-			}
+			//[/Test]
 		}
 
 		// Then process other transactions
 		for _, tx := range pendingTxs {
-			bc.utxoPool.AddUTXO(&tx, newBlock.Header.BlockNumber)
+			tempUTXOPool.AddUTXO(&tx, newBlock.Header.BlockNumber)
 		}
 
 		// Set StateRoot and ReceiptsRoot after processing transactions
-		utxoRootHash := bc.utxoPool.GetRootHash()
+		utxoRootHash := tempUTXOPool.GetRootHash()
 		newBlock.Header.StateRoot = utxoRootHash
 		newBlock.Header.ReceiptsRoot = utxoRootHash
 	} else {
@@ -1001,6 +1004,7 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	// Use the blockchain's existing StakePool instead of creating a new one
 	if err := MineBlock(&newBlock, previousBlock, bc.StakePool, difficulty, bc.Node.Host); err != nil {
 		log.Printf("❌ Mining failed: %v", err)
+		// Mining failed, we'll discard the temporary UTXO pool
 		return nil, err
 	}
 
@@ -1008,6 +1012,11 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	log.Printf("✅ Successfully mined block #%d with hash %s",
 		newBlock.Header.BlockNumber, newBlock.Hash())
 	log.Printf("⏱️ Mining completed in %s", miningTime)
+
+	// Mining was successful, now commit the temporary UTXO pool to the main one
+	if tempUTXOPool != nil && bc.utxoPool != nil {
+		bc.utxoPool = tempUTXOPool
+	}
 
 	// Add the block to the chain
 	bc.mu.Lock()
@@ -1083,16 +1092,53 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	return &newBlock, nil
 }
 
-// Add this method to the Blockchain struct
-// updateUTXOSet updates the UTXO set with the transactions in the block
+// updateUTXOSet updates account balances and other state data without modifying the UTXO pool
+// since the pool is now updated transactionally before this method is called
 func (bc *Blockchain) updateUTXOSet(block Block) {
 	if bc.utxoPool == nil {
 		return
 	}
 
-	// Process all transactions in the block
-	for _, tx := range block.Body.Transactions.GetAllTransactions() {
-		bc.utxoPool.AddUTXO(&tx, block.Header.BlockNumber)
+	// This method is now primarily for updating account states and other metadata
+	// rather than the UTXO pool itself, which is updated transactionally
+
+	// Update account manager if available
+	if bc.Node != nil && bc.Node.accountManager != nil {
+		accountUpdates := make(map[string]*AccountState)
+
+		// Process all transactions in the block to update account states
+		for _, tx := range block.Body.Transactions.GetAllTransactions() {
+			// Update sender account (except for coinbase and validator reward transactions)
+			if tx.TxType != TX_COINBASE && tx.TxType != TX_VALIDATOR_REWARD {
+				if sender, err := bc.Node.accountManager.GetAccountState(tx.Sender); err == nil {
+					// Increment nonce
+					sender.Nonce++
+					accountUpdates[tx.Sender] = sender
+				}
+			}
+
+			// Update receiver accounts
+			for _, output := range tx.Outputs {
+				receiver := output.Receiver
+				if state, err := bc.Node.accountManager.GetAccountState(receiver); err == nil {
+					// Update balance
+					state.Balance = bc.utxoPool.GetBalance(receiver)
+					accountUpdates[receiver] = state
+				} else {
+					// Create new account if it doesn't exist
+					accountUpdates[receiver] = &AccountState{
+						Address: receiver,
+						Balance: output.Amount,
+						Nonce:   0,
+					}
+				}
+			}
+		}
+
+		// Batch update account states
+		if len(accountUpdates) > 0 {
+			bc.Node.accountManager.BatchUpdateAccounts(accountUpdates)
+		}
 	}
 }
 
@@ -1591,4 +1637,65 @@ func (bc *Blockchain) CalculateCumulativeDifficulty(newBlock *Block) (uint64, er
 	}
 
 	return parentBlock.CumulativeDifficulty + uint64(newBlock.Header.Difficulty), nil
+}
+
+// AddBlockWithUTXOProcessing adds a new block to the blockchain and processes its UTXO state
+func (bc *Blockchain) AddBlockWithUTXOProcessing(newBlock *Block) error {
+	// First validate the block
+	err := bc.ValidateBlock(newBlock)
+	if err != nil {
+		log.Printf("Block %d validation failed: %v\n", newBlock.Header.BlockNumber, err)
+		return err
+	}
+
+	// Add the block
+	err = bc.addBlockWithoutValidation(newBlock)
+	if err != nil {
+		return err
+	}
+
+	// Process UTXOs for this block
+	if bc.utxoPool != nil {
+		err = bc.utxoPool.ProcessBlockTransactions(newBlock)
+		if err != nil {
+			log.Printf("⚠️ Warning: Error processing UTXOs for block %d: %v",
+				newBlock.Header.BlockNumber, err)
+			// Don't return error here, as the block has already been added
+		} else {
+			log.Printf("✓ Successfully updated UTXO state for block %d",
+				newBlock.Header.BlockNumber)
+		}
+	}
+
+	// Broadcast the block to peers (if node available)
+	if bc.Node != nil {
+		bc.Node.BroadcastBlock(*newBlock)
+	}
+
+	return nil
+}
+
+// ProcessBlockUTXOs processes all transactions in a block and updates the UTXO state
+// This should be called after a block has been added to the chain
+func (bc *Blockchain) ProcessBlockUTXOs(block *Block) error {
+	if block == nil {
+		return fmt.Errorf("cannot process UTXOs for nil block")
+	}
+
+	// Process UTXOs for this block
+	if bc.utxoPool != nil {
+		err := bc.utxoPool.ProcessBlockTransactions(block)
+		if err != nil {
+			log.Printf("⚠️ Warning: Error processing UTXOs for block %d: %v",
+				block.Header.BlockNumber, err)
+			return err
+		}
+		log.Printf("✓ Successfully updated UTXO state for block %d",
+			block.Header.BlockNumber)
+	} else {
+		log.Printf("⚠️ UTXO pool not initialized, skipping UTXO processing for block %d",
+			block.Header.BlockNumber)
+	}
+
+	return nil
 }

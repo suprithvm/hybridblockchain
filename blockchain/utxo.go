@@ -47,6 +47,15 @@ type UTXOPool struct {
 	node              *Node
 }
 
+// UtxoSnapshot represents a point-in-time snapshot of the UTXO set
+type UtxoSnapshot struct {
+	BlockHeight uint64          `json:"block_height"`
+	BlockHash   string          `json:"block_hash"`
+	UTXOs       map[string]UTXO `json:"utxos"`
+	MerkleRoot  string          `json:"merkle_root"`
+	Timestamp   int64           `json:"timestamp"`
+}
+
 // NewUTXOPool creates a new UTXO pool
 func NewUTXOPool(database db.Database) *UTXOPool {
 	return &UTXOPool{
@@ -266,55 +275,93 @@ func UpdateUTXOSet(tx Transaction, utxoSet map[string]UTXO) {
 	}
 }
 
-// CreateSnapshot creates a point-in-time snapshot of the UTXO pool state
-func (pool *UTXOPool) CreateSnapshot(height uint64, blockHash string) {
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-
-	snapshot := StateSnapshot{
-		Height:     height,
-		UTXOStates: make(map[string]UTXO),
-		BlockHash:  blockHash,
-		Timestamp:  time.Now().Unix(),
+// CreateSnapshot creates a snapshot of the current UTXO state at a specific block height
+func (pool *UTXOPool) CreateSnapshot(blockHeight uint64, blockHash string) error {
+	// Create a snapshot of the current UTXO state
+	snapshot := &UtxoSnapshot{
+		BlockHeight: blockHeight,
+		BlockHash:   blockHash,
+		UTXOs:       make(map[string]UTXO),
+		MerkleRoot:  pool.merkleRoot,
+		Timestamp:   time.Now().Unix(),
 	}
 
-	// Deep copy current state
-	for k, v := range pool.utxos {
-		snapshot.UTXOStates[k] = v
+	// Only store unspent UTXOs to save space
+	for key, utxo := range pool.utxos {
+		if !utxo.Spent {
+			snapshot.UTXOs[key] = utxo
+		}
 	}
 
-	pool.snapshots = append(pool.snapshots, snapshot)
-
-	// Keep only last 100 snapshots
-	if len(pool.snapshots) > 100 {
-		pool.snapshots = pool.snapshots[1:]
+	err := pool.saveSnapshot(snapshot)
+	if err != nil {
+		log.Printf("⚠️ Error saving UTXO snapshot: %v", err)
+		return err
 	}
+	log.Printf("📸 Created UTXO snapshot at block height %d with %d unspent outputs",
+		blockHeight, len(snapshot.UTXOs))
+
+	return nil
 }
 
-// RestoreSnapshot restores the UTXO pool state from a snapshot
-func (pool *UTXOPool) RestoreSnapshot(snapshot *StateSnapshot) error {
-	if snapshot == nil {
-		return fmt.Errorf("cannot restore nil snapshot")
+// saveSnapshot persists a UTXO snapshot to database
+func (pool *UTXOPool) saveSnapshot(snapshot *UtxoSnapshot) error {
+	if pool.db == nil {
+		return fmt.Errorf("database not initialized")
 	}
 
+	// Generate a key for the snapshot
+	snapshotKey := fmt.Sprintf("utxo_snapshot_%d", snapshot.BlockHeight)
+
+	// Serialize the snapshot
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("failed to serialize UTXO snapshot: %v", err)
+	}
+
+	// Store in the database
+	err = pool.db.Put([]byte(snapshotKey), data)
+	if err != nil {
+		return fmt.Errorf("failed to store UTXO snapshot: %v", err)
+	}
+
+	return nil
+}
+
+// LoadSnapshotAtHeight loads a UTXO snapshot from a specific block height
+func (pool *UTXOPool) LoadSnapshotAtHeight(blockHeight uint64) error {
+	if pool.db == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	// Generate the snapshot key
+	snapshotKey := fmt.Sprintf("utxo_snapshot_%d", blockHeight)
+
+	// Retrieve from database
+	data, err := pool.db.Get([]byte(snapshotKey))
+	if err != nil {
+		return fmt.Errorf("failed to retrieve UTXO snapshot: %v", err)
+	}
+
+	// Deserialize the snapshot
+	var snapshot UtxoSnapshot
+	err = json.Unmarshal(data, &snapshot)
+	if err != nil {
+		return fmt.Errorf("failed to deserialize UTXO snapshot: %v", err)
+	}
+
+	// Apply the snapshot to the current state
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
-	// Verify snapshot integrity
-	tempPool := &UTXOPool{utxos: snapshot.UTXOStates}
-	calculatedRoot := tempPool.CalculateMerkleRoot()
-	if calculatedRoot != snapshot.BlockHash {
-		return fmt.Errorf("snapshot integrity check failed: merkle root mismatch")
-	}
+	// Reset the current state
+	pool.utxos = snapshot.UTXOs
+	pool.merkleRoot = snapshot.MerkleRoot
+	pool.lastUpdateTime = snapshot.Timestamp
 
-	// Restore state
-	pool.utxos = make(map[string]UTXO)
-	for k, v := range snapshot.UTXOStates {
-		pool.utxos[k] = v
-	}
-	pool.merkleRoot = snapshot.BlockHash
+	log.Printf("📥 Loaded UTXO snapshot from block height %d with %d unspent outputs",
+		snapshot.BlockHeight, len(snapshot.UTXOs))
 
-	log.Printf("[INFO] Restored UTXO pool state from snapshot at timestamp %d", snapshot.Timestamp)
 	return nil
 }
 
@@ -837,4 +884,183 @@ func (u *UTXOPool) GetAllUTXOs() map[string]UTXO {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
 	return u.utxos
+}
+
+// Clone creates a deep copy of the UTXOPool
+func (pool *UTXOPool) Clone() *UTXOPool {
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+
+	clonedPool := &UTXOPool{
+		utxos:             make(map[string]UTXO),
+		merkleRoot:        pool.merkleRoot,
+		lastVerifiedState: pool.lastVerifiedState,
+		lastUpdateTime:    pool.lastUpdateTime,
+		updates:           make(map[string]UTXO),
+		db:                pool.db,
+		node:              pool.node,
+	}
+
+	// Deep copy the UTXOs
+	for key, utxo := range pool.utxos {
+		clonedPool.utxos[key] = utxo
+	}
+
+	// Deep copy the updates
+	if pool.updates != nil {
+		for key, update := range pool.updates {
+			clonedPool.updates[key] = update
+		}
+	}
+
+	// Deep copy the deletions slice
+	if pool.deletions != nil {
+		clonedPool.deletions = make([]string, len(pool.deletions))
+		copy(clonedPool.deletions, pool.deletions)
+	}
+
+	// Copy snapshots if needed
+	if len(pool.snapshots) > 0 {
+		clonedPool.snapshots = make([]StateSnapshot, len(pool.snapshots))
+		for i, snapshot := range pool.snapshots {
+			// Deep copy each snapshot
+			clonedSnapshot := StateSnapshot{
+				Height:     snapshot.Height,
+				BlockHash:  snapshot.BlockHash,
+				Timestamp:  snapshot.Timestamp,
+				UTXOStates: make(map[string]UTXO),
+			}
+
+			// Copy snapshot UTXO states
+			for key, utxo := range snapshot.UTXOStates {
+				clonedSnapshot.UTXOStates[key] = utxo
+			}
+
+			clonedPool.snapshots[i] = clonedSnapshot
+		}
+	}
+
+	return clonedPool
+}
+
+// ProcessBlockTransactions processes all transactions in a block and updates the UTXO state
+// This method is designed to be called when a node receives a new block (whether through sync or broadcast)
+func (pool *UTXOPool) ProcessBlockTransactions(block *Block) error {
+	if block == nil {
+		return fmt.Errorf("cannot process transactions for nil block")
+	}
+
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	log.Printf("🔄 Processing %d transactions for block #%d",
+		len(block.Body.Transactions.GetAllTransactions()),
+		block.Header.BlockNumber)
+
+	// Collect account updates for batch processing
+	accountUpdates := make(map[string]*AccountState)
+
+	// Process all transactions in the block
+	for _, tx := range block.Body.Transactions.GetAllTransactions() {
+		// Process inputs (mark UTXOs as spent)
+		if tx.TxType != TX_COINBASE {
+			for _, input := range tx.Inputs {
+				key := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
+				if utxo, exists := pool.utxos[key]; exists {
+					utxo.Spent = true
+					pool.utxos[key] = utxo
+
+					if pool.updates == nil {
+						pool.updates = make(map[string]UTXO)
+					}
+					pool.updates[key] = utxo
+				} else {
+					log.Printf("⚠️ Warning: Input UTXO %s not found in pool during block processing", key)
+				}
+			}
+		}
+
+		// Process outputs (create new UTXOs)
+		for i, output := range tx.Outputs {
+			utxoKey := fmt.Sprintf("%s-%d", tx.TransactionID, i)
+
+			// For coinbase transactions, the Owner is always the Receiver
+			owner := output.Receiver
+			if tx.TxType == TX_COINBASE {
+				owner = output.Receiver // Ensure the receiver is set correctly
+			}
+
+			utxo := UTXO{
+				TransactionID: tx.TransactionID,
+				OutputIndex:   i,
+				Amount:        output.Amount,
+				Owner:         owner,
+				BlockHeight:   block.Header.BlockNumber,
+				Timestamp:     tx.Timestamp,
+				ScriptPubKey:  output.ScriptPubKey,
+				Spent:         false,
+			}
+
+			pool.utxos[utxoKey] = utxo
+
+			if pool.updates == nil {
+				pool.updates = make(map[string]UTXO)
+			}
+			pool.updates[utxoKey] = utxo
+
+			// Update account states if possible
+			if pool.node != nil && pool.node.accountManager != nil {
+				// Get existing state or create new one
+				state, err := pool.node.accountManager.GetAccountState(output.Receiver)
+				if err != nil {
+					// Create a new account state if none exists
+					state = &AccountState{
+						Address:      output.Receiver,
+						Balance:      output.Amount,
+						Nonce:        0,
+						LastActivity: time.Now().Unix(),
+						UTXOs:        make(map[string]string),
+						PendingTxs:   make(map[string]bool),
+					}
+				} else {
+					// Update existing balance
+					state.Balance += output.Amount
+					state.LastActivity = time.Now().Unix()
+
+					// Add UTXO reference to the account state
+					if state.UTXOs == nil {
+						state.UTXOs = make(map[string]string)
+					}
+				}
+
+				// Track UTXO in account state
+				state.UTXOs[utxoKey] = tx.TransactionID
+
+				// Store for batch update
+				accountUpdates[output.Receiver] = state
+			}
+		}
+	}
+
+	// Batch update account states
+	if pool.node != nil && pool.node.accountManager != nil && len(accountUpdates) > 0 {
+		err := pool.node.accountManager.BatchUpdateAccounts(accountUpdates)
+		if err != nil {
+			log.Printf("⚠️ Error updating account states: %v", err)
+		} else {
+			log.Printf("✓ Updated %d account states", len(accountUpdates))
+		}
+	}
+
+	// Update the merkle root
+	pool.merkleRoot = pool.CalculateMerkleRoot()
+	pool.lastUpdateTime = time.Now().Unix()
+
+	// Create a state snapshot at this block height if we're at a snapshot interval
+	if block.Header.BlockNumber%100 == 0 || block.Header.BlockNumber == 0 {
+		pool.CreateSnapshot(block.Header.BlockNumber, block.Hash())
+	}
+
+	// Persist changes
+	return pool.saveState()
 }
