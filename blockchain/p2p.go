@@ -745,16 +745,20 @@ func (n *Node) BroadcastBlock(block Block) error {
 	// Limit the size of the broadcastedBlocks map to prevent memory leaks
 	n.cleanupBroadcastedBlocks()
 
-	// Continue with normal broadcast logic
+	// Get connected peers directly from the libp2p host instead of PeerManager
 	peers := n.Host.Network().Peers()
-	log.Printf("📢 Broadcasting block #%d with hash %s to %d peers",
-		block.Header.BlockNumber, blockHash, len(peers))
-
-	for _, peerID := range peers {
-		if peerID == n.Host.ID() {
-			continue
+	// Filter out the node itself and bootstrap nodes
+	filteredPeers := make([]peer.ID, 0, len(peers))
+	for _, p := range peers {
+		if p != n.Host.ID() && !n.IsPeerBootstrapNode(p) {
+			filteredPeers = append(filteredPeers, p)
 		}
+	}
 
+	log.Printf("📢 Broadcasting block #%d with hash %s to %d peers",
+		block.Header.BlockNumber, blockHash, len(filteredPeers))
+
+	for _, peerID := range filteredPeers {
 		stream, err := n.Host.NewStream(n.ctx, peerID, BlockProtocolID)
 		if err != nil {
 			log.Printf("Failed to open stream to peer %s: %v", peerID, err)

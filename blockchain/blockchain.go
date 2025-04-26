@@ -696,18 +696,28 @@ func (bc *Blockchain) RollbackToHeight(height uint64) error {
 // Add this function
 func calculateHash(block Block) string {
 	header := block.Header
-	data := fmt.Sprintf("%d%d%s%d%s%s%s%d%d",
-		header.Version,
-		header.BlockNumber,
-		header.PreviousHash,
-		header.Timestamp,
-		header.MerkleRoot,
-		header.StateRoot,
-		header.ReceiptsRoot,
-		header.Nonce,
-		header.GasUsed,
-	)
-	hash := sha256.Sum256([]byte(data))
+	var data strings.Builder
+	data.WriteString(fmt.Sprintf("%d|", header.Version))
+	data.WriteString(fmt.Sprintf("%d|", header.BlockNumber))
+	data.WriteString(fmt.Sprintf("%s|", header.PreviousHash))
+	data.WriteString(fmt.Sprintf("%d|", header.Timestamp))
+	data.WriteString(fmt.Sprintf("%s|", header.MerkleRoot))
+	data.WriteString(fmt.Sprintf("%s|", header.StateRoot))
+	data.WriteString(fmt.Sprintf("%s|", header.ReceiptsRoot))
+	data.WriteString(fmt.Sprintf("%d|", header.Nonce))
+	data.WriteString(fmt.Sprintf("%d|", header.GasUsed))
+	data.WriteString(fmt.Sprintf("%d|", header.Difficulty))
+	data.WriteString(fmt.Sprintf("%d|", header.GasLimit))
+	data.WriteString(fmt.Sprintf("%s|", header.MinedBy))
+
+	// Handle ExtraData consistently
+	if len(header.ExtraData) == 0 {
+		data.WriteString("[]")
+	} else {
+		data.WriteString(fmt.Sprintf("%v", header.ExtraData))
+	}
+
+	hash := sha256.Sum256([]byte(data.String()))
 	return hex.EncodeToString(hash[:])
 }
 

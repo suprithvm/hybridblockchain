@@ -805,8 +805,9 @@ func startMining(bc *blockchain.Blockchain, minerAddress string) {
 		log.Printf(" Block stats: Hash: %s, Nonce: %d",
 			block.Hash(), block.Header.Nonce)
 
-		// Short pause between mining cycles
-		time.Sleep(100 * time.Millisecond)
+		// Add 5 second delay between mining cycles
+        log.Printf("⏳ Waiting 5 seconds before next mining cycle...")
+        time.Sleep(5 * time.Second)
 	}
 }
 
