@@ -17,6 +17,7 @@ import (
 
 	"blockchain-core/blockchain"
 	"blockchain-core/blockchain/db"
+	"blockchain-core/blockchain/gas"
 	"blockchain-core/blockchain/sync"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -1187,6 +1188,9 @@ func startTXNSShell(node *blockchain.Node, bc *blockchain.Blockchain) {
 		case strings.HasPrefix(input, "balance"):
 			handleGetBalance(input, bc) //this function returns the available using the utxo available locally or something
 
+		case input == "gas-info":
+			handleGasInfo(node)
+
 		case input == "exit":
 			os.Exit(0)
 
@@ -1195,10 +1199,53 @@ func startTXNSShell(node *blockchain.Node, bc *blockchain.Blockchain) {
 			fmt.Println("  create-wallet - Create new wallet")
 			fmt.Println("  import-wallet [12 phrase memonic] - Import wallet from mnemonic")
 			fmt.Println("  send-tx [from] [to] [amount] - Send transaction")
-			fmt.Println("  balance [address] - Check balance") //implement if any further commands are required [i guees to check gas also we need to add some command because we have implemented gas package too(like a gas market)]
+			fmt.Println("  balance [address] - Check balance")
+			fmt.Println("  gas-info - Display current gas prices and market information")
 			fmt.Println("  exit - Exit the node")
 		}
 	}
+}
+
+// handleGasInfo displays the current gas market information
+func handleGasInfo(node *blockchain.Node) {
+	if node.GetGasModel() == nil {
+		fmt.Println("❌ Gas model not available")
+		return
+	}
+
+	gasModel := node.GetGasModel()
+
+	// Display current gas market information
+	fmt.Println("\n📊 Current Gas Market Information")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	// Print current gas prices with conversion to tokens
+	currentPrice := gasModel.GetCurrentGasPrice()
+	fmt.Printf("🔹 Current Base Gas Price: %d gas units (%.8f tokens per unit)\n",
+		currentPrice, blockchain.ConvertGasToTokens(1))
+
+	// Display gas prices for different priorities
+	fmt.Println("\n⛽ Gas Prices by Priority:")
+	fmt.Printf("  • Low Priority:    %d gas units (%.8f tokens per gas unit)\n",
+		currentPrice/2, blockchain.ConvertGasToTokens(currentPrice/2))
+	fmt.Printf("  • Normal Priority: %d gas units (%.8f tokens per gas unit)\n",
+		currentPrice, blockchain.ConvertGasToTokens(currentPrice))
+	fmt.Printf("  • High Priority:   %d gas units (%.8f tokens per gas unit)\n",
+		currentPrice*2, blockchain.ConvertGasToTokens(currentPrice*2))
+
+	// Display gas costs for standard transactions
+	fmt.Println("\n💸 Standard Transaction Costs:")
+	baseTxCost := blockchain.ConvertGasToTokens(gas.BaseTxGas * currentPrice)
+	fmt.Printf("  • Simple Transfer: %d gas units (%.8f tokens)\n",
+		gas.BaseTxGas, baseTxCost)
+	fmt.Printf("  • Maximum Allowed Fee: %.2f tokens\n", blockchain.MaxTotalFee)
+
+	// Display conversion information
+	fmt.Println("\n🔄 Gas to Token Conversion:")
+	fmt.Printf("  • %d gas units = 1 token\n", int(blockchain.GasToTokenConversionFactor))
+	fmt.Printf("  • 1 gas unit = %.8f tokens\n", blockchain.ConvertGasToTokens(1))
+
+	fmt.Println("\n💡 Note: Gas fees are automatically calculated when sending transactions")
 }
 
 func handleCreateWallet() {
@@ -1329,9 +1376,38 @@ func handleSendTransaction(input string, bc *blockchain.Blockchain, node *blockc
 		return
 	}
 
-	// Create transaction with default gas values
+	// Use gas model to determine appropriate gas price
+	var gasPrice uint64
+	var gasLimit uint64
+
+	// If we have a gas model available, use it for estimation
+	if node.GetGasModel() != nil {
+		gasModel := node.GetGasModel()
+		gasPrice = gasModel.GetCurrentGasPrice()
+
+		// Create an estimator for detailed information
+		estimator := gas.NewGasEstimator(gasModel)
+		txSize := len(fromAddress) + len(toAddress) + 16 // Rough size estimation
+
+		// Get estimates for normal priority
+		estimate := estimator.EstimateGas(txSize, gas.PriorityNormal)
+
+		// Display gas estimation information
+		fmt.Println(estimator.GetCurrentGasInfo())
+		fmt.Printf("💰 Estimated gas fee: %.8f tokens\n",
+			blockchain.ConvertGasToTokens(estimate.TotalFee))
+
+		gasLimit = gas.BaseTxGas
+	} else {
+		// Fallback to default values
+		fmt.Println("⚠️ Gas model not available, using default gas values")
+		gasPrice = blockchain.DefaultGasPrice
+		gasLimit = blockchain.DefaultGasLimit
+	}
+
+	// Create transaction with gas parameters from the model
 	fmt.Println("⏳ Creating transaction...")
-	tx, err := blockchain.NewTransaction(fromAddress, toAddress, amount, 1000000000, 21000)
+	tx, err := blockchain.NewTransaction(fromAddress, toAddress, amount, gasPrice, gasLimit)
 	if err != nil {
 		fmt.Printf("❌ Error creating transaction: %v\n", err)
 		return

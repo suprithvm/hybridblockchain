@@ -96,8 +96,8 @@ func NewTransaction(sender, receiver string, amount float64, gasPrice uint64, ga
 	// Add the main output
 	tx.Outputs = append(tx.Outputs, mainOutput)
 
-	// Calculate total gas fee with proper type conversion
-	tx.GasFee = float64(tx.GasLimit * tx.GasPrice)
+	// Calculate total gas fee with proper conversion to tokens
+	tx.GasFee = ConvertGasToTokens(tx.GasLimit * tx.GasPrice)
 
 	// Validate gas parameters
 	if err := tx.ValidateGas(); err != nil {
@@ -264,8 +264,8 @@ func (tx *Transaction) ValidateGas() error {
 			tx.GasPrice, gas.MinGasPrice)
 	}
 
-	// Calculate total fee with proper type conversion
-	totalFee := float64(tx.GasLimit*tx.GasPrice) / 1e18 // Convert to native tokens
+	// Calculate total fee with proper type conversion using the conversion utility
+	totalFee := ConvertGasToTokens(tx.GasLimit * tx.GasPrice)
 	if totalFee > MaxTotalFee {
 		return fmt.Errorf("total fee %.2f tokens exceeds maximum %.2f tokens",
 			totalFee, MaxTotalFee)
