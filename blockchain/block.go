@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log"
 	"runtime"
-	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -78,14 +77,6 @@ type Block struct {
 
 // MarshalJSON implements the json.Marshaler interface
 func (b *Block) MarshalJSON() ([]byte, error) {
-	log.Printf("🔑 [SERIALIZATION] Starting MarshalJSON:")
-	log.Printf("• Block ptr: %p", b)
-	log.Printf("• Current hash: %s (ptr: %p)", b.hash, &b.hash)
-	log.Printf("• Original hash: %s", b.originalHash)
-	log.Printf("• Header ptr: %p", b.Header)
-	log.Printf("• Body ptr: %p", b.Body)
-	log.Printf("• Call stack: %s", string(debug.Stack()))
-
 	// Build a simplified representation to avoid cycles
 	type SimplifiedBlock struct {
 		Hash         string       `json:"hash"`
@@ -117,28 +108,14 @@ func (b *Block) MarshalJSON() ([]byte, error) {
 
 	data, err := json.Marshal(simplified)
 	if err != nil {
-		log.Printf("🔑 [SERIALIZATION] Error during encoding: %v", err)
 		return nil, fmt.Errorf("json: error calling MarshalJSON for type *Block: %v", err)
 	}
 
-	log.Printf("🔑 [SERIALIZATION] Serialization complete:")
-	log.Printf("• Serialized data length: %d bytes", len(data))
-	log.Printf("• Final hash: %s (ptr: %p)", b.hash, &b.hash)
-	log.Printf("• Serialized data: %s", string(data))
 	return data, nil
 }
 
 // UnmarshalJSON implements json.Unmarshaler interface
 func (b *Block) UnmarshalJSON(data []byte) error {
-	log.Printf("🔑 [DESERIALIZATION] Starting UnmarshalJSON:")
-	log.Printf("    • Block ptr: %p", b)
-	log.Printf("    • Current hash: %s (ptr: %p)", b.hash, &b.hash)
-	log.Printf("    • Header ptr: %p", b.Header)
-	log.Printf("    • Body ptr: %p", b.Body)
-	log.Printf("    • Input data length: %d bytes", len(data))
-	log.Printf("    • Input data: %s", string(data))
-	log.Printf("    • Call stack: %s", getCallerInfo())
-
 	type SimplifiedBlock struct {
 		Hash         string       `json:"hash"`
 		OriginalHash string       `json:"originalHash"`
@@ -187,10 +164,7 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 	// Verify the Merkle root matches after rebuilding
 	calculatedRoot := b.Body.Transactions.GenerateRootHash()
 	if b.Header.MerkleRoot != "" && calculatedRoot != b.Header.MerkleRoot {
-		log.Printf("🔑 [DESERIALIZATION] Warning: Merkle root mismatch after rebuilding trie")
-		log.Printf("    • Expected: %s", b.Header.MerkleRoot)
-		log.Printf("    • Calculated: %s", calculatedRoot)
-		log.Printf("    • Transaction count: %d", txCount)
+
 
 		// If there's a mismatch but we have transactions, update the merkle root to match
 		if txCount > 0 {
@@ -198,13 +172,6 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 			b.Header.MerkleRoot = calculatedRoot
 		}
 	}
-
-	log.Printf("🔑 [DESERIALIZATION] Deserialization complete:")
-	log.Printf("    • Restored hash: %s (ptr: %p)", b.hash, &b.hash)
-	log.Printf("    • Restored original hash: %s", b.originalHash)
-	log.Printf("    • Header ptr: %p", b.Header)
-	log.Printf("    • Body ptr: %p", b.Body)
-	log.Printf("    • Transactions count: %d", txCount)
 	return nil
 }
 
@@ -277,14 +244,6 @@ func NewBlock(previousBlock Block, mempool *Mempool, utxoSet map[string]UTXO, di
 // Hash calculates the hash of the block
 func (b *Block) Hash() string {
 	// Log the current state before any operations
-	log.Printf("🔑 [HASH CACHE] Starting Hash() call:")
-	log.Printf("    • Block ptr: %p", b)
-	log.Printf("    • Current cached hash: %s", b.hash)
-	log.Printf("    • Original hash: %s", b.originalHash)
-	log.Printf("    • Header ptr: %p", b.Header)
-	log.Printf("    • Body ptr: %p", b.Body)
-	log.Printf("    • Call stack: %s", getCallerInfo())
-
 	b.mu.RLock()
 	if b.originalHash != "" {
 		defer b.mu.RUnlock()
@@ -304,19 +263,6 @@ func (b *Block) Hash() string {
 
 	// Calculate hash if not cached
 	header := b.Header
-	log.Printf("🔑 [HASH CACHE] Calculating new hash:")
-	log.Printf("    • BlockNumber: %d", header.BlockNumber)
-	log.Printf("    • PreviousHash: %s", header.PreviousHash)
-	log.Printf("    • Timestamp: %d", header.Timestamp)
-	log.Printf("    • MerkleRoot: %s", header.MerkleRoot)
-	log.Printf("    • StateRoot: %s", header.StateRoot)
-	log.Printf("    • ReceiptsRoot: %s", header.ReceiptsRoot)
-	log.Printf("    • Nonce: %d", header.Nonce)
-	log.Printf("    • GasUsed: %d", header.GasUsed)
-	log.Printf("    • Difficulty: %d", header.Difficulty)
-	log.Printf("    • GasLimit: %d", header.GasLimit)
-	log.Printf("    • MinedBy: %s", header.MinedBy)
-	log.Printf("    • ExtraData: %v", header.ExtraData)
 
 	// Create a consistent string representation of the block
 	var data strings.Builder

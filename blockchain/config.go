@@ -89,6 +89,7 @@ type NetworkConfig struct {
 	ValidatorStake float64       // Stake amount for validator nodes
 	MinStake       float64       // Minimum stake required for validation
 	BlockTimeout   time.Duration // Maximum time to wait for block validation
+	ObserverMode   bool  
 }
 
 // TURNConfig holds TURN server configuration
