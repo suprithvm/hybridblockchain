@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"sort"
 	"time"
 )
 
@@ -95,9 +96,6 @@ func NewTransaction(sender, receiver string, amount float64, gasPrice uint64, ga
 	// Add the main output
 	tx.Outputs = append(tx.Outputs, mainOutput)
 
-	// Set the transaction ID
-	tx.TransactionID = tx.GenerateTransactionID()
-
 	// Calculate total gas fee with proper type conversion
 	tx.GasFee = float64(tx.GasLimit * tx.GasPrice)
 
@@ -105,6 +103,9 @@ func NewTransaction(sender, receiver string, amount float64, gasPrice uint64, ga
 	if err := tx.ValidateGas(); err != nil {
 		return nil, fmt.Errorf("invalid gas parameters: %w", err)
 	}
+
+	// Set the transaction ID
+	tx.TransactionID = tx.GenerateTransactionID()
 
 	return tx, nil
 }
@@ -416,4 +417,78 @@ func (tx *Transaction) GenerateValidatorRewardID(blockHeight uint64) string {
 // IsValidatorReward returns true if this transaction is a validator reward transaction
 func (tx *Transaction) IsValidatorReward() bool {
 	return tx.TxType == TX_VALIDATOR_REWARD
+}
+
+// AddInput adds a UTXO input to the transaction
+func (tx *Transaction) AddInput(txID string, outputIndex int, signature string) {
+	input := TransactionInput{
+		TransactionID: txID,
+		OutputIndex:   outputIndex,
+		Signature:     signature,
+	}
+	tx.Inputs = append(tx.Inputs, input)
+}
+
+// AddChangeOutput adds a change output back to the sender if needed
+func (tx *Transaction) AddChangeOutput(changeAmount float64) {
+	if changeAmount > 0 {
+		changeOutput := TransactionOutput{
+			Receiver: tx.Sender,
+			Amount:   changeAmount,
+		}
+		tx.Outputs = append(tx.Outputs, changeOutput)
+	}
+}
+
+// SelectUTXOs selects appropriate UTXOs for the transaction
+func (tx *Transaction) SelectUTXOs(utxoPool *UTXOPool) error {
+	if utxoPool == nil {
+		return fmt.Errorf("UTXO pool is nil")
+	}
+
+	// Calculate total amount needed (including gas)
+	totalNeeded := tx.Amount + tx.GasFee
+
+	// Get all UTXOs for the sender
+	senderUTXOs := utxoPool.GetUTXOsForAddress(tx.Sender)
+	if len(senderUTXOs) == 0 {
+		return fmt.Errorf("no UTXOs found for sender %s", tx.Sender)
+	}
+
+	// Sort UTXOs by amount (largest first) for simple selection strategy
+	sort.Slice(senderUTXOs, func(i, j int) bool {
+		return senderUTXOs[i].Amount > senderUTXOs[j].Amount
+	})
+
+	// Select UTXOs and calculate total input
+	var selectedUTXOs []UTXO
+	totalInput := 0.0
+
+	for _, utxo := range senderUTXOs {
+		if utxo.Spent {
+			continue
+		}
+		selectedUTXOs = append(selectedUTXOs, utxo)
+		totalInput += utxo.Amount
+		if totalInput >= totalNeeded {
+			break
+		}
+	}
+
+	if totalInput < totalNeeded {
+		return fmt.Errorf("insufficient funds: have %.8f, need %.8f", totalInput, totalNeeded)
+	}
+
+	// Add selected UTXOs as inputs
+	for _, utxo := range selectedUTXOs {
+		tx.AddInput(utxo.TransactionID, utxo.OutputIndex, "")
+	}
+
+	// Add change output if necessary
+	changeAmount := totalInput - totalNeeded
+	if changeAmount > 0 {
+		tx.AddChangeOutput(changeAmount)
+	}
+
+	return nil
 }

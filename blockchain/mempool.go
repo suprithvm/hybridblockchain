@@ -89,10 +89,9 @@ func (m *Mempool) AddTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
 func (m *Mempool) ValidateTransaction(tx Transaction, utxos map[string]UTXO) bool {
 	log.Printf("\n🔍 Validating Transaction: %s", tx.TransactionID)
 
-	// Add nonce validation
-	if !m.node.accountManager.ValidateNonce(tx.Sender, tx.Nonce) {
-		log.Printf("❌ Invalid nonce")
-		return false
+	// Skip validation for coinbase transactions
+	if tx.IsCoinbase() || tx.IsValidatorReward() {
+		return true
 	}
 
 	// Validate gas parameters
@@ -107,15 +106,15 @@ func (m *Mempool) ValidateTransaction(tx Transaction, utxos map[string]UTXO) boo
 		utxoKey := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
 		utxo, exists := utxos[utxoKey]
 		if !exists {
-			log.Printf("❌ UTXO not found")
+			log.Printf("❌ UTXO not found: %s", utxoKey)
 			return false
 		}
 		if utxo.Owner != tx.Sender {
-			log.Printf("❌ UTXO doesn't belong to sender")
+			log.Printf("❌ UTXO doesn't belong to sender: %s", utxo.Owner)
 			return false
 		}
 		if utxo.Spent {
-			log.Printf("❌ UTXO already spent")
+			log.Printf("❌ UTXO already spent: %s", utxoKey)
 			return false
 		}
 		inputSum += utxo.Amount
@@ -131,7 +130,15 @@ func (m *Mempool) ValidateTransaction(tx Transaction, utxos map[string]UTXO) boo
 		return false
 	}
 
+	// Verify transaction signature
+	if !tx.VerifySignature() {
+		log.Printf("❌ Invalid transaction signature")
+		return false
+	}
+
 	log.Printf("✅ Transaction validation successful")
+	log.Printf("   • Input Sum: %.8f", inputSum)
+	log.Printf("   • Amount: %.8f", tx.Amount)
 	log.Printf("   • Gas Limit: %d", tx.GasLimit)
 	log.Printf("   • Gas Price: %d", tx.GasPrice)
 	log.Printf("   • Max Gas Fee: %d", maxGasFee)
