@@ -392,7 +392,7 @@ func (n *Node) handleBlockStream(s network.Stream) {
 	defer s.Close()
 
 	peerID := s.Conn().RemotePeer()
-	log.Printf("📥 Received  Broadcasting block from peer %s", peerID.String())
+	log.Printf("📥 Received block from peer %s", peerID.String())
 
 	// Block data structure that matches what we send in BroadcastBlock
 	var blockData struct {
@@ -763,16 +763,28 @@ func (n *Node) BroadcastBlock(block Block) error {
 
 	// Get connected peers directly from the libp2p host instead of PeerManager
 	peers := n.Host.Network().Peers()
+
 	// Filter out the node itself and bootstrap nodes
 	filteredPeers := make([]peer.ID, 0, len(peers))
 	for _, p := range peers {
 		if p != n.Host.ID() && !n.IsPeerBootstrapNode(p) {
+			// Special check for TXNS node - make sure it's included
+			// Check if it's a known TXNS node by ID (from main.go)
+			if p.String() == "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31" {
+				log.Printf("📡 Including TXNS node %s in block broadcast", p)
+			}
+
 			filteredPeers = append(filteredPeers, p)
 		}
 	}
 
 	log.Printf("📢 Broadcasting block #%d with hash %s to %d peers",
 		block.Header.BlockNumber, blockHash, len(filteredPeers))
+
+	// Log the peer IDs we're broadcasting to
+	for i, peerID := range filteredPeers {
+		log.Printf("📡 Broadcasting to peer %d: %s", i+1, peerID)
+	}
 
 	for _, peerID := range filteredPeers {
 		stream, err := n.Host.NewStream(n.ctx, peerID, BlockProtocolID)
@@ -2039,6 +2051,12 @@ func (n *Node) discoverPeers() {
 			continue
 		}
 
+		// Check if this is a TXNS node - we'll log it but still connect to it
+		if peerInfo.ID.String() == "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31" {
+			log.Printf("🔍 Found TXNS node during discovery: %s", peerInfo.ID)
+			// Continue with connection even though it's a TXNS node
+		}
+
 		if err := n.Host.Connect(ctx, peerInfo); err != nil {
 			log.Printf("⚠️ Failed to connect to peer %s: %v", peerInfo.ID, err)
 			continue
@@ -2048,10 +2066,18 @@ func (n *Node) discoverPeers() {
 		n.PeerManager.AddPeer(peerInfo.ID)
 	}
 
-	// Log final peer count
-	nonBootnodePeers := n.countNonBootnodePeers()
-	log.Printf("📊 Final peer count: %d (non-bootnode peers: %d)",
-		len(n.Host.Network().Peers()), nonBootnodePeers)
+	// Log peer details
+	connectedPeers := n.Host.Network().Peers()
+	log.Printf("📊 Final peer count: %d", len(connectedPeers))
+	for _, peer := range connectedPeers {
+		if peer.String() == "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31" {
+			log.Printf("   • Peer: %s (TXNS node)", peer)
+		} else if n.IsPeerBootstrapNode(peer) {
+			log.Printf("   • Peer: %s (bootstrap node)", peer)
+		} else {
+			log.Printf("   • Peer: %s", peer)
+		}
+	}
 }
 
 func (n *Node) hasEnoughPeers() bool {
@@ -2343,6 +2369,8 @@ func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, er
 
 	// Collect peers from channel
 	var peers []peer.AddrInfo
+	var foundTXNSNode bool
+
 	for p := range peerChan {
 		if p.ID == n.Host.ID() {
 			log.Printf("⏭️ Skipping self: %s", p.ID)
@@ -2353,6 +2381,13 @@ func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, er
 		if n.IsPeerBootstrapNode(p.ID) {
 			log.Printf("⏭️ Skipping bootnode: %s", p.ID)
 			continue
+		}
+
+		// Check if it's a TXNS node
+		if p.ID.String() == "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31" {
+			log.Printf("🔍 Found TXNS node: %s", p.ID)
+			foundTXNSNode = true
+			// Include it for connection purposes but mark it
 		}
 
 		// Skip if we're already connected
@@ -2367,6 +2402,7 @@ func (n *Node) findPeersWithRendezvous(ctx context.Context) ([]peer.AddrInfo, er
 
 	log.Printf("📊 Peer discovery results:")
 	log.Printf("• Total peers found: %d", len(peers))
+	log.Printf("• TXNS node found: %v", foundTXNSNode)
 	log.Printf("• Current connections: %d", len(n.Host.Network().Peers()))
 	log.Printf("• DHT routing table size: %d", n.DHT.RoutingTable().Size())
 	log.Printf("• Network ID: %s", n.NetworkID)
@@ -2882,4 +2918,9 @@ func NewNodeWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (*Node, e
 	go node.StartHeartbeat()
 
 	return node, nil
+}
+
+// IsPeerTXNSNode checks if a peer is a TXNS node by ID
+func (n *Node) IsPeerTXNSNode(peerID peer.ID) bool {
+	return peerID.String() == "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31"
 }

@@ -297,6 +297,14 @@ func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 			break
 		}
 
+		// Check if we at least found a TXNS node for block broadcasting
+		// Even though we don't use it as a validator, we should stay connected
+		for _, p := range node.Host.Network().Peers() {
+			if p.String() == TXNSNodeID {
+				log.Printf("📡 Found TXNS node in peer list: %s", p)
+			}
+		}
+
 		if i < maxPeerDiscoveryAttempts-1 {
 			log.Printf("⏳ No validator found, waiting before next attempt...")
 			time.Sleep(5 * time.Second)
@@ -1195,6 +1203,9 @@ func startTXNSShell(node *blockchain.Node, bc *blockchain.Blockchain) {
 		case input == "gas-info":
 			handleGasInfo(node)
 
+		case input == "peers":
+			displayConnectedPeers(node)
+
 		case input == "exit":
 			os.Exit(0)
 
@@ -1205,8 +1216,64 @@ func startTXNSShell(node *blockchain.Node, bc *blockchain.Blockchain) {
 			fmt.Println("  send-tx [from] [to] [amount] - Send transaction")
 			fmt.Println("  balance [address] - Check balance")
 			fmt.Println("  gas-info - Display current gas prices and market information")
+			fmt.Println("  peers - Display connected peers")
 			fmt.Println("  exit - Exit the node")
 		}
+	}
+}
+
+// displayConnectedPeers shows detailed information about connected peers
+func displayConnectedPeers(node *blockchain.Node) {
+	peers := node.Host.Network().Peers()
+
+	fmt.Printf("\n👥 Connected Peers (%d total):\n", len(peers))
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	if len(peers) == 0 {
+		fmt.Println("No peers connected")
+		return
+	}
+
+	for i, peerID := range peers {
+		// Get connection details
+		conns := node.Host.Network().ConnsToPeer(peerID)
+		var direction string
+		var address string
+
+		if len(conns) > 0 {
+			// Take the first connection to this peer
+			conn := conns[0]
+
+			// Get direction
+			if conn.Stat().Direction == 0 {
+				direction = "Inbound"
+			} else {
+				direction = "Outbound"
+			}
+
+			// Get remote address
+			address = conn.RemoteMultiaddr().String()
+		}
+
+		// Check if it's a bootstrap node
+		isBootstrap := node.IsPeerBootstrapNode(peerID)
+		peerType := "Regular"
+		if isBootstrap {
+			peerType = "Bootstrap"
+		}
+
+		// Display peer information
+		fmt.Printf("%d. Peer: %s\n", i+1, peerID)
+		fmt.Printf("   • Type: %s\n", peerType)
+		fmt.Printf("   • Address: %s\n", address)
+		fmt.Printf("   • Direction: %s\n", direction)
+
+		// Print connection latency if available
+		if latency := node.Host.Peerstore().LatencyEWMA(peerID); latency > 0 {
+			fmt.Printf("   • Latency: %s\n", latency)
+		}
+
+		fmt.Println()
 	}
 }
 
