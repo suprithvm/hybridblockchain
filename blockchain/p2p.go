@@ -517,105 +517,216 @@ func (n *Node) handleTransactionStream(s network.Stream) {
 	defer s.Close()
 
 	peerID := s.Conn().RemotePeer()
+	log.Printf("📥 Received transaction stream from peer %s", peerID.String())
 
 	// Read the transaction message
 	var msg Message
 	if err := json.NewDecoder(s).Decode(&msg); err != nil {
+		log.Printf("❌ Failed to decode transaction message from peer %s: %v", peerID.String(), err)
 		n.handleStreamError(s, err)
 		return
 	}
 
+	log.Printf("🔄 Processing transaction message of type: %s", msg.Type)
+
 	// Process based on message type
 	switch msg.Type {
-	case "NewTransaction":
-		var tx Transaction
-		if err := json.Unmarshal(msg.Payload.([]byte), &tx); err != nil {
+	case "NewTransaction", "NEW_TRANSACTION": // Accept both formats for backward compatibility
+		log.Printf("📦 Received new transaction from peer %s", peerID.String())
+
+		// Deserialize the transaction
+		txBytes, ok := msg.Payload.([]byte)
+		if !ok {
+			// Try to handle legacy format where transaction is not serialized
+			var txObject Transaction
+			txJSON, err := json.Marshal(msg.Payload)
+			if err != nil {
+				log.Printf("❌ Failed to re-marshal transaction payload: %v", err)
+				n.PeerManager.UpdatePeerScore(peerID, -1)
+				return
+			}
+
+			if err := json.Unmarshal(txJSON, &txObject); err != nil {
+				log.Printf("❌ Failed to unmarshal transaction from JSON: %v", err)
+				n.PeerManager.UpdatePeerScore(peerID, -1)
+				return
+			}
+
+			log.Printf("⚠️ Received transaction in legacy format, processed successfully: ID %s", txObject.TransactionID)
+
+			// Validate and process the transaction
+			processTransaction(n, peerID, &txObject)
+			return
+		}
+
+		// Normal case - deserialize from bytes
+		tx, err := DeserializeTransaction(txBytes)
+		if err != nil {
+			log.Printf("❌ Failed to deserialize transaction: %v", err)
 			n.PeerManager.UpdatePeerScore(peerID, -1)
 			return
 		}
 
-		// Validate transaction using Node's UTXOSet
-		if !n.validateTransaction(&tx) {
-			n.PeerManager.UpdatePeerScore(peerID, -2)
-			return
-		}
+		log.Printf("📄 Transaction details: ID=%s, Sender=%s, Receiver=%s, Amount=%.8f",
+			tx.TransactionID, tx.Sender, tx.Receiver, tx.Amount)
 
-		// Add to mempool if valid, using Node's Mempool
-		if !n.Mempool.AddTransaction(tx, n.UTXOSet.utxos) {
-			log.Printf("Failed to add transaction to mempool: %v", tx.TransactionID)
-			return
-		}
-
-		// Broadcast to other peers
-		n.BroadcastTransaction(&tx, []peer.ID{peerID})
-
-		// Update peer score positively
-		n.PeerManager.UpdatePeerScore(peerID, 1)
+		// Process the transaction
+		processTransaction(n, peerID, tx)
 
 	case "GetTransactions":
 		// Send mempool transactions
+		log.Printf("📊 Peer %s requested mempool transactions", peerID.String())
 		transactions := n.Mempool.GetTransactions()
+		log.Printf("📤 Sending %d transactions from mempool to peer %s", len(transactions), peerID.String())
+
 		response := NewMessage("Transactions", transactions)
 		if err := json.NewEncoder(s).Encode(response); err != nil {
-			log.Printf("Failed to send transactions: %v", err)
+			log.Printf("❌ Failed to send transactions to peer %s: %v", peerID.String(), err)
 		}
+
+	default:
+		log.Printf("⚠️ Received unknown transaction message type: %s from peer %s", msg.Type, peerID.String())
 	}
+}
+
+// Helper function to process a transaction
+func processTransaction(n *Node, peerID peer.ID, tx *Transaction) {
+	// Log transaction gas information
+	log.Printf("⛽ Transaction gas info: GasPrice=%d, GasLimit=%d, Priority=%d",
+		tx.GasPrice, tx.GasLimit, tx.Priority)
+
+	// Validate transaction using Node's UTXOSet
+	log.Printf("🔍 Validating transaction %s...", tx.TransactionID)
+	if !n.validateTransaction(tx) {
+		log.Printf("❌ Transaction %s validation failed, rejecting", tx.TransactionID)
+		n.PeerManager.UpdatePeerScore(peerID, -2)
+		return
+	}
+	log.Printf("✅ Transaction %s validation passed", tx.TransactionID)
+
+	// Add to mempool if valid, using Node's Mempool
+	log.Printf("📥 Adding transaction %s to mempool", tx.TransactionID)
+	if !n.Mempool.AddTransaction(*tx, n.UTXOSet.utxos) {
+		log.Printf("❌ Failed to add transaction %s to mempool", tx.TransactionID)
+		return
+	}
+	log.Printf("✅ Transaction %s successfully added to mempool", tx.TransactionID)
+
+	// Broadcast to other peers
+	log.Printf("📡 Re-broadcasting transaction %s to other peers", tx.TransactionID)
+	if err := n.BroadcastTransaction(tx, []peer.ID{peerID}); err != nil {
+		log.Printf("⚠️ Error re-broadcasting transaction %s: %v", tx.TransactionID, err)
+	}
+
+	// Update peer score positively
+	n.PeerManager.UpdatePeerScore(peerID, 1)
+	log.Printf("📈 Updated peer %s score positively for good transaction", peerID.String())
 }
 
 // validateTransaction performs comprehensive transaction validation
 func (n *Node) validateTransaction(tx *Transaction) bool {
+	log.Printf("🔍 Validating transaction ID: %s", tx.TransactionID)
+
 	// Skip validation for system transactions (coinbase, validator rewards)
 	if tx.IsCoinbase() || tx.IsValidatorReward() {
-		log.Printf("System transaction detected (type: %d), skipping standard validation", tx.TxType)
+		log.Printf("ℹ️ System transaction detected (type: %d), skipping standard validation", tx.TxType)
 		return true
 	}
 
 	// Check if transaction already exists in mempool
 	for _, memTx := range n.Mempool.GetTransactions() {
 		if memTx.TransactionID == tx.TransactionID {
+			log.Printf("🔄 Transaction %s already exists in mempool, skipping", tx.TransactionID)
 			return false
 		}
 	}
 
 	// Verify transaction signature
+	log.Printf("🔑 Verifying signature for transaction %s", tx.TransactionID)
 	if !tx.VerifySignature() {
-		log.Printf("Transaction signature verification failed")
+		log.Printf("❌ Transaction signature verification failed for transaction %s", tx.TransactionID)
 		return false
 	}
+	log.Printf("✅ Transaction signature verified successfully")
 
 	// Validate using UTXOSet
-	return n.UTXOSet.ValidateTransaction(tx)
+	log.Printf("💰 Validating transaction inputs and outputs")
+	if !n.UTXOSet.ValidateTransaction(tx) {
+		log.Printf("❌ UTXO validation failed for transaction %s", tx.TransactionID)
+		return false
+	}
+	log.Printf("✅ Transaction %s passed all validation checks", tx.TransactionID)
+	return true
 }
 
 // BroadcastTransaction broadcasts a transaction to all connected peers except those in excludePeers
 func (n *Node) BroadcastTransaction(tx *Transaction, excludePeers []peer.ID) error {
-	peers := n.PeerManager.GetConnectedPeers()
+	log.Printf("🔄 Broadcasting transaction %s to network peers", tx.TransactionID)
+
+	// Get connected peers directly from the libp2p host
+	peers := n.Host.Network().Peers()
+	log.Printf("📊 Found %d total peers in the network", len(peers))
+
+	// Count how many peers we're actually sending to
+	broadcastCount := 0
+	successCount := 0
+	txBytes, err := SerializeTransaction(tx)
+	if err != nil {
+		log.Printf("❌ Failed to serialize transaction: %v", err)
+		return err
+	}
+
 	for _, peerID := range peers {
 		// Skip excluded peers and self
 		if peerID == n.Host.ID() || contains(excludePeers, peerID) {
+			log.Printf("⏩ Skipping peer %s (excluded or self)", peerID.String())
 			continue
 		}
+
+		// Skip TXNS nodes if this is a miner or validator
+		if n.IsPeerTXNSNode(peerID) {
+			log.Printf("⏩ Skipping TXNS node %s for transaction broadcast", peerID.String())
+			continue
+		}
+
+		// Skip bootstrap nodes for transaction broadcasting
+		if n.IsPeerBootstrapNode(peerID) {
+			log.Printf("⏩ Skipping bootstrap node %s for transaction broadcast", peerID.String())
+			continue
+		}
+
+		log.Printf("📡 Attempting to broadcast transaction to peer: %s", peerID.String())
+		broadcastCount++
 
 		stream, err := n.Host.NewStream(n.ctx, peerID, TransactionProtocolID)
 		if err != nil {
-			log.Printf("Failed to open stream to peer %s: %v", peerID, err)
+			log.Printf("❌ Failed to open stream to peer %s: %v", peerID, err)
 			continue
 		}
 
-		// Create transaction message
+		// Create transaction message - use consistent case "NewTransaction"
 		msg := Message{
-			Type:    "NEW_TRANSACTION",
-			Payload: tx,
+			Type:    "NewTransaction",
+			Payload: txBytes, // Send serialized bytes instead of the object
 		}
 
 		// Encode and send transaction
 		if err := json.NewEncoder(stream).Encode(msg); err != nil {
 			stream.Close()
-			log.Printf("Failed to send transaction to peer %s: %v", peerID, err)
+			log.Printf("❌ Failed to send transaction to peer %s: %v", peerID, err)
 			continue
 		}
+
+		log.Printf("✅ Successfully sent transaction %s to peer %s", tx.TransactionID, peerID.String())
+		successCount++
 		stream.Close()
 	}
+
+	log.Printf("📊 Transaction broadcast summary: %d/%d successful broadcasts", successCount, broadcastCount)
+	if successCount == 0 && broadcastCount > 0 {
+		return fmt.Errorf("failed to broadcast transaction to any peers")
+	}
+
 	return nil
 }
 

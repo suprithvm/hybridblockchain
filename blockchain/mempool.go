@@ -40,7 +40,11 @@ func (m *Mempool) AddTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
 	log.Printf("\n💫 Processing New Transaction")
 	log.Printf("   ID: %s", tx.TransactionID)
 	log.Printf("   From: %s", tx.Sender)
+	log.Printf("   To: %s", tx.Receiver)
+	log.Printf("   Amount: %.8f", tx.Amount)
 	log.Printf("   Gas Price: %d", tx.GasPrice)
+	log.Printf("   Gas Limit: %d", tx.GasLimit)
+	log.Printf("   Transaction Type: %d", tx.TxType)
 
 	// Check for duplicate transaction
 	for _, existingTx := range m.Transactions {
@@ -51,6 +55,7 @@ func (m *Mempool) AddTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
 	}
 
 	// Validate transaction
+	log.Printf("🧪 Validating transaction %s against %d UTXOs", tx.TransactionID, len(utxoSet))
 	if !m.ValidateTransaction(tx, utxoSet) {
 		log.Printf("❌ Transaction validation failed: %s", tx.TransactionID)
 		return false
@@ -58,6 +63,9 @@ func (m *Mempool) AddTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
 
 	// Check if mempool is at capacity
 	if len(m.Transactions) >= m.maxSize {
+		log.Printf("⚠️ Mempool at capacity (%d/%d). Checking if transaction has priority...",
+			len(m.Transactions), m.maxSize)
+
 		// Sort by gas fee (highest to lowest)
 		sort.SliceStable(m.Transactions, func(i, j int) bool {
 			return m.Transactions[i].GasFee > m.Transactions[j].GasFee
@@ -65,22 +73,39 @@ func (m *Mempool) AddTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
 
 		// If new transaction has higher gas fee than lowest fee transaction
 		if tx.GasFee > m.Transactions[len(m.Transactions)-1].GasFee {
+			lowestTx := m.Transactions[len(m.Transactions)-1]
+			log.Printf("💰 Transaction has higher fee (%.8f) than lowest fee transaction (%.8f), replacing",
+				tx.GasFee, lowestTx.GasFee)
 			// Remove lowest fee transaction
 			m.Transactions = m.Transactions[:len(m.Transactions)-1]
 		} else {
-			log.Printf("[DEBUG] Mempool full and transaction has low priority: %s", tx.TransactionID)
+			log.Printf("❌ Mempool full and transaction has low priority: %s (fee: %.8f)",
+				tx.TransactionID, tx.GasFee)
 			return false
 		}
 	}
 
 	m.Transactions = append(m.Transactions, tx)
+	log.Printf("✅ Transaction %s successfully added to mempool", tx.TransactionID)
 
 	// Sort after adding new transaction
 	sort.SliceStable(m.Transactions, func(i, j int) bool {
 		return m.Transactions[i].GasFee > m.Transactions[j].GasFee
 	})
 
-	log.Printf("✅ Transaction successfully added to mempool")
+	// Log the top 5 transactions in the mempool by gas fee
+	if len(m.Transactions) > 0 {
+		log.Printf("📊 Current top transactions in mempool by fee:")
+		maxToShow := 5
+		if len(m.Transactions) < maxToShow {
+			maxToShow = len(m.Transactions)
+		}
+		for i := 0; i < maxToShow; i++ {
+			tx := m.Transactions[i]
+			log.Printf("   %d. ID: %s, From: %s, Fee: %.8f", i+1, tx.TransactionID, tx.Sender, tx.GasFee)
+		}
+	}
+
 	log.Printf("   • Mempool size: %d/%d", len(m.Transactions), m.maxSize)
 	return true
 }

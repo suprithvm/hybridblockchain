@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -864,18 +865,57 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	difficulty := bc.calculateDifficulty(previousBlock)
 	log.Printf("🎯 Mining with difficulty: %d", difficulty)
 
+	// Define blockHeight early
+	blockHeight := previousBlock.Header.BlockNumber + 1
+
 	// Get pending transactions from mempool
 	var pendingTxs []Transaction
 	if bc.mempool != nil {
-		pendingTxs = bc.mempool.GetTransactions()
-		log.Printf("📥 Retrieved %d transactions from mempool for new block", len(pendingTxs))
+		allTxs := bc.mempool.GetTransactions()
+		log.Printf("🔍 Examining %d transactions in mempool for inclusion in block #%d", len(allTxs), blockHeight)
+
+		// Take up to 200 transactions to include in the block
+		maxTxs := 200
+		if len(allTxs) > 0 {
+			// Sort transactions by gas fee (highest to lowest)
+			sort.SliceStable(allTxs, func(i, j int) bool {
+				return allTxs[i].GasFee > allTxs[j].GasFee
+			})
+
+			// Take the top transactions up to maxTxs
+			if len(allTxs) > maxTxs {
+				pendingTxs = allTxs[:maxTxs]
+				log.Printf("📊 Selected top %d transactions from mempool with highest fees", maxTxs)
+			} else {
+				pendingTxs = allTxs
+				log.Printf("📊 Selected all %d transactions from mempool", len(allTxs))
+			}
+
+			// Log a sample of selected transactions
+			sampleSize := 5
+			if len(pendingTxs) < sampleSize {
+				sampleSize = len(pendingTxs)
+			}
+
+			if sampleSize > 0 {
+				log.Printf("📋 Sample of selected transactions:")
+				for i := 0; i < sampleSize; i++ {
+					tx := pendingTxs[i]
+					log.Printf("   %d. ID: %s, From: %s, To: %s, Amount: %.8f, Fee: %.8f",
+						i+1, tx.TransactionID, tx.Sender, tx.Receiver, tx.Amount, tx.GasFee)
+				}
+			}
+		} else {
+			log.Printf("ℹ️ No transactions in mempool to include in block")
+		}
+
+		log.Printf("📥 Selected %d transactions from mempool for new block", len(pendingTxs))
 	} else {
 		log.Printf("⚠️ No mempool available, mining empty block")
 		pendingTxs = []Transaction{}
 	}
 
 	// Calculate total block reward
-	blockHeight := previousBlock.Header.BlockNumber + 1
 	totalBlockReward := calculateBlockReward(previousBlock)
 
 	// Split reward between miner and validator
