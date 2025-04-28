@@ -8,7 +8,7 @@ import (
 	"encoding/gob"
 	"encoding/hex"
 	"fmt"
-	"math/big"
+	"log"
 	"sort"
 	"time"
 )
@@ -146,6 +146,7 @@ func (tx *Transaction) GenerateTransactionID() string {
 // Hash computes the hash of the transaction data.
 func (tx *Transaction) Hash() string {
 	data := fmt.Sprintf("%s%s%f%d", tx.Sender, tx.Receiver, tx.Amount, tx.Timestamp)
+	log.Printf("[DEBUG] Transaction hash data: %s", data)
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:])
 }
@@ -320,27 +321,21 @@ func (tx *Transaction) VerifySignature() bool {
 		return true
 	}
 
-	// Create message hash
-	message := fmt.Sprintf("%s%s%f%d%d", tx.Sender, tx.Receiver, tx.Amount, tx.Nonce, tx.Timestamp)
-	messageHash := sha256.Sum256([]byte(message))
+	// Use the same hash that was used for signing
+	txHash := tx.Hash()
+	log.Printf("[DEBUG] Hash for Verification: %s", txHash)
 
 	// Get public key for sender
 	publicKey, err := GetPublicKeyForAddress(tx.Sender)
 	if err != nil {
+		log.Printf("[DEBUG] Failed to get public key for address %s: %v", tx.Sender, err)
 		return false
 	}
 
-	// Decode signature
-	sigBytes, err := hex.DecodeString(tx.Signature)
-	if err != nil {
-		return false
-	}
-
-	// Split signature into r and s
-	r := new(big.Int).SetBytes(sigBytes[:len(sigBytes)/2])
-	s := new(big.Int).SetBytes(sigBytes[len(sigBytes)/2:])
-
-	return ecdsa.Verify(publicKey, messageHash[:], r, s)
+	// Use the existing VerifySignature function from crypto.go
+	isValid := VerifySignature(publicKey, txHash, tx.Signature)
+	log.Printf("[DEBUG] Transaction signature verification result: %v", isValid)
+	return isValid
 }
 
 // NewCoinbaseTransaction creates a new coinbase transaction as a block reward

@@ -247,11 +247,15 @@ func NewWalletFromPrivateKey(privateKey *ecdsa.PrivateKey) *Wallet {
 // SignTransaction signs a transaction using the wallet's private key
 func (w *Wallet) SignTransaction(tx *Transaction) error {
 	txHash := tx.Hash()
+	log.Printf("[DEBUG] Transaction hash for signing: %s", txHash)
+
 	signature, err := SignMessage(w.PrivateKey, txHash)
 	if err != nil {
 		return fmt.Errorf("failed to sign transaction: %v", err)
 	}
+
 	tx.Signature = signature
+	log.Printf("[DEBUG] Transaction signed successfully: %s", tx.TransactionID)
 	return nil
 }
 
