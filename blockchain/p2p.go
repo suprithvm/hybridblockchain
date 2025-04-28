@@ -209,7 +209,7 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		UTXOPool:          config.Blockchain.utxoPool, // Use blockchain's UTXOPool for Node.UTXOPool as well
 		isSyncing:         false,
 		syncMu:            sync.RWMutex{},
-		gasModel:          gas.NewGasModel(1000000, 100000),
+		gasModel:          gas.NewGasModel(20, 100000), // Updated from 1000000 to 20
 		accountManager:    NewAccountManager(config.Blockchain.db),
 		P2PPort:           config.P2PPort,
 		RPCPort:           config.RPCPort,
@@ -2711,28 +2711,27 @@ func (n *Node) GetAccountManager() *AccountManager {
 	return n.accountManager
 }
 
-
 func createHostWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (host.Host, error) {
 	// Setup P2P host options
 	opts := []libp2p.Option{
-	libp2p.ListenAddrStrings(
-	fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.P2PPort),
-	fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", config.P2PPort),
-	),
-	libp2p.Identity(privKey), // Use the provided private key
-	libp2p.EnableRelay(),
-	libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}),
-	libp2p.EnableHolePunching(),
-	libp2p.NATPortMap(), // Enable NAT port mapping
-	libp2p.EnableNATService(), // Enable NAT service
+		libp2p.ListenAddrStrings(
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.P2PPort),
+			fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", config.P2PPort),
+		),
+		libp2p.Identity(privKey), // Use the provided private key
+		libp2p.EnableRelay(),
+		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}),
+		libp2p.EnableHolePunching(),
+		libp2p.NATPortMap(),       // Enable NAT port mapping
+		libp2p.EnableNATService(), // Enable NAT service
 	}
-	
+
 	// Create libp2p host
 	host, err := libp2p.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create host with private key: %w", err)
 	}
-	
+
 	// Add connection logging
 	host.Network().Notify(&network.NotifyBundle{
 		ConnectedF: func(n network.Network, conn network.Conn) {
@@ -2746,22 +2745,21 @@ func createHostWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (host.
 			log.Printf("❌ Disconnected from peer: %s", conn.RemotePeer().String())
 		},
 	})
-	
+
 	return host, nil
 }
-
 
 func NewNodeWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (*Node, error) {
 	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	// Initialize host with the provided private key
 	host, err := createHostWithPrivKey(config, privKey)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create host with private key: %v", err)
 	}
-	
+
 	// Initialize DHT with server mode
 	log.Printf("🔄 Initializing DHT in server mode...")
 	kadDHT, err := dht.New(ctx, host, dht.Mode(dht.ModeServer))
@@ -2769,18 +2767,18 @@ func NewNodeWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (*Node, e
 		cancel()
 		return nil, fmt.Errorf("failed to create DHT: %v", err)
 	}
-	
+
 	log.Printf("✅ DHT initialized successfully")
 	log.Printf("📊 DHT Status:")
 	log.Printf("• Routing Table Size: %d", kadDHT.RoutingTable().Size())
 	log.Printf("• Connected Peers: %d", len(host.Network().Peers()))
-	
+
 	// Create keep-alive context
 	keepAliveCtx, keepAliveCancel := context.WithCancel(ctx)
-	
+
 	// Initialize peer manager first
 	peerManager := NewPeerManager(host)
-	
+
 	// Create node instance
 	node := &Node{
 		Host:              host,
@@ -2798,7 +2796,7 @@ func NewNodeWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (*Node, e
 		UTXOPool:          config.Blockchain.utxoPool, // Use blockchain's UTXOPool for Node.UTXOPool as well
 		isSyncing:         false,
 		syncMu:            sync.RWMutex{},
-		gasModel:          gas.NewGasModel(1000000, 100000),
+		gasModel:          gas.NewGasModel(20, 100000), // Updated from 1000000 to 20
 		accountManager:    NewAccountManager(config.Blockchain.db),
 		P2PPort:           config.P2PPort,
 		RPCPort:           config.RPCPort,
@@ -2815,32 +2813,32 @@ func NewNodeWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (*Node, e
 		wg:                sync.WaitGroup{},
 		broadcastedBlocks: make(map[string]bool), // Initialize the map
 	}
-	
+
 	// Create and properly initialize mempool with node reference
 	node.Mempool = NewMempool(node)
-	
+
 	// Also update the blockchain's mempool reference to use the same instance
 	if config.Blockchain != nil {
 		config.Blockchain.mempool = node.Mempool
 	}
-	
+
 	// Set validator mode if specified
 	if config.ValidatorMode {
 		node.isInitializedValidator = true
 		log.Printf("🔐 Node initialized in validator mode")
 	}
-	
+
 	// Initialize validator protocol if in validator mode
 	if config.ValidatorMode {
 		node.validatorProtocol = NewValidatorProtocol(node)
 	}
-	
+
 	// Initialize pubsub with validator-specific options
 	pubsubOpts := []pubsub.Option{
 		pubsub.WithMessageSigning(true),
 		pubsub.WithStrictSignatureVerification(true),
 	}
-	
+
 	if config.ValidatorMode {
 		pubsubOpts = append(pubsubOpts,
 			pubsub.WithPeerScore(
@@ -2863,25 +2861,25 @@ func NewNodeWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (*Node, e
 					OpportunisticGraftThreshold: 5,
 				}))
 	}
-	
+
 	pubsub, err := pubsub.NewGossipSub(ctx, host, pubsubOpts...)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create pubsub: %v", err)
 	}
 	node.PubSub = pubsub
-	
+
 	// Register protocol handlers
 	node.registerProtocolHandlers()
-	
+
 	// Start keep-alive routine
 	go node.startKeepAlive()
-	
+
 	// Start connection maintenance
 	go node.maintainConnections()
-	
+
 	// Start heartbeat
 	go node.StartHeartbeat()
-	
+
 	return node, nil
 }
