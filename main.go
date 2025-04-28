@@ -1221,8 +1221,9 @@ func handleGasInfo(node *blockchain.Node) {
 
 	// Print current gas prices with conversion to tokens
 	currentPrice := gasModel.GetCurrentGasPrice()
+	pricePerGasInTokens := blockchain.ConvertGasToTokens(1)
 	fmt.Printf("🔹 Current Base Gas Price: %d gas units (%.8f tokens per unit)\n",
-		currentPrice, blockchain.ConvertGasToTokens(1))
+		currentPrice, pricePerGasInTokens)
 
 	// Display gas prices for different priorities
 	fmt.Println("\n⛽ Gas Prices by Priority:")
@@ -1235,9 +1236,12 @@ func handleGasInfo(node *blockchain.Node) {
 
 	// Display gas costs for standard transactions
 	fmt.Println("\n💸 Standard Transaction Costs:")
-	baseTxCost := blockchain.ConvertGasToTokens(gas.BaseTxGas * currentPrice)
-	fmt.Printf("  • Simple Transfer: %d gas units (%.8f tokens)\n",
-		gas.BaseTxGas, baseTxCost)
+	// Calculate the total gas cost: gas units × price per unit in tokens
+	totalGasUnits := gas.BaseTxGas * currentPrice
+	// Convert total gas units to tokens directly
+	totalCostInTokens := blockchain.ConvertGasToTokens(totalGasUnits)
+	fmt.Printf("  • Simple Transfer: %d gas units (%d total gas) = %.8f tokens\n",
+		gas.BaseTxGas, totalGasUnits, totalCostInTokens)
 	fmt.Printf("  • Maximum Allowed Fee: %.2f tokens\n", blockchain.MaxTotalFee)
 
 	// Display conversion information
@@ -1394,8 +1398,11 @@ func handleSendTransaction(input string, bc *blockchain.Blockchain, node *blockc
 
 		// Display gas estimation information
 		fmt.Println(estimator.GetCurrentGasInfo())
-		fmt.Printf("💰 Estimated gas fee: %.8f tokens\n",
-			blockchain.ConvertGasToTokens(estimate.TotalFee))
+		// Convert total gas fee to tokens for clearer display
+		totalGasUnits := estimate.TotalFee
+		tokenAmount := blockchain.ConvertGasToTokens(totalGasUnits)
+		fmt.Printf("💰 Estimated gas fee: %d gas units = %.8f tokens\n",
+			totalGasUnits, tokenAmount)
 
 		gasLimit = gas.BaseTxGas
 	} else {
