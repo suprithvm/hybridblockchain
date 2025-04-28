@@ -73,8 +73,8 @@ func NewWalletFromPrivateKeyAndMnemonic(privateKey *ecdsa.PrivateKey, mnemonic s
 	}, nil
 }
 
-// generateAddress derives a unique blockchain address from the public key
-func generateAddress(publicKey *ecdsa.PublicKey) string {
+// GenerateAddress derives a unique blockchain address from the public key
+func GenerateAddress(publicKey *ecdsa.PublicKey) string {
 	// Concatenate public key coordinates
 	pubKeyBytes := append(publicKey.X.Bytes(), publicKey.Y.Bytes()...)
 
@@ -88,6 +88,11 @@ func generateAddress(publicKey *ecdsa.PublicKey) string {
 	fullAddress := fmt.Sprintf("sup%s%s", hex.EncodeToString(hash[:10]), hex.EncodeToString(checksum[:4]))
 
 	return fullAddress
+}
+
+// generateAddress is kept for backward compatibility
+func generateAddress(publicKey *ecdsa.PublicKey) string {
+	return GenerateAddress(publicKey)
 }
 
 // SerializeKeys serializes the private and public keys
@@ -299,6 +304,19 @@ func NewWalletFromPrivateKey(privateKey *ecdsa.PrivateKey) *Wallet {
 func (w *Wallet) SignTransaction(tx *Transaction) error {
 	txHash := tx.Hash()
 	log.Printf("[DEBUG] Transaction hash for signing: %s", txHash)
+
+	// Set the sender's public key in the transaction
+	if w.PublicKeyBytes == nil || len(w.PublicKeyBytes) == 0 {
+		// Regenerate public key bytes if needed
+		_, publicKeyBytes := serializeKeys(w.PrivateKey, w.PublicKey)
+		w.PublicKeyBytes = publicKeyBytes
+	}
+
+	// Set the sender's public key in the transaction
+	tx.SenderPubKey = make([]byte, len(w.PublicKeyBytes))
+	copy(tx.SenderPubKey, w.PublicKeyBytes)
+
+	log.Printf("[DEBUG] Added sender's public key to transaction (length: %d bytes)", len(tx.SenderPubKey))
 
 	signature, err := SignMessage(w.PrivateKey, txHash)
 	if err != nil {

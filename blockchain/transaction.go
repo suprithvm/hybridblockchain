@@ -3,12 +3,15 @@ package blockchain
 import (
 	"blockchain-core/blockchain/gas"
 	"bytes"
+	"crypto/ecdh"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math/big"
 	"sort"
 	"time"
 )
@@ -48,6 +51,7 @@ type Transaction struct {
 	MaxFeePerGas uint64 `json:"max_fee_per_gas"`
 	Data         []byte // Transaction data
 	Signature    string // Add signature field
+	SenderPubKey []byte // Public key of the sender for verification
 }
 
 // TransactionInput references a UTXO being spent
@@ -95,6 +99,7 @@ func NewTransaction(sender, receiver string, amount float64, gasPrice uint64, ga
 		TxType:        TX_REGULAR,            // Regular transaction type
 		Inputs:        []TransactionInput{},  // Will be filled later based on available UTXOs
 		Outputs:       []TransactionOutput{}, // Will be filled later
+		SenderPubKey:  nil,                   // Will be set during signing
 	}
 
 	// Create main output to the receiver
@@ -325,12 +330,52 @@ func (tx *Transaction) VerifySignature() bool {
 	txHash := tx.Hash()
 	log.Printf("[DEBUG] Hash for Verification: %s", txHash)
 
-	// Get public key for sender
-	publicKey, err := GetPublicKeyForAddress(tx.Sender)
+	// Use the sender's public key embedded in the transaction
+	if tx.SenderPubKey == nil || len(tx.SenderPubKey) < 64 {
+		log.Printf("[DEBUG] Transaction missing valid public key data (length: %d)", len(tx.SenderPubKey))
+
+		// Fall back to database lookup if needed
+		publicKey, err := GetPublicKeyForAddress(tx.Sender)
+		if err != nil {
+			log.Printf("[DEBUG] Failed to get public key for address %s: %v", tx.Sender, err)
+			return false
+		}
+		log.Printf("[DEBUG] Using public key from database as fallback")
+
+		// Use the existing VerifySignature function from crypto.go
+		isValid := VerifySignature(publicKey, txHash, tx.Signature)
+		log.Printf("[DEBUG] Transaction signature verification result: %v", isValid)
+		return isValid
+	}
+
+	// Deserialize the public key
+	curve := elliptic.P256()
+	x := new(big.Int).SetBytes(tx.SenderPubKey[:32])
+	y := new(big.Int).SetBytes(tx.SenderPubKey[32:])
+
+	// Replace deprecated IsOnCurve check with ecdh
+	pubBytes := append([]byte{0x04}, append(tx.SenderPubKey[:32], tx.SenderPubKey[32:]...)...)
+	_, err := ecdh.P256().NewPublicKey(pubBytes)
 	if err != nil {
-		log.Printf("[DEBUG] Failed to get public key for address %s: %v", tx.Sender, err)
+		log.Printf("[DEBUG] Public key not on curve: %v", err)
 		return false
 	}
+
+	publicKey := &ecdsa.PublicKey{
+		Curve: curve,
+		X:     x,
+		Y:     y,
+	}
+
+	// Verify this public key matches the sender address
+	derivedAddress := GenerateAddress(publicKey)
+	if derivedAddress != tx.Sender {
+		log.Printf("[DEBUG] Public key does not match sender address (derived: %s, expected: %s)",
+			derivedAddress, tx.Sender)
+		return false
+	}
+
+	log.Printf("[DEBUG] Using embedded public key for verification")
 
 	// Use the existing VerifySignature function from crypto.go
 	isValid := VerifySignature(publicKey, txHash, tx.Signature)
