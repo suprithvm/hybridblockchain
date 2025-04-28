@@ -157,7 +157,7 @@ func runBootstrapNode(config *NodeConfig) {
 	if err != nil {
 		log.Fatalf("❌ Failed to create bootstrap node: %v", err)
 	}
-	
+
 	if err := node.Start(); err != nil {
 		log.Fatalf("❌ Failed to start bootstrap node: %v", err)
 	}
@@ -1223,46 +1223,59 @@ func handleGasInfo(node *blockchain.Node) {
 	fmt.Println("\n📊 Current Gas Market Information")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	// Print current gas prices with conversion to tokens
+	// Get the raw gas price from the model
 	currentPrice := gasModel.GetCurrentGasPrice()
-	tokenPerUnit := blockchain.ConvertGasToTokens(1)
-	fmt.Printf("🔹 Current Base Gas Price: %d gas units (%.8f tokens per unit)\n",
-		currentPrice, tokenPerUnit)
+
+	// Display gas units with token equivalent
+	tokenPerGasUnit := blockchain.ConvertGasToTokens(1)
+	fmt.Printf("🔹 Current Base Gas Price: %d gas units (%.8f tokens per gas unit)\n",
+		currentPrice, tokenPerGasUnit)
 
 	// Display gas prices for different priorities
 	fmt.Println("\n⛽ Gas Prices by Priority:")
 	lowPriority := currentPrice / 2
-	lowPriorityTokens := blockchain.ConvertGasToTokens(lowPriority)
-	fmt.Printf("  • Low Priority:    %d gas units (%.8f tokens total)\n",
-		lowPriority, lowPriorityTokens)
-
-	normalPriorityTokens := blockchain.ConvertGasToTokens(currentPrice)
-	fmt.Printf("  • Normal Priority: %d gas units (%.8f tokens total)\n",
-		currentPrice, normalPriorityTokens)
-
+	normalPriority := currentPrice
 	highPriority := currentPrice * 2
-	highPriorityTokens := blockchain.ConvertGasToTokens(highPriority)
-	fmt.Printf("  • High Priority:   %d gas units (%.8f tokens total)\n",
-		highPriority, highPriorityTokens)
 
-	// Display gas costs for standard transactions
+	// Calculate total gas required for a standard transaction at each priority level
+	baseGasUnits := uint64(gas.BaseTxGas) // Standard transaction gas (21,000)
+
+	// Calculate total gas costs at different priority levels
+	lowTotalGas := baseGasUnits * lowPriority
+	normalTotalGas := baseGasUnits * normalPriority
+	highTotalGas := baseGasUnits * highPriority
+
+	// Convert to tokens
+	lowTotalTokens := blockchain.ConvertGasToTokens(lowTotalGas)
+	normalTotalTokens := blockchain.ConvertGasToTokens(normalTotalGas)
+	highTotalTokens := blockchain.ConvertGasToTokens(highTotalGas)
+
+	// Display prices by priority with clear per-unit and total costs
+	fmt.Printf("  • Low Priority:    %d gas price (%.8f tokens per gas unit)\n",
+		lowPriority, blockchain.ConvertGasToTokens(lowPriority))
+	fmt.Printf("  • Normal Priority: %d gas price (%.8f tokens per gas unit)\n",
+		normalPriority, blockchain.ConvertGasToTokens(normalPriority))
+	fmt.Printf("  • High Priority:   %d gas price (%.8f tokens per gas unit)\n",
+		highPriority, blockchain.ConvertGasToTokens(highPriority))
+
+	// Display standard transaction costs with clear breakdown
 	fmt.Println("\n💸 Standard Transaction Costs:")
-	// A simple transfer requires BaseTxGas units of gas
-	// Each unit costs the current gas price
-	// So the total gas is BaseTxGas * currentPrice
-	baseGasUnits := uint64(gas.BaseTxGas)
-	totalGasUnits := baseGasUnits * currentPrice
-	totalCostInTokens := blockchain.ConvertGasToTokens(totalGasUnits)
+	fmt.Printf("  • Base Gas Required: %d gas units\n", baseGasUnits)
 
-	fmt.Printf("  • Simple Transfer: %d gas units × %d gas price = %d total gas\n",
-		baseGasUnits, currentPrice, totalGasUnits)
-	fmt.Printf("  • Cost in tokens: %.8f tokens\n", totalCostInTokens)
+	// Show calculation for each priority level
+	fmt.Printf("  • Low Priority:    %d gas × %d gas price = %.8f tokens\n",
+		baseGasUnits, lowPriority, lowTotalTokens)
+	fmt.Printf("  • Normal Priority: %d gas × %d gas price = %.8f tokens\n",
+		baseGasUnits, normalPriority, normalTotalTokens)
+	fmt.Printf("  • High Priority:   %d gas × %d gas price = %.8f tokens\n",
+		baseGasUnits, highPriority, highTotalTokens)
+
 	fmt.Printf("  • Maximum Allowed Fee: %.2f tokens\n", blockchain.MaxTotalFee)
 
 	// Display conversion information
 	fmt.Println("\n🔄 Gas to Token Conversion:")
 	fmt.Printf("  • %d gas units = 1 token\n", int(blockchain.GasToTokenConversionFactor))
-	fmt.Printf("  • 1 gas unit = %.8f tokens\n", tokenPerUnit)
+	fmt.Printf("  • 1 gas unit = %.8f tokens\n", tokenPerGasUnit)
 
 	fmt.Println("\n💡 Note: Gas fees are automatically calculated when sending transactions")
 }
@@ -1411,11 +1424,21 @@ func handleSendTransaction(input string, bc *blockchain.Blockchain, node *blockc
 		// Get estimates for normal priority
 		estimate := estimator.EstimateGas(txSize, gas.PriorityNormal)
 
-		// Display gas estimation information
-		fmt.Println(estimator.GetCurrentGasInfo())
-		// Convert total gas fee to tokens for clearer display
+		// Calculate total gas fee in tokens
 		totalGasUnits := estimate.TotalFee
 		tokenAmount := blockchain.ConvertGasToTokens(totalGasUnits)
+
+		// Validate gas fee doesn't exceed maximum
+		if tokenAmount > blockchain.MaxTotalFee {
+			fmt.Printf("❌ Calculated gas fee (%.8f tokens) exceeds maximum allowed (%.2f tokens)\n",
+				tokenAmount, blockchain.MaxTotalFee)
+			fmt.Println("⚠️ Transaction would be rejected by the network")
+			fmt.Println("💡 Try reducing the transaction size or wait for gas prices to decrease")
+			return
+		}
+
+		// Display gas estimation information
+		fmt.Println(estimator.GetCurrentGasInfo())
 		fmt.Printf("💰 Estimated gas fee: %d gas units = %.8f tokens\n",
 			totalGasUnits, tokenAmount)
 
@@ -1425,6 +1448,38 @@ func handleSendTransaction(input string, bc *blockchain.Blockchain, node *blockc
 		fmt.Println("⚠️ Gas model not available, using default gas values")
 		gasPrice = blockchain.DefaultGasPrice
 		gasLimit = blockchain.DefaultGasLimit
+
+		// Check default gas price doesn't exceed max fee
+		totalGasUnits := gasLimit * gasPrice
+		tokenAmount := blockchain.ConvertGasToTokens(totalGasUnits)
+
+		if tokenAmount > blockchain.MaxTotalFee {
+			fmt.Printf("❌ Default gas fee (%.8f tokens) exceeds maximum allowed (%.2f tokens)\n",
+				tokenAmount, blockchain.MaxTotalFee)
+			fmt.Println("⚠️ Using adjusted gas price to stay under maximum fee")
+			// Adjust gas price to stay under maximum fee
+			adjustedGasPrice := uint64(float64(blockchain.MaxTotalFee) * blockchain.GasToTokenConversionFactor / float64(gasLimit))
+			gasPrice = adjustedGasPrice
+			fmt.Printf("💡 Adjusted gas price: %d gas units\n", gasPrice)
+		}
+	}
+
+	// Calculate total fee for the UI display
+	totalGasUnits := gasLimit * gasPrice
+	totalGasFee := blockchain.ConvertGasToTokens(totalGasUnits)
+
+	// Display total required amount including gas
+	totalRequired := amount + totalGasFee
+	fmt.Printf("📊 Transaction summary:\n")
+	fmt.Printf("  • Amount: %.8f tokens\n", amount)
+	fmt.Printf("  • Gas fee: %.8f tokens\n", totalGasFee)
+	fmt.Printf("  • Total: %.8f tokens\n", totalRequired)
+
+	// Check if user has enough balance including gas
+	if balance < totalRequired {
+		fmt.Printf("❌ Insufficient balance including gas fee. Available: %.8f, Required: %.8f\n",
+			balance, totalRequired)
+		return
 	}
 
 	// Create transaction with gas parameters from the model

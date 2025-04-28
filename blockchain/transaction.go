@@ -15,7 +15,7 @@ import (
 
 // Add these constants
 const (
-	DefaultGasPrice = 1000  // Base price for normal transactions
+	DefaultGasPrice = 20    // Base price for normal transactions (20 units = 0.0000002 tokens per gas)
 	DefaultGasLimit = 21000 // Base gas for simple transfers
 	MaxTotalFee     = 2.0   // Maximum total fee in native tokens
 
@@ -71,6 +71,16 @@ type MultiSigTransaction struct {
 }
 
 func NewTransaction(sender, receiver string, amount float64, gasPrice uint64, gasLimit uint64) (*Transaction, error) {
+	// Validate gas price is within reasonable range
+	if gasPrice < gas.MinGasPrice {
+		return nil, fmt.Errorf("gas price %d is below minimum allowed %d", gasPrice, gas.MinGasPrice)
+	}
+
+	// Set default gas limit if not provided
+	if gasLimit == 0 {
+		gasLimit = DefaultGasLimit
+	}
+
 	// Create transaction with gas parameters
 	tx := &Transaction{
 		TransactionID: "", // Will be set after initialization
@@ -101,6 +111,11 @@ func NewTransaction(sender, receiver string, amount float64, gasPrice uint64, ga
 	totalGasUnits := tx.GasLimit * tx.GasPrice
 	// Then convert the total gas units to tokens
 	tx.GasFee = ConvertGasToTokens(totalGasUnits)
+
+	// Validate gas fee doesn't exceed maximum
+	if tx.GasFee > MaxTotalFee {
+		return nil, fmt.Errorf("gas fee %.8f tokens exceeds maximum allowed %.2f tokens", tx.GasFee, MaxTotalFee)
+	}
 
 	// Validate gas parameters
 	if err := tx.ValidateGas(); err != nil {
@@ -267,12 +282,18 @@ func (tx *Transaction) ValidateGas() error {
 			tx.GasPrice, gas.MinGasPrice)
 	}
 
+	// Check gas price maximum (to prevent spam)
+	if tx.GasPrice > gas.MaxGasPrice*10 { // Allow up to 10x the standard max in extreme network conditions
+		return fmt.Errorf("gas price %d exceeds maximum reasonable limit %d",
+			tx.GasPrice, gas.MaxGasPrice*10)
+	}
+
 	// Calculate total fee by converting total gas units to tokens
 	totalGasUnits := tx.GasLimit * tx.GasPrice
 	totalFee := ConvertGasToTokens(totalGasUnits)
 
 	if totalFee > MaxTotalFee {
-		return fmt.Errorf("total fee %.2f tokens exceeds maximum %.2f tokens",
+		return fmt.Errorf("total fee %.8f tokens exceeds maximum %.2f tokens",
 			totalFee, MaxTotalFee)
 	}
 

@@ -17,10 +17,10 @@ const (
 	PriorityNormal = 1
 	PriorityHigh   = 2
 
-	// Gas price adjustments
-	MinGasPrice    = 1000   // Minimum gas price in smallest unit
-	MaxGasPrice    = 100000 // Maximum gas price to prevent spam
-	TargetBlockGas = 0.8    // Target gas usage per block (80%)
+	// Gas price adjustments - Updated to reasonable values
+	MinGasPrice    = 10  // Minimum gas price (10 gas units = 0.0000001 tokens/gas)
+	MaxGasPrice    = 100 // Maximum gas price (100 gas units = 0.000001 tokens/gas)
+	TargetBlockGas = 0.8 // Target gas usage per block (80%)
 
 	// Adjustment factors
 	GasPriceAdjustmentFactor = 0.2 // 20% adjustment up/down for more noticeable changes
@@ -36,6 +36,11 @@ type GasModel struct {
 
 // NewGasModel creates a new gas model instance
 func NewGasModel(initialGasPrice uint64, blockGasLimit uint64) *GasModel {
+	// If initial gas price is not provided or too low, use the default
+	if initialGasPrice < MinGasPrice {
+		initialGasPrice = 20 // Default gas price (20 gas units = 0.0000002 tokens/gas)
+	}
+
 	return &GasModel{
 		currentGasPrice: initialGasPrice,
 		blockGasLimit:   blockGasLimit,

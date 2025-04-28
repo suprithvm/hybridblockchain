@@ -32,7 +32,7 @@ const (
 
 	// Gas constants
 	BaseGasLimit   = 15_000_000
-	MinGasPrice    = 1_000
+	MinGasPrice    = 10  // Updated to match gas model
 	TargetGasUsage = 0.8 // Target 80% gas usage
 )
 
@@ -164,7 +164,6 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 	// Verify the Merkle root matches after rebuilding
 	calculatedRoot := b.Body.Transactions.GenerateRootHash()
 	if b.Header.MerkleRoot != "" && calculatedRoot != b.Header.MerkleRoot {
-
 
 		// If there's a mismatch but we have transactions, update the merkle root to match
 		if txCount > 0 {
