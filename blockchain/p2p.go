@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -393,11 +394,9 @@ func (n *Node) handleBlockStream(s network.Stream) {
 
 	peerID := s.Conn().RemotePeer()
 	// Special logging for TXNS node to track block reception
-	if n.Host.ID().String() == "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31" {
-		log.Printf("💡 TXNS NODE: Received block from peer %s", peerID.String())
-	} else {
-		log.Printf("📥 Received block from peer %s", peerID.String())
-	}
+	
+	log.Printf("📥 Received Broadcasted block from peer %s", peerID.String())
+	
 
 	// Block data structure that matches what we send in BroadcastBlock
 	var blockData struct {
@@ -414,11 +413,7 @@ func (n *Node) handleBlockStream(s network.Stream) {
 		return
 	}
 
-	// Additional logging for TXNS node
-	if n.Host.ID().String() == "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31" {
-		log.Printf("💡 TXNS NODE: Successfully decoded block #%d with hash %s",
-			blockData.Header.BlockNumber, blockData.Hash)
-	}
+	
 
 	// Verify we can process this block
 	if blockData.Header == nil || blockData.Body == nil {
@@ -499,14 +494,7 @@ func (n *Node) handleBlockStream(s network.Stream) {
 			block.Header.BlockNumber)
 	}
 
-	// TEMPORARY FIX: If we are a validator node, directly broadcast this block to TXNS node
-	if n.config != nil && n.config.ValidatorMode {
-		log.Printf("🔄 Validator node is now re-broadcasting block #%d directly to TXNS node",
-			block.Header.BlockNumber)
-		if err := n.BroadcastBlockToTXNSNode(block); err != nil {
-			log.Printf("⚠️ Failed to broadcast block to TXNS node: %v", err)
-		}
-	}
+	
 
 	// Update peer score positively for good behavior
 	n.PeerManager.UpdatePeerScore(peerID, 5)
@@ -534,11 +522,38 @@ func (n *Node) handleTransactionStream(s network.Stream) {
 	case "NewTransaction", "NEW_TRANSACTION": // Accept both formats for backward compatibility
 		log.Printf("📦 Received new transaction from peer %s", peerID.String())
 
-		// Deserialize the transaction
-		txBytes, ok := msg.Payload.([]byte)
-		if !ok {
-			// Try to handle legacy format where transaction is not serialized
-			var txObject Transaction
+		var tx *Transaction
+
+		// Check payload type and handle accordingly
+		switch payload := msg.Payload.(type) {
+		case []byte:
+			// Direct byte array (rare case)
+			var err error
+			tx, err = DeserializeTransaction(payload)
+			if err != nil {
+				log.Printf("❌ Failed to deserialize transaction from bytes: %v", err)
+				n.PeerManager.UpdatePeerScore(peerID, -1)
+				return
+			}
+
+		case string:
+			// Base64-encoded string (common case when transmitted via JSON)
+			txBytes, err := base64.StdEncoding.DecodeString(payload)
+			if err != nil {
+				log.Printf("❌ Failed to decode base64 transaction data: %v", err)
+				n.PeerManager.UpdatePeerScore(peerID, -1)
+				return
+			}
+
+			tx, err = DeserializeTransaction(txBytes)
+			if err != nil {
+				log.Printf("❌ Failed to deserialize transaction after base64 decoding: %v", err)
+				n.PeerManager.UpdatePeerScore(peerID, -1)
+				return
+			}
+
+		default:
+			// Legacy format - try to handle as direct JSON object
 			txJSON, err := json.Marshal(msg.Payload)
 			if err != nil {
 				log.Printf("❌ Failed to re-marshal transaction payload: %v", err)
@@ -546,6 +561,7 @@ func (n *Node) handleTransactionStream(s network.Stream) {
 				return
 			}
 
+			var txObject Transaction
 			if err := json.Unmarshal(txJSON, &txObject); err != nil {
 				log.Printf("❌ Failed to unmarshal transaction from JSON: %v", err)
 				n.PeerManager.UpdatePeerScore(peerID, -1)
@@ -553,18 +569,7 @@ func (n *Node) handleTransactionStream(s network.Stream) {
 			}
 
 			log.Printf("⚠️ Received transaction in legacy format, processed successfully: ID %s", txObject.TransactionID)
-
-			// Validate and process the transaction
-			processTransaction(n, peerID, &txObject)
-			return
-		}
-
-		// Normal case - deserialize from bytes
-		tx, err := DeserializeTransaction(txBytes)
-		if err != nil {
-			log.Printf("❌ Failed to deserialize transaction: %v", err)
-			n.PeerManager.UpdatePeerScore(peerID, -1)
-			return
+			tx = &txObject
 		}
 
 		log.Printf("📄 Transaction details: ID=%s, Sender=%s, Receiver=%s, Amount=%.8f",
@@ -676,6 +681,9 @@ func (n *Node) BroadcastTransaction(tx *Transaction, excludePeers []peer.ID) err
 		return err
 	}
 
+	// Encode transaction bytes as base64 to ensure proper JSON serialization
+	encodedTx := base64.StdEncoding.EncodeToString(txBytes)
+
 	for _, peerID := range peers {
 		// Skip excluded peers and self
 		if peerID == n.Host.ID() || contains(excludePeers, peerID) {
@@ -704,10 +712,10 @@ func (n *Node) BroadcastTransaction(tx *Transaction, excludePeers []peer.ID) err
 			continue
 		}
 
-		// Create transaction message - use consistent case "NewTransaction"
+		// Create transaction message with base64-encoded payload
 		msg := Message{
 			Type:    "NewTransaction",
-			Payload: txBytes, // Send serialized bytes instead of the object
+			Payload: encodedTx, // Send base64-encoded string instead of raw bytes
 		}
 
 		// Encode and send transaction
