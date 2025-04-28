@@ -392,7 +392,12 @@ func (n *Node) handleBlockStream(s network.Stream) {
 	defer s.Close()
 
 	peerID := s.Conn().RemotePeer()
-	log.Printf("📥 Received block from peer %s", peerID.String())
+	// Special logging for TXNS node to track block reception
+	if n.Host.ID().String() == "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31" {
+		log.Printf("💡 TXNS NODE: Received block from peer %s", peerID.String())
+	} else {
+		log.Printf("📥 Received block from peer %s", peerID.String())
+	}
 
 	// Block data structure that matches what we send in BroadcastBlock
 	var blockData struct {
@@ -407,6 +412,12 @@ func (n *Node) handleBlockStream(s network.Stream) {
 		log.Printf("❌ Error decoding block data: %v", err)
 		n.handleStreamError(s, err)
 		return
+	}
+
+	// Additional logging for TXNS node
+	if n.Host.ID().String() == "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31" {
+		log.Printf("💡 TXNS NODE: Successfully decoded block #%d with hash %s",
+			blockData.Header.BlockNumber, blockData.Hash)
 	}
 
 	// Verify we can process this block
@@ -486,6 +497,15 @@ func (n *Node) handleBlockStream(s network.Stream) {
 	} else {
 		log.Printf("⚠️ Warning: UTXO pool not initialized, skipping UTXO processing for block #%d",
 			block.Header.BlockNumber)
+	}
+
+	// TEMPORARY FIX: If we are a validator node, directly broadcast this block to TXNS node
+	if n.config != nil && n.config.ValidatorMode {
+		log.Printf("🔄 Validator node is now re-broadcasting block #%d directly to TXNS node",
+			block.Header.BlockNumber)
+		if err := n.BroadcastBlockToTXNSNode(block); err != nil {
+			log.Printf("⚠️ Failed to broadcast block to TXNS node: %v", err)
+		}
 	}
 
 	// Update peer score positively for good behavior
@@ -2923,4 +2943,71 @@ func NewNodeWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (*Node, e
 // IsPeerTXNSNode checks if a peer is a TXNS node by ID
 func (n *Node) IsPeerTXNSNode(peerID peer.ID) bool {
 	return peerID.String() == "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31"
+}
+
+// BroadcastBlockToTXNSNode is a dedicated function to send blocks specifically to the TXNS node
+// This is a temporary solution to ensure TXNS nodes receive block updates
+func (n *Node) BroadcastBlockToTXNSNode(block Block) error {
+	const txnsNodeID = "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31"
+	blockHash := block.Hash()
+
+	// Check if this is a validator node - only validators should broadcast to TXNS
+	if n.config == nil || !n.config.ValidatorMode {
+		return nil
+	}
+
+	// Get all peers
+	peers := n.Host.Network().Peers()
+
+	// Look for TXNS node in the peer list
+	var txnsPeer peer.ID
+	var found bool
+
+	for _, p := range peers {
+		if p.String() == txnsNodeID {
+			txnsPeer = p
+			found = true
+			log.Printf("💡 Found TXNS node %s for direct block broadcast", p)
+			break
+		}
+	}
+
+	if !found {
+		log.Printf("⚠️ TXNS node not found in connected peers - cannot send block")
+		return nil
+	}
+
+	// Create stream to TXNS node
+	stream, err := n.Host.NewStream(n.ctx, txnsPeer, BlockProtocolID)
+	if err != nil {
+		log.Printf("❌ Failed to open stream to TXNS node: %v", err)
+		return err
+	}
+
+	// Prepare block data
+	blockData := struct {
+		Header             *BlockHeader
+		Body               *BlockBody
+		Hash               string
+		BroadcastTimestamp int64
+	}{
+		Header:             block.Header,
+		Body:               block.Body,
+		Hash:               blockHash,
+		BroadcastTimestamp: time.Now().Unix(),
+	}
+
+	// Encode and send block data
+	log.Printf("🔄 Directly broadcasting block #%d to TXNS node %s",
+		block.Header.BlockNumber, txnsPeer)
+
+	if err := json.NewEncoder(stream).Encode(blockData); err != nil {
+		stream.Close()
+		log.Printf("❌ Failed to send block to TXNS node: %v", err)
+		return err
+	}
+
+	stream.Close()
+	log.Printf("✅ Successfully sent block #%d directly to TXNS node", block.Header.BlockNumber)
+	return nil
 }
