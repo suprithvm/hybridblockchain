@@ -853,8 +853,8 @@ func startMining(bc *blockchain.Blockchain, minerAddress string) {
 			block.Hash(), block.Header.Nonce)
 
 		// Add 5 second delay between mining cycles
-		log.Printf("⏳ Waiting 5 seconds before next mining cycle...")
-		time.Sleep(5 * time.Second)
+		log.Printf("⏳ Waiting 15 seconds before next mining cycle...")
+		time.Sleep(15 * time.Second)
 	}
 }
 

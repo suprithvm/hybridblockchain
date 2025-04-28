@@ -122,7 +122,9 @@ func (m *Mempool) ValidateTransaction(tx Transaction, utxos map[string]UTXO) boo
 
 	// Calculate total input value needed (amount + max gas fee)
 	maxGasFee := tx.GasLimit * tx.MaxFeePerGas
-	totalRequired := tx.Amount + float64(maxGasFee)
+	// Convert gas units to tokens before adding to amount
+	maxGasFeeInTokens := ConvertGasToTokens(maxGasFee)
+	totalRequired := tx.Amount + maxGasFeeInTokens
 
 	if inputSum < totalRequired {
 		log.Printf("❌ Insufficient funds for amount + gas: have %.8f, need %.8f",
@@ -141,7 +143,7 @@ func (m *Mempool) ValidateTransaction(tx Transaction, utxos map[string]UTXO) boo
 	log.Printf("   • Amount: %.8f", tx.Amount)
 	log.Printf("   • Gas Limit: %d", tx.GasLimit)
 	log.Printf("   • Gas Price: %d", tx.GasPrice)
-	log.Printf("   • Max Gas Fee: %d", maxGasFee)
+	log.Printf("   • Max Gas Fee: %d gas units = %.8f tokens", maxGasFee, maxGasFeeInTokens)
 
 	return true
 }
