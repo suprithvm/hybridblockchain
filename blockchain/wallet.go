@@ -110,6 +110,14 @@ func serializeKeys(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey) ([]
 
 // DeserializeKeys deserializes private and public keys from bytes
 func DeserializeKeys(privateKeyBytes, publicKeyBytes []byte) (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
+	// Check for nil or empty byte slices to avoid panic
+	if privateKeyBytes == nil || len(privateKeyBytes) == 0 {
+		return nil, nil, fmt.Errorf("private key bytes are nil or empty")
+	}
+	if publicKeyBytes == nil || len(publicKeyBytes) < 64 {
+		return nil, nil, fmt.Errorf("public key bytes are nil or invalid length (got %d, need at least 64)", len(publicKeyBytes))
+	}
+
 	curve := elliptic.P256()
 
 	privateKey := new(ecdsa.PrivateKey)
@@ -171,8 +179,13 @@ func RecoverWalletFromMnemonic(mnemonic string) (*Wallet, error) {
 		return nil, fmt.Errorf("failed to recover wallet from mnemonic: %v", err)
 	}
 
+	// Derive public key
 	publicKey := &privateKey.PublicKey
+
+	// Serialize keys
 	privateKeyBytes, publicKeyBytes := serializeKeys(privateKey, publicKey)
+
+	// Generate blockchain address
 	address := generateAddress(publicKey)
 
 	return &Wallet{
@@ -191,21 +204,47 @@ func RecoverWallet(mnemonic string) (*Wallet, error) {
 		return nil, fmt.Errorf("failed to recover wallet from mnemonic: %v", err)
 	}
 
-	address := generateAddress(&privateKey.PublicKey)
-	return &Wallet{
-		PrivateKey: privateKey,
-		PublicKey:  &privateKey.PublicKey,
-		Address:    address,
-		Mnemonic:   mnemonic,
-	}, nil
+	// Derive public key
+	publicKey := &privateKey.PublicKey
+
+	// Serialize keys
+	privateKeyBytes, publicKeyBytes := serializeKeys(privateKey, publicKey)
+
+	// Add some logging to debug serialization
+	log.Printf("[DEBUG] PrivateKeyBytes length: %d", len(privateKeyBytes))
+	log.Printf("[DEBUG] PublicKeyBytes length: %d", len(publicKeyBytes))
+
+	// Generate blockchain address
+	address := generateAddress(publicKey)
+
+	wallet := &Wallet{
+		PrivateKey:      privateKey,
+		PublicKey:       publicKey,
+		Address:         address,
+		PrivateKeyBytes: privateKeyBytes,
+		PublicKeyBytes:  publicKeyBytes,
+		Mnemonic:        mnemonic,
+	}
+
+	// Verify the serialization worked correctly
+	if len(wallet.PrivateKeyBytes) == 0 || len(wallet.PublicKeyBytes) == 0 {
+		log.Printf("[ERROR] Wallet serialization failed. PrivateKeyBytes: %d bytes, PublicKeyBytes: %d bytes",
+			len(wallet.PrivateKeyBytes), len(wallet.PublicKeyBytes))
+	}
+
+	return wallet, nil
 }
 
 // LoadWalletFromFile loads a wallet from a file
 func LoadWalletFromFile(filename string) (*Wallet, error) {
+	log.Printf("[DEBUG] Loading wallet from %s", filename)
+
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read wallet file: %w", err)
 	}
+
+	log.Printf("[DEBUG] Wallet file size: %d bytes", len(data))
 
 	var wallet Wallet
 	err = json.Unmarshal(data, &wallet)
@@ -213,10 +252,22 @@ func LoadWalletFromFile(filename string) (*Wallet, error) {
 		return nil, fmt.Errorf("failed to deserialize wallet: %w", err)
 	}
 
+	log.Printf("[DEBUG] Deserialized wallet address: %s", wallet.Address)
+	log.Printf("[DEBUG] PrivateKeyBytes length: %d, PublicKeyBytes length: %d",
+		len(wallet.PrivateKeyBytes), len(wallet.PublicKeyBytes))
+
+	// Check if key bytes are properly set
+	if len(wallet.PrivateKeyBytes) == 0 || len(wallet.PublicKeyBytes) == 0 {
+		return nil, fmt.Errorf("wallet file has missing key data. PrivateKeyBytes: %d bytes, PublicKeyBytes: %d bytes",
+			len(wallet.PrivateKeyBytes), len(wallet.PublicKeyBytes))
+	}
+
 	privateKey, publicKey, err := DeserializeKeys(wallet.PrivateKeyBytes, wallet.PublicKeyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to deserialize keys: %w", err)
 	}
+
+	log.Printf("[DEBUG] Successfully deserialized keys")
 
 	wallet.PrivateKey = privateKey
 	wallet.PublicKey = publicKey
@@ -266,11 +317,25 @@ func (w *Wallet) VerifyTransaction(tx *Transaction) bool {
 
 // Add this method to save wallet to file
 func (w *Wallet) SaveToFile(filename string) error {
+	// Check if key bytes are properly set
+	if len(w.PrivateKeyBytes) == 0 || len(w.PublicKeyBytes) == 0 {
+		log.Printf("[WARN] Attempting to save wallet with empty key bytes. PrivateKeyBytes: %d bytes, PublicKeyBytes: %d bytes",
+			len(w.PrivateKeyBytes), len(w.PublicKeyBytes))
+
+		// Re-serialize the keys if they're missing but we have the actual keys
+		if w.PrivateKey != nil && w.PublicKey != nil {
+			log.Printf("[INFO] Re-serializing keys before saving wallet")
+			w.PrivateKeyBytes, w.PublicKeyBytes = serializeKeys(w.PrivateKey, w.PublicKey)
+		}
+	}
+
 	// Marshal wallet to JSON
 	data, err := json.Marshal(w)
 	if err != nil {
 		return fmt.Errorf("failed to serialize wallet: %w", err)
 	}
+
+	log.Printf("[DEBUG] Saving wallet to %s. Data size: %d bytes", filename, len(data))
 
 	// Write to file
 	if err := os.WriteFile(filename, data, 0600); err != nil {
