@@ -157,6 +157,10 @@ func runBootstrapNode(config *NodeConfig) {
 	if err != nil {
 		log.Fatalf("❌ Failed to create bootstrap node: %v", err)
 	}
+	
+	if err := node.Start(); err != nil {
+		log.Fatalf("❌ Failed to start bootstrap node: %v", err)
+	}
 
 	// Use the node variable
 	log.Printf("✅ Bootstrap node with ID %p is running on %s", node, config.ListenAddr)
@@ -984,11 +988,11 @@ func runTXNS(config *NodeConfig, store *blockchain.Store) error {
 	// Use different ports by default for TXNS when running on same machine as other nodes
 	// Only override if not explicitly set through command-line
 	if config.ListenAddr == ":50505" {
-		config.ListenAddr = ":50506" // Use different P2P port
+		config.ListenAddr = ":50507" // Use different P2P port
 		log.Printf("📡 Using alternate P2P port: %s to avoid conflicts", config.ListenAddr)
 	}
 	if config.RPCAddr == ":8545" {
-		config.RPCAddr = ":8546" // Use different RPC port
+		config.RPCAddr = ":8547" // Use different RPC port
 		log.Printf("🌐 Using alternate RPC port: %s to avoid conflicts", config.RPCAddr)
 	}
 
@@ -1221,33 +1225,44 @@ func handleGasInfo(node *blockchain.Node) {
 
 	// Print current gas prices with conversion to tokens
 	currentPrice := gasModel.GetCurrentGasPrice()
-	pricePerGasInTokens := blockchain.ConvertGasToTokens(1)
+	tokenPerUnit := blockchain.ConvertGasToTokens(1)
 	fmt.Printf("🔹 Current Base Gas Price: %d gas units (%.8f tokens per unit)\n",
-		currentPrice, pricePerGasInTokens)
+		currentPrice, tokenPerUnit)
 
 	// Display gas prices for different priorities
 	fmt.Println("\n⛽ Gas Prices by Priority:")
-	fmt.Printf("  • Low Priority:    %d gas units (%.8f tokens per gas unit)\n",
-		currentPrice/2, blockchain.ConvertGasToTokens(currentPrice/2))
-	fmt.Printf("  • Normal Priority: %d gas units (%.8f tokens per gas unit)\n",
-		currentPrice, blockchain.ConvertGasToTokens(currentPrice))
-	fmt.Printf("  • High Priority:   %d gas units (%.8f tokens per gas unit)\n",
-		currentPrice*2, blockchain.ConvertGasToTokens(currentPrice*2))
+	lowPriority := currentPrice / 2
+	lowPriorityTokens := blockchain.ConvertGasToTokens(lowPriority)
+	fmt.Printf("  • Low Priority:    %d gas units (%.8f tokens total)\n",
+		lowPriority, lowPriorityTokens)
+
+	normalPriorityTokens := blockchain.ConvertGasToTokens(currentPrice)
+	fmt.Printf("  • Normal Priority: %d gas units (%.8f tokens total)\n",
+		currentPrice, normalPriorityTokens)
+
+	highPriority := currentPrice * 2
+	highPriorityTokens := blockchain.ConvertGasToTokens(highPriority)
+	fmt.Printf("  • High Priority:   %d gas units (%.8f tokens total)\n",
+		highPriority, highPriorityTokens)
 
 	// Display gas costs for standard transactions
 	fmt.Println("\n💸 Standard Transaction Costs:")
-	// Calculate the total gas cost: gas units × price per unit in tokens
-	totalGasUnits := gas.BaseTxGas * currentPrice
-	// Convert total gas units to tokens directly
+	// A simple transfer requires BaseTxGas units of gas
+	// Each unit costs the current gas price
+	// So the total gas is BaseTxGas * currentPrice
+	baseGasUnits := uint64(gas.BaseTxGas)
+	totalGasUnits := baseGasUnits * currentPrice
 	totalCostInTokens := blockchain.ConvertGasToTokens(totalGasUnits)
-	fmt.Printf("  • Simple Transfer: %d gas units (%d total gas) = %.8f tokens\n",
-		gas.BaseTxGas, totalGasUnits, totalCostInTokens)
+
+	fmt.Printf("  • Simple Transfer: %d gas units × %d gas price = %d total gas\n",
+		baseGasUnits, currentPrice, totalGasUnits)
+	fmt.Printf("  • Cost in tokens: %.8f tokens\n", totalCostInTokens)
 	fmt.Printf("  • Maximum Allowed Fee: %.2f tokens\n", blockchain.MaxTotalFee)
 
 	// Display conversion information
 	fmt.Println("\n🔄 Gas to Token Conversion:")
 	fmt.Printf("  • %d gas units = 1 token\n", int(blockchain.GasToTokenConversionFactor))
-	fmt.Printf("  • 1 gas unit = %.8f tokens\n", blockchain.ConvertGasToTokens(1))
+	fmt.Printf("  • 1 gas unit = %.8f tokens\n", tokenPerUnit)
 
 	fmt.Println("\n💡 Note: Gas fees are automatically calculated when sending transactions")
 }
@@ -1307,7 +1322,7 @@ func handleImportWallet() {
 	}
 
 	// Recover wallet from mnemonic
-	wallet, err := blockchain.RecoverWalletFromMnemonic(mnemonic)
+	wallet, err := blockchain.RecoverWallet(mnemonic)
 	if err != nil {
 		fmt.Printf("❌ Error recovering wallet: %v\n", err)
 		return

@@ -419,6 +419,33 @@ func (config *BootstrapNodeConfig) GetMultiaddr(peerID peer.ID) string {
 	return local
 }
 
+
+// Start starts the bootstrap node
+func (bn *BootstrapNode) Start() error {
+	// Set up connection handler
+	bn.host.Network().Notify(&network.NotifyBundle{
+		ConnectedF: func(n network.Network, conn network.Conn) {
+			peerID := conn.RemotePeer()
+			log.Printf("✅ New peer connected: %s", peerID)
+
+			// Add to known peers
+			bn.peers[peerID] = peerID
+		},
+		DisconnectedF: func(n network.Network, conn network.Conn) {
+			peerID := conn.RemotePeer()
+			log.Printf("❌ Peer disconnected: %s", peerID)
+			delete(bn.peers, peerID)
+		},
+	})
+
+
+	// Start periodic peer status updates
+	go bn.updatePeerStatus()
+
+	log.Printf("✨ Bootstrap node is running on port %d", bn.config.ListenPort)
+	return nil
+}
+
 // loadOrCreatePrivateKey loads an existing private key or creates a new one
 func loadOrCreatePrivateKey(dataDir string) (crypto.PrivKey, error) {
 	keyFile := filepath.Join(dataDir, "node.key")
