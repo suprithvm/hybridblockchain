@@ -211,12 +211,12 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 	}
 }
 
-// RemoveUTXO removes a spent UTXO
+// RemoveUTXO removes a UTXO from the pool
 func (pool *UTXOPool) RemoveUTXO(txID string, outputIndex int) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
-	key := fmt.Sprintf("%s:%d", txID, outputIndex)
+	key := fmt.Sprintf("%s-%d", txID, outputIndex)
 	delete(pool.utxos, key)
 
 	// Track deletion
@@ -239,7 +239,7 @@ func (pool *UTXOPool) ValidateTransaction(tx *Transaction) bool {
 
 	totalInput := 0.0
 	for _, input := range tx.Inputs {
-		key := fmt.Sprintf("%s:%d", input.TransactionID, input.OutputIndex)
+		key := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
 		utxo, exists := pool.utxos[key]
 		if !exists || utxo.Owner != tx.Sender {
 			return false
