@@ -128,18 +128,22 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
-	// Check if this is a coinbase transaction
-	isCoinbase := false
-	if tx.TxType == TX_COINBASE {
-		isCoinbase = true
-		log.Printf("🌱 Processing coinbase transaction %s for block #%d", tx.TransactionID, blockHeight)
+	// Check if this is a system transaction (coinbase or validator reward)
+	isSystemTx := false
+	if tx.TxType == TX_COINBASE || tx.TxType == TX_VALIDATOR_REWARD {
+		isSystemTx = true
+		if tx.TxType == TX_COINBASE {
+			log.Printf("🌱 Processing coinbase transaction %s for block #%d", tx.TransactionID, blockHeight)
+		} else if tx.TxType == TX_VALIDATOR_REWARD {
+			log.Printf("💸 Processing validator reward transaction %s for block #%d", tx.TransactionID, blockHeight)
+		}
 	}
 
 	// Add new UTXOs from transaction outputs
 	for i, output := range tx.Outputs {
 		utxoKey := fmt.Sprintf("%s-%d", tx.TransactionID, i)
 
-		// For coinbase transactions, the Owner is always the Receiver (miner's address)
+		// For system transactions, the Owner is always the Receiver
 		owner := output.Receiver
 
 		utxo := UTXO{
@@ -154,15 +158,19 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 
 		pool.utxos[utxoKey] = utxo
 
-		if isCoinbase {
-			log.Printf("💎 Created UTXO from coinbase: %s", utxoKey)
+		if isSystemTx {
+			if tx.TxType == TX_COINBASE {
+				log.Printf("💎 Created UTXO from coinbase: %s", utxoKey)
+			} else if tx.TxType == TX_VALIDATOR_REWARD {
+				log.Printf("💰 Created UTXO from validator reward: %s", utxoKey)
+			}
 			log.Printf("   • Amount: %.8f", output.Amount)
 			log.Printf("   • Owner: %s", owner)
 		}
 	}
 
-	// Only mark inputs as spent for non-coinbase transactions
-	if !isCoinbase {
+	// Only mark inputs as spent for non-system transactions
+	if !isSystemTx {
 		// Mark spent inputs
 		for _, input := range tx.Inputs {
 			inputKey := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
@@ -250,11 +258,11 @@ func (pool *UTXOPool) ValidateTransaction(tx *Transaction) bool {
 }
 
 func UpdateUTXOSet(tx Transaction, utxoSet map[string]UTXO) {
-	// Check if this is a coinbase transaction
-	isCoinbase := tx.TxType == TX_COINBASE
+	// Check if this is a system transaction (coinbase or validator reward)
+	isSystemTx := tx.TxType == TX_COINBASE || tx.TxType == TX_VALIDATOR_REWARD
 
-	// Only remove spent UTXOs for non-coinbase transactions
-	if !isCoinbase {
+	// Only remove spent UTXOs for non-system transactions
+	if !isSystemTx {
 		// Remove spent UTXOs
 		for _, input := range tx.Inputs {
 			key := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
@@ -963,7 +971,7 @@ func (pool *UTXOPool) ProcessBlockTransactions(block *Block) error {
 	// Process all transactions in the block
 	for _, tx := range block.Body.Transactions.GetAllTransactions() {
 		// Process inputs (mark UTXOs as spent)
-		if tx.TxType != TX_COINBASE {
+		if tx.TxType != TX_COINBASE && tx.TxType != TX_VALIDATOR_REWARD {
 			for _, input := range tx.Inputs {
 				key := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
 				if utxo, exists := pool.utxos[key]; exists {
@@ -984,10 +992,10 @@ func (pool *UTXOPool) ProcessBlockTransactions(block *Block) error {
 		for i, output := range tx.Outputs {
 			utxoKey := fmt.Sprintf("%s-%d", tx.TransactionID, i)
 
-			// For coinbase transactions, the Owner is always the Receiver
+			// Set owner based on transaction type
 			owner := output.Receiver
-			if tx.TxType == TX_COINBASE {
-				owner = output.Receiver // Ensure the receiver is set correctly
+			if tx.TxType == TX_COINBASE || tx.TxType == TX_VALIDATOR_REWARD {
+				owner = output.Receiver // Ensure the receiver is set correctly for system transactions
 			}
 
 			utxo := UTXO{
