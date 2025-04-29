@@ -96,14 +96,13 @@ type Node struct {
 	PeerManager            *PeerManager
 	Blockchain             *Blockchain
 	Mempool                *Mempool
-	UTXOSet                *UTXOPool
+	UTXOPool               *UTXOPool // Single UTXO pool reference
 	StakePool              *StakePool
 	config                 *NetworkConfig
 	ctx                    context.Context
 	cancel                 context.CancelFunc
 	keepAliveCtx           context.Context
 	keepAliveCancel        context.CancelFunc
-	UTXOPool               *UTXOPool
 	isSyncing              bool
 	syncMu                 sync.RWMutex
 	gasModel               *gas.GasModel
@@ -200,14 +199,13 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 		PeerManager:       peerManager,
 		Blockchain:        config.Blockchain,
 		Mempool:           NewMempool(nil),             // Temporarily set to nil, will update below
-		UTXOSet:           config.Blockchain.utxoPool,  // Use blockchain's UTXOPool instead of creating a new one
+		UTXOPool:          config.Blockchain.utxoPool,  // Use blockchain's UTXOPool instead of creating a new one
 		StakePool:         config.Blockchain.StakePool, // Use blockchain's stake pool
 		config:            config,
 		ctx:               ctx,
 		cancel:            cancel,
 		keepAliveCtx:      keepAliveCtx,
 		keepAliveCancel:   keepAliveCancel,
-		UTXOPool:          config.Blockchain.utxoPool, // Use blockchain's UTXOPool for Node.UTXOPool as well
 		isSyncing:         false,
 		syncMu:            sync.RWMutex{},
 		gasModel:          gas.NewGasModel(20, 100000), // Updated from 1000000 to 20
@@ -394,9 +392,8 @@ func (n *Node) handleBlockStream(s network.Stream) {
 
 	peerID := s.Conn().RemotePeer()
 	// Special logging for TXNS node to track block reception
-	
+
 	log.Printf("📥 Received Broadcasted block from peer %s", peerID.String())
-	
 
 	// Block data structure that matches what we send in BroadcastBlock
 	var blockData struct {
@@ -412,8 +409,6 @@ func (n *Node) handleBlockStream(s network.Stream) {
 		n.handleStreamError(s, err)
 		return
 	}
-
-	
 
 	// Verify we can process this block
 	if blockData.Header == nil || blockData.Body == nil {
@@ -493,8 +488,6 @@ func (n *Node) handleBlockStream(s network.Stream) {
 		log.Printf("⚠️ Warning: UTXO pool not initialized, skipping UTXO processing for block #%d",
 			block.Header.BlockNumber)
 	}
-
-	
 
 	// Update peer score positively for good behavior
 	n.PeerManager.UpdatePeerScore(peerID, 5)
@@ -611,7 +604,7 @@ func processTransaction(n *Node, peerID peer.ID, tx *Transaction) {
 
 	// Add to mempool if valid, using Node's Mempool
 	log.Printf("📥 Adding transaction %s to mempool", tx.TransactionID)
-	if !n.Mempool.AddTransaction(*tx, n.UTXOSet.utxos) {
+	if !n.Mempool.AddTransaction(*tx, n.UTXOPool.GetUTXOs()) {
 		log.Printf("❌ Failed to add transaction %s to mempool", tx.TransactionID)
 		return
 	}
@@ -630,11 +623,11 @@ func processTransaction(n *Node, peerID peer.ID, tx *Transaction) {
 
 // validateTransaction performs comprehensive transaction validation
 func (n *Node) validateTransaction(tx *Transaction) bool {
-	log.Printf("🔍 Validating transaction ID: %s", tx.TransactionID)
+	log.Printf("🔍 Validating transaction %s", tx.TransactionID)
 
-	// Skip validation for system transactions (coinbase, validator rewards)
+	// Skip validation for system transactions
 	if tx.IsCoinbase() || tx.IsValidatorReward() {
-		log.Printf("ℹ️ System transaction detected (type: %d), skipping standard validation", tx.TxType)
+		log.Printf("⚙️ System transaction detected (type: %d), skipping standard validation", tx.TxType)
 		return true
 	}
 
@@ -654,9 +647,9 @@ func (n *Node) validateTransaction(tx *Transaction) bool {
 	}
 	log.Printf("✅ Transaction signature verified successfully")
 
-	// Validate using UTXOSet
+	// Validate using UTXOPool instead of UTXOSet
 	log.Printf("💰 Validating transaction inputs and outputs")
-	if !n.UTXOSet.ValidateTransaction(tx) {
+	if !n.UTXOPool.ValidateTransaction(tx) {
 		log.Printf("❌ UTXO validation failed for transaction %s", tx.TransactionID)
 		return false
 	}
@@ -1530,7 +1523,7 @@ func (n *Node) SyncBlocks(peerID peer.ID, startHeight, endHeight int) error {
 
 	// Convert UTXOPool to map[string]UTXO
 	utxoMap := make(map[string]UTXO)
-	for _, utxo := range n.UTXOSet.GetAllUTXOs() {
+	for _, utxo := range n.UTXOPool.GetAllUTXOs() {
 		utxoMap[utxo.TransactionID] = utxo
 	}
 
@@ -1843,7 +1836,7 @@ func (n *Node) handleNewTransaction(s network.Stream, payload interface{}) {
 	}
 
 	// Add to mempool using UTXOPool's utxos map
-	if added := n.Mempool.AddTransaction(tx, n.UTXOSet.utxos); !added {
+	if added := n.Mempool.AddTransaction(tx, n.UTXOPool.GetUTXOs()); !added {
 		log.Printf("Failed to add transaction to mempool: %s", tx.TransactionID)
 		return
 	}
@@ -2111,9 +2104,9 @@ func (n *Node) Start() error {
 	n.runningMu.Unlock()
 
 	// Connect UTXO pools with the node instance
-	if n.UTXOSet != nil {
-		n.UTXOSet.node = n
-		log.Printf("📝 UTXOSet node reference updated")
+	if n.UTXOPool != nil {
+		n.UTXOPool.node = n
+		log.Printf("📝 UTXOPool node reference updated")
 	}
 
 	if n.UTXOPool != nil {
@@ -2961,14 +2954,13 @@ func NewNodeWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (*Node, e
 		PeerManager:       peerManager,
 		Blockchain:        config.Blockchain,
 		Mempool:           NewMempool(nil),             // Temporarily set to nil, will update below
-		UTXOSet:           config.Blockchain.utxoPool,  // Use blockchain's UTXOPool instead of creating a new one
+		UTXOPool:          config.Blockchain.utxoPool,  // Use blockchain's UTXOPool instead of creating a new one
 		StakePool:         config.Blockchain.StakePool, // Use blockchain's stake pool
 		config:            config,
 		ctx:               ctx,
 		cancel:            cancel,
 		keepAliveCtx:      keepAliveCtx,
 		keepAliveCancel:   keepAliveCancel,
-		UTXOPool:          config.Blockchain.utxoPool, // Use blockchain's UTXOPool for Node.UTXOPool as well
 		isSyncing:         false,
 		syncMu:            sync.RWMutex{},
 		gasModel:          gas.NewGasModel(20, 100000), // Updated from 1000000 to 20

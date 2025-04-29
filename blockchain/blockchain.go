@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -1056,6 +1057,30 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 	// Mining was successful, now commit the temporary UTXO pool to the main one
 	if tempUTXOPool != nil && bc.utxoPool != nil {
 		bc.utxoPool = tempUTXOPool
+
+		// Synchronize with Node's UTXOPool if available to ensure validator rewards are propagated
+		if bc.Node != nil && bc.Node.UTXOPool != nil {
+			// Update Node's UTXOPool with the validator reward transaction
+			if validatorRewardTx != nil && lastValidatorAddress != "" {
+				log.Printf("🔄 Synchronizing validator reward UTXO to Node's UTXOPool for %s", lastValidatorAddress)
+				bc.Node.UTXOPool.AddUTXO(validatorRewardTx, newBlock.Header.BlockNumber)
+
+				// Verify the synchronization
+				valBalanceNode := bc.Node.UTXOPool.GetBalance(lastValidatorAddress)
+				valBalanceBC := bc.utxoPool.GetBalance(lastValidatorAddress)
+				log.Printf("📊 Validator %s balance: %.8f (Node UTXOPool) vs %.8f (Blockchain UTXOPool)",
+					lastValidatorAddress, valBalanceNode, valBalanceBC)
+			}
+
+			// Also synchronize the coinbase transaction
+			bc.Node.UTXOPool.AddUTXO(coinbaseTx, newBlock.Header.BlockNumber)
+
+			// Full sync of UTXOPools if needed
+			if !reflect.DeepEqual(bc.utxoPool.GetMerkleRoot(), bc.Node.UTXOPool.GetMerkleRoot()) {
+				log.Printf("🔄 Full synchronization of Node's UTXOPool with Blockchain's UTXOPool")
+				bc.Node.UTXOPool = bc.utxoPool.Clone()
+			}
+		}
 	}
 
 	// Add the block to the chain
@@ -1136,48 +1161,40 @@ func (bc *Blockchain) MineBlock(minerAddress string) (*Block, error) {
 // since the pool is now updated transactionally before this method is called
 func (bc *Blockchain) updateUTXOSet(block Block) {
 	if bc.utxoPool == nil {
-		return
+		bc.utxoPool = NewUTXOPool(bc.db)
 	}
 
-	// This method is now primarily for updating account states and other metadata
-	// rather than the UTXO pool itself, which is updated transactionally
+	// Process all transactions in the block
+	for _, tx := range block.Body.Transactions.GetAllTransactions() {
+		bc.utxoPool.AddUTXO(&tx, block.Header.BlockNumber)
+	}
 
-	// Update account manager if available
-	if bc.Node != nil && bc.Node.accountManager != nil {
-		accountUpdates := make(map[string]*AccountState)
-
-		// Process all transactions in the block to update account states
+	// Synchronize with Node's UTXOPool if available
+	if bc.Node != nil && bc.Node.UTXOPool != nil {
+		// Process all transactions in the block in the Node's UTXOPool
+		log.Printf("🔄 Synchronizing Node's UTXOPool with block #%d transactions", block.Header.BlockNumber)
 		for _, tx := range block.Body.Transactions.GetAllTransactions() {
-			// Update sender account (except for coinbase and validator reward transactions)
-			if tx.TxType != TX_COINBASE && tx.TxType != TX_VALIDATOR_REWARD {
-				if sender, err := bc.Node.accountManager.GetAccountState(tx.Sender); err == nil {
-					// Increment nonce
-					sender.Nonce++
-					accountUpdates[tx.Sender] = sender
-				}
-			}
-
-			// Update receiver accounts
-			for _, output := range tx.Outputs {
-				receiver := output.Receiver
-				if state, err := bc.Node.accountManager.GetAccountState(receiver); err == nil {
-					// Update balance
-					state.Balance = bc.utxoPool.GetBalance(receiver)
-					accountUpdates[receiver] = state
-				} else {
-					// Create new account if it doesn't exist
-					accountUpdates[receiver] = &AccountState{
-						Address: receiver,
-						Balance: output.Amount,
-						Nonce:   0,
-					}
-				}
-			}
+			bc.Node.UTXOPool.AddUTXO(&tx, block.Header.BlockNumber)
 		}
 
-		// Batch update account states
-		if len(accountUpdates) > 0 {
-			bc.Node.accountManager.BatchUpdateAccounts(accountUpdates)
+		// Verify that the UTXOPools are in sync
+		blockchainRoot := bc.utxoPool.GetMerkleRoot()
+		nodeRoot := bc.Node.UTXOPool.GetMerkleRoot()
+
+		if blockchainRoot != nodeRoot {
+			log.Printf("⚠️ Warning: UTXOPool merkle roots don't match after update. Performing full sync.")
+			bc.Node.UTXOPool = bc.utxoPool.Clone()
+			log.Printf("✅ Node's UTXOPool fully synchronized with Blockchain's UTXOPool")
+		} else {
+			log.Printf("✅ UTXOPools successfully synchronized (merkle root: %s)", blockchainRoot)
+		}
+	}
+
+	// Create a snapshot at fixed intervals (e.g., every 10 blocks)
+	if block.Header.BlockNumber%10 == 0 {
+		err := bc.utxoPool.CreateSnapshot(block.Header.BlockNumber, block.Hash())
+		if err != nil {
+			log.Printf("⚠️ Failed to create UTXO snapshot: %v", err)
 		}
 	}
 }
