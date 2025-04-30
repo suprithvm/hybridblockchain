@@ -29,9 +29,15 @@ func (api *WalletAPI) CreateWallet(params json.RawMessage) (interface{}, error) 
 		return nil, fmt.Errorf("failed to create wallet: %v", err)
 	}
 
+	// Convert binary key data to hex strings for the API response
+	privateKeyHex := hex.EncodeToString(wallet.PrivateKeyBytes)
+	publicKeyHex := hex.EncodeToString(wallet.PublicKeyBytes)
+
 	result := map[string]interface{}{
-		"address":  wallet.Address,
-		"mnemonic": wallet.Mnemonic,
+		"address":    wallet.Address,
+		"mnemonic":   wallet.Mnemonic,
+		"privateKey": privateKeyHex,
+		"publicKey":  publicKeyHex,
 	}
 
 	return result, nil
@@ -77,8 +83,15 @@ func (api *WalletAPI) ImportWallet(params json.RawMessage) (interface{}, error) 
 		return nil, fmt.Errorf("either mnemonic or private key is required")
 	}
 
+	// Convert binary key data to hex strings for the API response
+	privateKeyHex := hex.EncodeToString(wallet.PrivateKeyBytes)
+	publicKeyHex := hex.EncodeToString(wallet.PublicKeyBytes)
+
 	result := map[string]interface{}{
-		"address": wallet.Address,
+		"address":    wallet.Address,
+		"mnemonic":   wallet.Mnemonic,
+		"privateKey": privateKeyHex,
+		"publicKey":  publicKeyHex,
 	}
 
 	return result, nil
@@ -136,8 +149,12 @@ func (api *WalletAPI) GetWalletInfo(params json.RawMessage) (interface{}, error)
 			return nil, fmt.Errorf("mnemonic does not match the provided address")
 		}
 
-		// Add public key to response
-		info["publicKey"] = wallet.PublicKey
+		// Add public key to response in hex format
+		publicKeyHex := hex.EncodeToString(wallet.PublicKeyBytes)
+		info["publicKey"] = publicKeyHex
+
+		// Don't include private key in getWalletInfo for security reasons,
+		// only in create/import wallet methods
 	}
 
 	return info, nil
@@ -175,10 +192,26 @@ func (api *WalletAPI) CreateHDWallet(params json.RawMessage) (interface{}, error
 		return nil, fmt.Errorf("failed to create HD wallet: %v", err)
 	}
 
-	// Create response
+	// Get first wallet address and keys for convenience
+	firstWallet, err := blockchain.RecoverWalletFromMnemonic(mnemonic)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create first wallet from mnemonic: %v", err)
+	}
+
+	// Convert binary key data to hex strings
+	privateKeyHex := hex.EncodeToString(firstWallet.PrivateKeyBytes)
+	publicKeyHex := hex.EncodeToString(firstWallet.PublicKeyBytes)
+
+	// Create response with comprehensive data
 	result := map[string]interface{}{
 		"mnemonic":  hdWallet.Mnemonic,
 		"addresses": hdWallet.Addresses,
+		"count":     len(hdWallet.Addresses),
+		"rootAccount": map[string]interface{}{
+			"address":    firstWallet.Address,
+			"privateKey": privateKeyHex,
+			"publicKey":  publicKeyHex,
+		},
 	}
 
 	return result, nil
@@ -232,20 +265,33 @@ func (api *WalletAPI) GetAddresses(params json.RawMessage) (interface{}, error) 
 
 	addresses = addresses[args.Start:end]
 
-	// Derive addresses
+	// Derive addresses with detailed info
 	var addressInfos []map[string]interface{}
 	for i, address := range addresses {
 		// Get balance directly from UTXOPool
 		balance := api.node.UTXOPool.GetBalance(address)
 
-		addressInfos = append(addressInfos, map[string]interface{}{
+		// Create address info
+		addressInfo := map[string]interface{}{
 			"index":   args.Start + i,
 			"address": address,
 			"balance": balance,
-		})
+		}
+
+		// We don't have a direct method to get the public key for a specific
+		// derived address without implementing RecoverHDAddressAtIndex,
+		// so we'll only include the address and balance for now.
+
+		addressInfos = append(addressInfos, addressInfo)
 	}
 
-	return addressInfos, nil
+	// Return response with metadata
+	return map[string]interface{}{
+		"addresses": addressInfos,
+		"total":     len(addressInfos),
+		"start":     args.Start,
+		"end":       args.Start + len(addressInfos) - 1,
+	}, nil
 }
 
 // CreateMultiSigWallet creates a multi-signature wallet

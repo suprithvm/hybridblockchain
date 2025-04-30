@@ -2,8 +2,11 @@ package api
 
 import (
 	"blockchain-core/blockchain"
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 	"strconv"
 	"time"
@@ -11,15 +14,17 @@ import (
 
 // TransactionAPI handles transaction-related RPC methods
 type TransactionAPI struct {
-	node       *blockchain.Node
-	blockchain *blockchain.Blockchain
+	node               *blockchain.Node
+	blockchain         *blockchain.Blockchain
+	pendingTxCallbacks map[string]string // txID -> callbackURL
 }
 
 // NewTransactionAPI creates a new transaction API instance
 func NewTransactionAPI(node *blockchain.Node, blockchain *blockchain.Blockchain) *TransactionAPI {
 	return &TransactionAPI{
-		node:       node,
-		blockchain: blockchain,
+		node:               node,
+		blockchain:         blockchain,
+		pendingTxCallbacks: make(map[string]string),
 	}
 }
 
@@ -96,8 +101,8 @@ func (api *TransactionAPI) GetAccountState(params json.RawMessage) (interface{},
 	return state, nil
 }
 
-// CreateTransaction creates a new transaction
-func (api *TransactionAPI) CreateTransaction(params json.RawMessage) (interface{}, error) {
+// CreateUnsignedTransaction creates an unsigned transaction structure
+func (api *TransactionAPI) CreateUnsignedTransaction(params json.RawMessage) (interface{}, error) {
 	var args struct {
 		From     string  `json:"from"`
 		To       string  `json:"to"`
@@ -124,63 +129,223 @@ func (api *TransactionAPI) CreateTransaction(params json.RawMessage) (interface{
 		return nil, fmt.Errorf("failed to create transaction: %v", err)
 	}
 
-	return tx, nil
+	// Return the transaction object with a note about it being unsigned
+	return map[string]interface{}{
+		"transaction": tx,
+		"status":      "unsigned",
+		"note":        "This transaction must be signed with the sender's private key before broadcasting",
+	}, nil
 }
 
 // SendTransaction signs and broadcasts a transaction
 func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{}, error) {
 	var args struct {
-		From     string  `json:"from"`
-		To       string  `json:"to"`
-		Amount   float64 `json:"amount"`
-		GasPrice uint64  `json:"gasPrice"`
-		GasLimit uint64  `json:"gasLimit"`
-		Mnemonic string  `json:"mnemonic"`
+		From           string  `json:"from"`
+		To             string  `json:"to"`
+		Amount         float64 `json:"amount"`
+		GasPrice       uint64  `json:"gasPrice"`
+		GasLimit       uint64  `json:"gasLimit"`
+		Signature      string  `json:"signature"`      // Signed transaction data
+		RawTransaction string  `json:"rawTransaction"` // Optional: Complete serialized transaction
+		CallbackURL    string  `json:"callbackUrl"`    // Optional: URL to notify when transaction status changes
 	}
 
 	if err := json.Unmarshal(params, &args); err != nil {
 		return nil, fmt.Errorf("invalid parameters: %v", err)
 	}
 
-	// Validate addresses
-	if !blockchain.ValidateAddress(args.From) {
-		return nil, fmt.Errorf("invalid sender address")
-	}
-	if !blockchain.ValidateAddress(args.To) {
-		return nil, fmt.Errorf("invalid receiver address")
+	var tx *blockchain.Transaction
+
+	// Handle pre-signed transaction
+	if args.RawTransaction != "" {
+		// Deserialize the complete transaction
+		var err error
+		txBytes, err := hex.DecodeString(args.RawTransaction)
+		if err != nil {
+			return nil, fmt.Errorf("invalid transaction encoding: %v", err)
+		}
+
+		tx = &blockchain.Transaction{}
+		if err := json.Unmarshal(txBytes, tx); err != nil {
+			return nil, fmt.Errorf("failed to deserialize transaction: %v", err)
+		}
+
+		// Verify the deserialized transaction
+		if !tx.VerifySignature() {
+			return nil, fmt.Errorf("transaction signature verification failed")
+		}
+	} else {
+		// Validate addresses
+		if !blockchain.ValidateAddress(args.From) {
+			return nil, fmt.Errorf("invalid sender address")
+		}
+		if !blockchain.ValidateAddress(args.To) {
+			return nil, fmt.Errorf("invalid receiver address")
+		}
+		if args.Signature == "" {
+			return nil, fmt.Errorf("transaction signature is required")
+		}
+
+		// Create unsigned transaction
+		var err error
+		tx, err = blockchain.NewTransaction(args.From, args.To, args.Amount, args.GasPrice, args.GasLimit)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create transaction: %v", err)
+		}
+
+		// Apply the provided signature - verify it's valid hex first
+		_, hexErr := hex.DecodeString(args.Signature)
+		if hexErr != nil {
+			return nil, fmt.Errorf("invalid signature format: %v", hexErr)
+		}
+		tx.Signature = args.Signature
+
+		// Verify the signature matches the transaction and sender
+		if !tx.VerifySignature() {
+			return nil, fmt.Errorf("transaction signature verification failed")
+		}
 	}
 
-	// Create transaction
-	tx, err := blockchain.NewTransaction(args.From, args.To, args.Amount, args.GasPrice, args.GasLimit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create transaction: %v", err)
-	}
-
-	// Recover wallet from mnemonic
-	wallet, err := blockchain.RecoverWalletFromMnemonic(args.Mnemonic)
-	if err != nil {
-		return nil, fmt.Errorf("failed to recover wallet: %v", err)
-	}
-
-	// Verify that the wallet address matches the from address
-	if wallet.Address != args.From {
-		return nil, fmt.Errorf("wallet address does not match sender address")
-	}
-
-	// Sign transaction
-	if err := wallet.SignTransaction(tx); err != nil {
-		return nil, fmt.Errorf("failed to sign transaction: %v", err)
-	}
-
-	// Broadcast transaction
+	// Broadcast the validated and signed transaction
 	if err := api.node.BroadcastTransaction(tx, nil); err != nil {
 		return nil, fmt.Errorf("failed to broadcast transaction: %v", err)
 	}
 
-	return map[string]string{
+	// If a callback URL is provided, store it and start monitoring the transaction
+	if args.CallbackURL != "" {
+		api.pendingTxCallbacks[tx.TransactionID] = args.CallbackURL
+
+		// Start monitoring in a goroutine
+		go api.monitorTransaction(tx.TransactionID)
+	}
+
+	// Return comprehensive transaction data with pending status
+	return map[string]interface{}{
 		"transactionId": tx.TransactionID,
-		"status":        "success",
+		"status":        "pending",
+		"from":          tx.Sender,
+		"to":            tx.Receiver,
+		"amount":        tx.Amount,
+		"timestamp":     tx.Timestamp,
+		"gasPrice":      tx.GasPrice,
+		"gasLimit":      tx.GasLimit,
+		"gasFee":        tx.GasFee,
+		"inMempool":     true,
+		"confirmations": 0,
 	}, nil
+}
+
+// monitorTransaction monitors a transaction until it's confirmed or fails
+func (api *TransactionAPI) monitorTransaction(txID string) {
+	// Get the callback URL
+	callbackURL, exists := api.pendingTxCallbacks[txID]
+	if !exists {
+		return
+	}
+
+	// Maximum number of attempts (approximately 30 minutes assuming 10-second intervals)
+	maxAttempts := 180
+	attempts := 0
+
+	for attempts < maxAttempts {
+		// Check if transaction is in a block
+		confirmed := false
+		var result map[string]interface{}
+
+		// Search for transaction in blocks
+		height := api.blockchain.GetHeight()
+		for i := uint64(1); i <= height; i++ {
+			block := api.blockchain.GetBlockByHeight(i)
+			if block == nil || block.Body == nil || block.Body.Transactions == nil {
+				continue
+			}
+
+			tx, found := block.Body.Transactions.Search(txID)
+			if found && tx != nil {
+				// Transaction found in a block
+				confirmed = true
+				result = map[string]interface{}{
+					"transactionId":    txID,
+					"status":           "confirmed",
+					"blockHash":        block.Hash(),
+					"blockHeight":      block.Header.BlockNumber,
+					"confirmations":    height - block.Header.BlockNumber + 1,
+					"timestamp":        block.Header.Timestamp,
+					"confirmationTime": time.Unix(block.Header.Timestamp, 0).Format(time.RFC3339),
+				}
+				break
+			}
+		}
+
+		// If confirmed, notify via callback and stop monitoring
+		if confirmed {
+			api.notifyCallback(callbackURL, result)
+			delete(api.pendingTxCallbacks, txID)
+			return
+		}
+
+		// Check if transaction is still in mempool
+		inMempool := false
+		if api.node.Mempool != nil {
+			for _, tx := range api.node.Mempool.GetTransactions() {
+				if tx.TransactionID == txID {
+					inMempool = true
+					break
+				}
+			}
+		}
+
+		// If not in mempool and not in a block after a certain number of attempts,
+		// assume it failed (could have been rejected by validators)
+		if !inMempool && attempts > 30 { // After 5 minutes (30 attempts * 10 seconds)
+			result = map[string]interface{}{
+				"transactionId": txID,
+				"status":        "failed",
+				"reason":        "Transaction dropped from mempool without being included in a block",
+			}
+			api.notifyCallback(callbackURL, result)
+			delete(api.pendingTxCallbacks, txID)
+			return
+		}
+
+		// Wait before next check
+		time.Sleep(10 * time.Second)
+		attempts++
+	}
+
+	// If we reach max attempts, assume it's still pending but stop monitoring
+	result := map[string]interface{}{
+		"transactionId": txID,
+		"status":        "unknown",
+		"reason":        "Monitoring timeout reached",
+	}
+	api.notifyCallback(callbackURL, result)
+	delete(api.pendingTxCallbacks, txID)
+}
+
+// notifyCallback sends a POST request to the callback URL with transaction status
+func (api *TransactionAPI) notifyCallback(callbackURL string, data map[string]interface{}) {
+	// Convert data to JSON
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		// Log error and return
+		fmt.Printf("Error marshaling callback data: %v\n", err)
+		return
+	}
+
+	// Send POST request to callback URL
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	resp, err := client.Post(callbackURL, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		fmt.Printf("Error sending callback notification: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Log response status
+	fmt.Printf("Callback notification sent to %s, status: %d\n", callbackURL, resp.StatusCode)
 }
 
 // GetTransaction retrieves transaction details by ID
@@ -450,22 +615,12 @@ func (api *TransactionAPI) GetTransactionProof(params json.RawMessage) (interfac
 			continue
 		}
 
-		txNode, found := block.Body.Transactions.GetTransaction(args.TxID)
-		if found && txNode != nil {
-			// In a real implementation, you would generate a Merkle proof here
-			// using the Patricia trie's proof generation functionality
-
-			// For this example, we'll create a simplified proof structure
-			merkleRoot := block.Header.MerkleRoot
-
-			proof := map[string]interface{}{
-				"txid":       args.TxID,
-				"merkleRoot": merkleRoot,
-				"blockHash":  block.Hash(),
-				"height":     block.Header.BlockNumber,
-				// In a real implementation, this would be an array of hashes forming the proof path
-				"proof":    []string{"proof_element_1", "proof_element_2"},
-				"verified": true,
+		_, found := block.Body.Transactions.GetTransaction(args.TxID)
+		if found {
+			// Use the block's method to generate a Merkle proof
+			proof, err := block.GenerateMerkleProof(args.TxID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate Merkle proof: %v", err)
 			}
 
 			return proof, nil
@@ -485,22 +640,31 @@ func (api *TransactionAPI) DecodeTransaction(params json.RawMessage) (interface{
 		return nil, fmt.Errorf("invalid parameters: %v", err)
 	}
 
-	// Decode the raw transaction
-	// In a real implementation, you would parse the hex-encoded transaction
-	// For this example, we'll just return a simplified placeholder
+	// Use the blockchain's function to deserialize the transaction
+	tx, err := blockchain.DeserializeTransactionFromHex(args.RawTransaction)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode transaction: %v", err)
+	}
 
-	// Example: tx, err := blockchain.DeserializeTransactionFromHex(args.RawTransaction)
-	// We'll simulate this with a placeholder response
-
+	// Create a detailed response with transaction details
 	decodedTx := map[string]interface{}{
-		"version":   1,
-		"lockTime":  0,
-		"size":      225,
-		"inputs":    []string{"simulated_input_1", "simulated_input_2"},
-		"outputs":   []string{"simulated_output_1", "simulated_output_2"},
-		"hex":       args.RawTransaction,
-		"txid":      "simulated_txid",
-		"timestamp": time.Now().Unix(),
+		"txid":         tx.TransactionID,
+		"sender":       tx.Sender,
+		"receiver":     tx.Receiver,
+		"amount":       tx.Amount,
+		"timestamp":    tx.Timestamp,
+		"nonce":        tx.Nonce,
+		"gasPrice":     tx.GasPrice,
+		"gasLimit":     tx.GasLimit,
+		"gasUsed":      tx.GasUsed,
+		"gasFee":       tx.GasFee,
+		"txType":       tx.TxType,
+		"signature":    tx.Signature,
+		"rawHex":       args.RawTransaction,
+		"inputs":       tx.Inputs,
+		"outputs":      tx.Outputs,
+		"priority":     tx.Priority,
+		"maxFeePerGas": tx.MaxFeePerGas,
 	}
 
 	return decodedTx, nil
@@ -923,40 +1087,23 @@ func (api *TransactionAPI) TraceBlock(params json.RawMessage) (interface{}, erro
 		}
 	}
 
-	// In a real implementation, you would retrieve execution traces for each transaction
-	// We'll create a simplified trace structure for this example
+	// Generate the block trace
+	trace := block.GenerateBlockTrace()
 
-	var txTraces []map[string]interface{}
-	if block.Body != nil && block.Body.Transactions != nil {
-		txs := block.Body.Transactions.GetAllTransactions()
-		for _, tx := range txs {
-			trace := map[string]interface{}{
-				"txid":      tx.TransactionID,
-				"sender":    tx.Sender,
-				"receiver":  tx.Receiver,
-				"amount":    tx.Amount,
-				"gasUsed":   tx.GasUsed,
-				"gasFee":    tx.GasFee,
-				"timestamp": tx.Timestamp,
-				"status":    "success",
-				// In a real implementation, you would include detailed execution steps here
-			}
-			txTraces = append(txTraces, trace)
-		}
-	}
-
+	// Format the response
 	result := map[string]interface{}{
-		"blockHash":     block.Hash(),
-		"height":        block.Header.BlockNumber,
-		"timestamp":     block.Header.Timestamp,
-		"miner":         block.Header.MinedBy,
-		"validator":     block.Header.ValidatorAddress,
-		"difficulty":    block.Header.Difficulty,
-		"gasLimit":      block.Header.GasLimit,
-		"gasUsed":       block.Header.GasUsed,
-		"stateRoot":     block.Header.StateRoot,
-		"transactions":  txTraces,
-		"executionTime": 0.5, // Simulated execution time in seconds
+		"blockHash":        trace.BlockHash,
+		"blockHeight":      trace.BlockNumber,
+		"timestamp":        trace.Timestamp,
+		"previousHash":     trace.PreviousBlockHash,
+		"merkleRoot":       trace.MerkleRoot,
+		"stateRoot":        trace.StateRoot,
+		"miner":            trace.MinerAddress,
+		"validator":        trace.ValidatorAddress,
+		"gasUsed":          trace.TotalGasUsed,
+		"transactionCount": len(trace.TransactionTraces),
+		"transactions":     trace.TransactionTraces,
+		"executionTimeMs":  trace.ExecutionTimeMs,
 	}
 
 	return result, nil

@@ -178,6 +178,30 @@ func DeserializeTransaction(data []byte) (*Transaction, error) {
 	return &tx, nil
 }
 
+// DeserializeTransactionFromHex deserializes a transaction from a hex-encoded string
+func DeserializeTransactionFromHex(hexStr string) (*Transaction, error) {
+	// Decode the hex string to bytes
+	data, err := hex.DecodeString(hexStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode hex string: %v", err)
+	}
+
+	// Deserialize the transaction
+	return DeserializeTransaction(data)
+}
+
+// SerializeTransactionToHex serializes a transaction to a hex-encoded string
+func SerializeTransactionToHex(tx *Transaction) (string, error) {
+	// Serialize the transaction
+	data, err := SerializeTransaction(tx)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize transaction: %v", err)
+	}
+
+	// Encode the data to hex
+	return hex.EncodeToString(data), nil
+}
+
 // Equals compares two transactions for deep equality
 func (tx *Transaction) Equals(other *Transaction) bool {
 	if tx.TransactionID != other.TransactionID ||

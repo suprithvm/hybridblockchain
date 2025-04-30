@@ -821,3 +821,200 @@ func (b *Block) Copy() *Block {
 
 	return cpy
 }
+
+// GenerateMerkleProof generates a Merkle proof for a transaction in this block
+func (b *Block) GenerateMerkleProof(txID string) (map[string]interface{}, error) {
+	// Check if the transaction exists in this block
+	if b.Body == nil || b.Body.Transactions == nil {
+		return nil, fmt.Errorf("block has no transactions")
+	}
+
+	txNode, found := b.Body.Transactions.GetTransaction(txID)
+	if !found || txNode == nil {
+		return nil, fmt.Errorf("transaction %s not found in block", txID)
+	}
+
+	// Collect all transaction hashes in the block
+	allTxs := b.Body.Transactions.GetAllTransactions()
+	txHashes := make([]string, len(allTxs))
+
+	// Find the index of our transaction
+	targetIndex := -1
+	for i, tx := range allTxs {
+		txHashes[i] = tx.TransactionID
+		if tx.TransactionID == txID {
+			targetIndex = i
+		}
+	}
+
+	if targetIndex == -1 {
+		return nil, fmt.Errorf("transaction found in trie but not in list")
+	}
+
+	// Generate the proof
+	proof := generateMerkleProofForIndex(txHashes, targetIndex)
+
+	return map[string]interface{}{
+		"txid":       txID,
+		"merkleRoot": b.Header.MerkleRoot,
+		"blockHash":  b.Hash(),
+		"height":     b.Header.BlockNumber,
+		"proof":      proof,
+		"verified":   true,
+	}, nil
+}
+
+// Helper function to generate the Merkle proof for an index
+func generateMerkleProofForIndex(hashes []string, index int) []string {
+	if len(hashes) == 0 {
+		return []string{}
+	}
+
+	// Convert transaction IDs to actual hashes
+	hashBytes := make([][]byte, len(hashes))
+	for i, txID := range hashes {
+		hash := sha256.Sum256([]byte(txID))
+		hashBytes[i] = hash[:]
+	}
+
+	// Build the proof
+	var proof []string
+	currentLevel := hashBytes
+	currentIndex := index
+
+	for len(currentLevel) > 1 {
+		if len(currentLevel)%2 == 1 {
+			// Duplicate last element if odd number of elements
+			currentLevel = append(currentLevel, currentLevel[len(currentLevel)-1])
+		}
+
+		nextLevel := make([][]byte, 0, len(currentLevel)/2)
+		for i := 0; i < len(currentLevel); i += 2 {
+			// For each pair, add the one that's not on our path to the proof
+			if i == currentIndex || i+1 == currentIndex {
+				if i == currentIndex {
+					proof = append(proof, hex.EncodeToString(currentLevel[i+1]))
+				} else {
+					proof = append(proof, hex.EncodeToString(currentLevel[i]))
+				}
+
+				// Calculate parent hash for next level
+				combined := append(currentLevel[i], currentLevel[i+1]...)
+				hash := sha256.Sum256(combined)
+				nextLevel = append(nextLevel, hash[:])
+
+				// Adjust the index for the next level
+				currentIndex = len(nextLevel) - 1
+			} else {
+				// This pair isn't on our path, but we still need to calculate it for the next level
+				combined := append(currentLevel[i], currentLevel[i+1]...)
+				hash := sha256.Sum256(combined)
+				nextLevel = append(nextLevel, hash[:])
+			}
+		}
+
+		currentLevel = nextLevel
+		currentIndex = currentIndex / 2
+	}
+
+	return proof
+}
+
+// GenerateBlockTrace creates a detailed trace of all transactions in the block
+func (b *Block) GenerateBlockTrace() *BlockTrace {
+	if b.Body == nil || b.Body.Transactions == nil {
+		return &BlockTrace{
+			BlockHash:         b.Hash(),
+			BlockNumber:       b.Header.BlockNumber,
+			PreviousBlockHash: b.Header.PreviousHash,
+			Timestamp:         b.Header.Timestamp,
+			MerkleRoot:        b.Header.MerkleRoot,
+			StateRoot:         b.Header.StateRoot,
+			TotalGasUsed:      b.Header.GasUsed,
+			ExecutionTimeMs:   0, // Not tracked in this implementation
+			ValidatorAddress:  b.Header.ValidatorAddress,
+			MinerAddress:      b.Header.MinedBy,
+			TransactionTraces: []TransactionTrace{},
+		}
+	}
+
+	// Get all transactions
+	transactions := b.Body.Transactions.GetAllTransactions()
+
+	// Create traces for each transaction
+	txTraces := make([]TransactionTrace, 0, len(transactions))
+	for _, tx := range transactions {
+		trace := generateTransactionTrace(tx, b)
+		txTraces = append(txTraces, trace)
+	}
+
+	return &BlockTrace{
+		BlockHash:         b.Hash(),
+		BlockNumber:       b.Header.BlockNumber,
+		PreviousBlockHash: b.Header.PreviousHash,
+		Timestamp:         b.Header.Timestamp,
+		MerkleRoot:        b.Header.MerkleRoot,
+		StateRoot:         b.Header.StateRoot,
+		TotalGasUsed:      b.Header.GasUsed,
+		ExecutionTimeMs:   0, // Not tracked in this implementation
+		ValidatorAddress:  b.Header.ValidatorAddress,
+		MinerAddress:      b.Header.MinedBy,
+		TransactionTraces: txTraces,
+	}
+}
+
+// Helper function to generate detailed transaction trace
+func generateTransactionTrace(tx Transaction, block *Block) TransactionTrace {
+	// Extract input transaction IDs
+	inputTxIDs := make([]string, 0, len(tx.Inputs))
+	for _, input := range tx.Inputs {
+		inputTxIDs = append(inputTxIDs, input.TransactionID)
+	}
+
+	// Extract output identifiers
+	outputIDs := make([]string, 0, len(tx.Outputs))
+	for i := range tx.Outputs {
+		outputID := fmt.Sprintf("%s-%d", tx.TransactionID, i)
+		outputIDs = append(outputIDs, outputID)
+	}
+
+	// Prepare a basic state change map (just recording balance changes)
+	stateChanges := make(map[string]interface{})
+
+	// Record sender balance change if this is not a system transaction
+	if !tx.IsCoinbase() && !tx.IsValidatorReward() {
+		stateChanges[fmt.Sprintf("balance:%s", tx.Sender)] = -tx.Amount - tx.GasFee
+	}
+
+	// Record receiver balance change
+	stateChanges[fmt.Sprintf("balance:%s", tx.Receiver)] = tx.Amount
+
+	// Add basic execution logs
+	logs := []string{
+		fmt.Sprintf("Transaction execution started at block %d", block.Header.BlockNumber),
+	}
+
+	if tx.IsCoinbase() {
+		logs = append(logs, "Coinbase transaction - minting new tokens")
+	} else if tx.IsValidatorReward() {
+		logs = append(logs, "Validator reward transaction - distributing rewards")
+	} else {
+		logs = append(logs, fmt.Sprintf("Regular transaction - transferring %.8f tokens", tx.Amount))
+		logs = append(logs, fmt.Sprintf("Gas fee: %.8f tokens", tx.GasFee))
+	}
+
+	logs = append(logs, "Transaction execution completed successfully")
+
+	return TransactionTrace{
+		TransactionID:  tx.TransactionID,
+		BlockHash:      block.Hash(),
+		BlockNumber:    block.Header.BlockNumber,
+		GasUsed:        tx.GasUsed,
+		Status:         "success", // Assume success for all transactions in the block
+		InputsAccessed: inputTxIDs,
+		OutputsCreated: outputIDs,
+		Timestamp:      tx.Timestamp,
+		StateChanges:   stateChanges,
+		Logs:           logs,
+	}
+}

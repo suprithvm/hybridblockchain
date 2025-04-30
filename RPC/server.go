@@ -5,6 +5,7 @@ import (
 	"blockchain-core/blockchain"
 	"context"
 	"crypto/ecdsa"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -305,7 +306,8 @@ func (s *RPCServer) registerAllHandlers() {
 	s.registerMethod("getBalance", transactionAPI.GetBalance)
 	s.registerMethod("getUTXOs", transactionAPI.GetUTXOs)
 	s.registerMethod("getAccountState", transactionAPI.GetAccountState)
-	s.registerMethod("createTransaction", transactionAPI.CreateTransaction)
+	s.registerMethod("createUnsignedTransaction", transactionAPI.CreateUnsignedTransaction)
+	s.registerMethod("createTransaction", transactionAPI.CreateUnsignedTransaction) // Alias for backward compatibility
 	s.registerMethod("sendTransaction", transactionAPI.SendTransaction)
 	s.registerMethod("getTransaction", transactionAPI.GetTransaction)
 	s.registerMethod("getPendingTransactions", transactionAPI.GetPendingTransactions)
@@ -468,30 +470,79 @@ func (s *RPCServer) handleGetUTXOs(params json.RawMessage) (interface{}, *RPCErr
 // handleSendTransaction sends a new transaction
 func (s *RPCServer) handleSendTransaction(params json.RawMessage) (interface{}, *RPCError) {
 	var args struct {
-		From     string  `json:"from"`
-		To       string  `json:"to"`
-		Amount   float64 `json:"amount"`
-		GasPrice uint64  `json:"gasPrice,omitempty"`
-		GasLimit uint64  `json:"gasLimit,omitempty"`
+		From           string  `json:"from"`
+		To             string  `json:"to"`
+		Amount         float64 `json:"amount"`
+		GasPrice       uint64  `json:"gasPrice,omitempty"`
+		GasLimit       uint64  `json:"gasLimit,omitempty"`
+		Signature      string  `json:"signature"`
+		RawTransaction string  `json:"rawTransaction"`
 	}
 
 	if err := json.Unmarshal(params, &args); err != nil {
 		return nil, &RPCError{Code: ErrInvalidParams, Message: "Invalid parameters", Data: err.Error()}
 	}
 
-	// Create and validate transaction
-	tx, err := blockchain.NewTransaction(args.From, args.To, args.Amount, args.GasPrice, args.GasLimit)
-	if err != nil {
-		return nil, &RPCError{Code: ErrServerError, Message: "Transaction creation failed", Data: err.Error()}
+	var tx *blockchain.Transaction
+
+	// Handle pre-signed transaction
+	if args.RawTransaction != "" {
+		// Deserialize the complete transaction
+		txBytes, err := hex.DecodeString(args.RawTransaction)
+		if err != nil {
+			return nil, &RPCError{Code: ErrInvalidParams, Message: "Invalid transaction encoding", Data: err.Error()}
+		}
+
+		tx = &blockchain.Transaction{}
+		if err := json.Unmarshal(txBytes, tx); err != nil {
+			return nil, &RPCError{Code: ErrServerError, Message: "Failed to deserialize transaction", Data: err.Error()}
+		}
+
+		// Verify the signature
+		if !tx.VerifySignature() {
+			return nil, &RPCError{Code: ErrServerError, Message: "Transaction signature verification failed", Data: nil}
+		}
+	} else {
+		// We need signature for non-raw transactions
+		if args.Signature == "" {
+			return nil, &RPCError{Code: ErrInvalidParams, Message: "Transaction signature is required", Data: nil}
+		}
+
+		// Create unsigned transaction
+		var err error
+		tx, err = blockchain.NewTransaction(args.From, args.To, args.Amount, args.GasPrice, args.GasLimit)
+		if err != nil {
+			return nil, &RPCError{Code: ErrServerError, Message: "Transaction creation failed", Data: err.Error()}
+		}
+
+		// Apply the provided signature
+		tx.Signature = args.Signature
+
+		// Verify the signature
+		if !tx.VerifySignature() {
+			return nil, &RPCError{Code: ErrServerError, Message: "Transaction signature verification failed", Data: nil}
+		}
 	}
 
 	// Broadcast transaction
-	err = s.node.BroadcastTransaction(tx, nil)
+	err := s.node.BroadcastTransaction(tx, nil)
 	if err != nil {
 		return nil, &RPCError{Code: ErrServerError, Message: "Broadcasting transaction failed", Data: err.Error()}
 	}
 
-	return tx.TransactionID, nil
+	// Return comprehensive transaction data
+	return map[string]interface{}{
+		"txid":          tx.TransactionID,
+		"status":        "success",
+		"from":          tx.Sender,
+		"to":            tx.Receiver,
+		"amount":        tx.Amount,
+		"timestamp":     tx.Timestamp,
+		"gasPrice":      tx.GasPrice,
+		"gasLimit":      tx.GasLimit,
+		"inMempool":     true,
+		"confirmations": 0,
+	}, nil
 }
 
 // Implement proper transaction retrieval

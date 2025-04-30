@@ -195,7 +195,7 @@ func (m *Mempool) RemoveTransaction(txID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	newTxs := make([]Transaction, 0)
+	newTxs := make([]Transaction, 0, len(m.Transactions))
 	for _, tx := range m.Transactions {
 		if tx.TransactionID != txID {
 			newTxs = append(newTxs, tx)
@@ -244,12 +244,30 @@ func (m *Mempool) ClearProcessedTransactions(processedTxs []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	fmt.Printf("DEBUG: Clearing processed transactions: %v\n", processedTxs)
+	// Create a map for faster lookups
+	processedMap := make(map[string]bool, len(processedTxs))
 	for _, txID := range processedTxs {
-		m.RemoveTransaction(txID)
+		processedMap[txID] = true
 	}
 
-	fmt.Printf("DEBUG: Remaining transactions in mempool: %d\n", len(m.Transactions))
+	// Count how many we have before
+	initialCount := len(m.Transactions)
+
+	// Filter out processed transactions
+	newTxs := make([]Transaction, 0, initialCount)
+	for _, tx := range m.Transactions {
+		if !processedMap[tx.TransactionID] {
+			newTxs = append(newTxs, tx)
+		}
+	}
+
+	// Update the transactions slice
+	m.Transactions = newTxs
+
+	// Log the result
+	removedCount := initialCount - len(m.Transactions)
+	log.Printf("🧹 Removed %d/%d transactions from mempool", removedCount, len(processedTxs))
+	log.Printf("📊 Mempool now contains %d transactions", len(m.Transactions))
 }
 
 // BroadcastPendingTransactions broadcasts all transactions in the mempool.

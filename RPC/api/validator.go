@@ -2,8 +2,11 @@ package api
 
 import (
 	"blockchain-core/blockchain"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"time"
 )
 
 // ValidatorAPI handles validator-related RPC methods
@@ -90,9 +93,10 @@ func (api *ValidatorAPI) GetStakeInfo(params json.RawMessage) (interface{}, erro
 // StakeTokens stakes tokens to become validator
 func (api *ValidatorAPI) StakeTokens(params json.RawMessage) (interface{}, error) {
 	var args struct {
-		Address  string  `json:"address"`
-		Amount   float64 `json:"amount"`
-		Mnemonic string  `json:"mnemonic"`
+		Address     string  `json:"address"`
+		Amount      float64 `json:"amount"`
+		Signature   string  `json:"signature"`
+		Transaction string  `json:"transaction"`
 	}
 
 	if err := json.Unmarshal(params, &args); err != nil {
@@ -105,20 +109,6 @@ func (api *ValidatorAPI) StakeTokens(params json.RawMessage) (interface{}, error
 	}
 	if args.Amount <= 0 {
 		return nil, fmt.Errorf("amount must be greater than 0")
-	}
-	if args.Mnemonic == "" {
-		return nil, fmt.Errorf("mnemonic is required")
-	}
-
-	// Recover wallet from mnemonic
-	wallet, err := blockchain.RecoverWalletFromMnemonic(args.Mnemonic)
-	if err != nil {
-		return nil, fmt.Errorf("failed to recover wallet: %v", err)
-	}
-
-	// Verify that the wallet address matches the staking address
-	if wallet.Address != args.Address {
-		return nil, fmt.Errorf("wallet address does not match staking address")
 	}
 
 	// Get stake pool
@@ -133,26 +123,60 @@ func (api *ValidatorAPI) StakeTokens(params json.RawMessage) (interface{}, error
 		return nil, fmt.Errorf("insufficient balance: %f (required %f)", balance, args.Amount)
 	}
 
-	// Create stake transaction (in a real implementation, this would be a specific transaction type)
-	stakeTransaction, err := blockchain.NewTransaction(
-		args.Address,
-		"STAKEPOOL", // Special address for the stake pool
-		args.Amount,
-		0, // No gas price for staking
-		0, // No gas limit for staking
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stake transaction: %v", err)
+	var stakeTransaction *blockchain.Transaction
+
+	// Handle pre-signed transaction
+	if args.Transaction != "" {
+		// Deserialize the complete transaction
+		txBytes, err := hex.DecodeString(args.Transaction)
+		if err != nil {
+			return nil, fmt.Errorf("invalid transaction encoding: %v", err)
+		}
+
+		stakeTransaction = &blockchain.Transaction{}
+		if err := json.Unmarshal(txBytes, stakeTransaction); err != nil {
+			return nil, fmt.Errorf("failed to deserialize transaction: %v", err)
+		}
+
+		// Verify the signature
+		if !stakeTransaction.VerifySignature() {
+			return nil, fmt.Errorf("transaction signature verification failed")
+		}
+	} else {
+		// Create stake transaction
+		var err error
+		stakeTransaction, err = blockchain.NewTransaction(
+			args.Address,
+			"STAKEPOOL", // Special address for the stake pool
+			args.Amount,
+			0, // No gas price for staking
+			0, // No gas limit for staking
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create stake transaction: %v", err)
+		}
+
+		// Require signature if no full transaction was provided
+		if args.Signature == "" {
+			return nil, fmt.Errorf("transaction signature is required")
+		}
+
+		// Apply provided signature
+		stakeTransaction.Signature = args.Signature
+
+		// Verify signature
+		if !stakeTransaction.VerifySignature() {
+			return nil, fmt.Errorf("transaction signature verification failed")
+		}
 	}
 
-	// Sign transaction
-	if err := wallet.SignTransaction(stakeTransaction); err != nil {
-		return nil, fmt.Errorf("failed to sign transaction: %v", err)
+	// Broadcast transaction to network
+	if err := api.node.BroadcastTransaction(stakeTransaction, nil); err != nil {
+		return nil, fmt.Errorf("failed to broadcast transaction: %v", err)
 	}
 
 	// Process stake by calling AddStake with the correct parameters
-	// Notice AddStake takes 3 parameters: address, hostID, amount
-	err = stakePool.AddStake(args.Address, "", args.Amount) // Empty string for hostID in this case
+	err := stakePool.AddStake(args.Address, "", args.Amount) // Empty string for hostID in this case
 	if err != nil {
 		return nil, fmt.Errorf("failed to add stake: %v", err)
 	}
@@ -163,15 +187,17 @@ func (api *ValidatorAPI) StakeTokens(params json.RawMessage) (interface{}, error
 		"transactionId": stakeTransaction.TransactionID,
 		"address":       args.Address,
 		"amount":        args.Amount,
+		"status":        "staked",
 	}, nil
 }
 
 // UnstakeTokens unstakes tokens
 func (api *ValidatorAPI) UnstakeTokens(params json.RawMessage) (interface{}, error) {
 	var args struct {
-		Address  string  `json:"address"`
-		Amount   float64 `json:"amount"`
-		Mnemonic string  `json:"mnemonic"`
+		Address     string  `json:"address"`
+		Amount      float64 `json:"amount"`
+		Signature   string  `json:"signature"`
+		Transaction string  `json:"transaction"`
 	}
 
 	if err := json.Unmarshal(params, &args); err != nil {
@@ -184,20 +210,6 @@ func (api *ValidatorAPI) UnstakeTokens(params json.RawMessage) (interface{}, err
 	}
 	if args.Amount <= 0 {
 		return nil, fmt.Errorf("amount must be greater than 0")
-	}
-	if args.Mnemonic == "" {
-		return nil, fmt.Errorf("mnemonic is required")
-	}
-
-	// Recover wallet from mnemonic
-	wallet, err := blockchain.RecoverWalletFromMnemonic(args.Mnemonic)
-	if err != nil {
-		return nil, fmt.Errorf("failed to recover wallet: %v", err)
-	}
-
-	// Verify that the wallet address matches the staking address
-	if wallet.Address != args.Address {
-		return nil, fmt.Errorf("wallet address does not match staking address")
 	}
 
 	// Get stake pool
@@ -215,21 +227,60 @@ func (api *ValidatorAPI) UnstakeTokens(params json.RawMessage) (interface{}, err
 		return nil, fmt.Errorf("insufficient staked amount: %f (requested %f)", float64(stake.Amount)/100000000, args.Amount)
 	}
 
-	// Create unstake transaction (in a real implementation, this would be a specific transaction type)
-	unstakeTransaction, err := blockchain.NewTransaction(
-		"STAKEPOOL", // Special address for the stake pool
-		args.Address,
-		args.Amount,
-		0, // No gas price for unstaking
-		0, // No gas limit for unstaking
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create unstake transaction: %v", err)
+	var unstakeTransaction *blockchain.Transaction
+
+	// Handle pre-signed transaction
+	if args.Transaction != "" {
+		// Deserialize the complete transaction
+		txBytes, err := hex.DecodeString(args.Transaction)
+		if err != nil {
+			return nil, fmt.Errorf("invalid transaction encoding: %v", err)
+		}
+
+		unstakeTransaction = &blockchain.Transaction{}
+		if err := json.Unmarshal(txBytes, unstakeTransaction); err != nil {
+			return nil, fmt.Errorf("failed to deserialize transaction: %v", err)
+		}
+
+		// Verify the signature
+		if !unstakeTransaction.VerifySignature() {
+			return nil, fmt.Errorf("transaction signature verification failed")
+		}
+	} else {
+		// Create unstake transaction
+		var err error
+		unstakeTransaction, err = blockchain.NewTransaction(
+			"STAKEPOOL", // Special address for the stake pool
+			args.Address,
+			args.Amount,
+			0, // No gas price for unstaking
+			0, // No gas limit for unstaking
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create unstake transaction: %v", err)
+		}
+
+		// Require signature if no full transaction was provided
+		if args.Signature == "" {
+			return nil, fmt.Errorf("transaction signature is required")
+		}
+
+		// Apply provided signature
+		unstakeTransaction.Signature = args.Signature
+
+		// Verify signature
+		if !unstakeTransaction.VerifySignature() {
+			return nil, fmt.Errorf("transaction signature verification failed")
+		}
+	}
+
+	// Broadcast transaction to network
+	if err := api.node.BroadcastTransaction(unstakeTransaction, nil); err != nil {
+		return nil, fmt.Errorf("failed to broadcast transaction: %v", err)
 	}
 
 	// Process unstake with proper error handling
-	// The RemoveStake function takes float64 as the second parameter, not uint64
-	err = stakePool.RemoveStake(args.Address, args.Amount)
+	err := stakePool.RemoveStake(args.Address, args.Amount)
 	if err != nil {
 		return nil, fmt.Errorf("failed to remove stake: %v", err)
 	}
@@ -240,6 +291,7 @@ func (api *ValidatorAPI) UnstakeTokens(params json.RawMessage) (interface{}, err
 		"transactionId": unstakeTransaction.TransactionID,
 		"address":       args.Address,
 		"amount":        args.Amount,
+		"status":        "unstaked",
 	}, nil
 }
 
@@ -257,24 +309,50 @@ func (api *ValidatorAPI) GetValidatorRewards(params json.RawMessage) (interface{
 		return nil, fmt.Errorf("validator address is required")
 	}
 
-	// In a real implementation, validator rewards would be tracked and retrieved from the database
-	// For this example, we'll return a simulated response
-	rewardsList := []map[string]interface{}{
-		{
-			"blockHeight": 100,
-			"amount":      10.0,
-			"timestamp":   1625097600, // Example timestamp
-			"type":        "validator_reward",
-		},
-		{
-			"blockHeight": 200,
-			"amount":      15.0,
-			"timestamp":   1625184000, // Example timestamp
-			"type":        "validator_reward",
-		},
+	// Get UTXO pool
+	utxoPool := api.node.UTXOPool
+	if utxoPool == nil {
+		return nil, fmt.Errorf("UTXO pool not available")
 	}
 
-	totalRewards := 25.0 // Sum of all rewards
+	// Get all UTXOs for the address
+	allUTXOs := utxoPool.GetUTXOsForAddress(args.Address)
+
+	// Filter for validator reward transactions
+	var rewardsList []map[string]interface{}
+	var totalRewards float64
+
+	for _, utxo := range allUTXOs {
+		// Check for signatures or indicators that this was a validator reward
+		// In real UTXO blockchains, you would typically identify validator rewards
+		// by the transaction type or some metadata in the UTXO
+
+		// Here we're looking at the transaction input (if it's "system", it's likely a reward)
+		// In a real implementation, you'd have a more reliable way to identify rewards
+		if utxo.TransactionID != "" {
+			// Try to get the block that contains this transaction
+			blockWithReward := api.blockchain.GetBlockByHeight(utxo.BlockHeight)
+			if blockWithReward != nil {
+				// Look for transactions in this block
+				for _, tx := range blockWithReward.Body.Transactions.GetAllTransactions() {
+					// Check if this is our UTXO's transaction and is of type validator reward
+					if tx.TransactionID == utxo.TransactionID && tx.TxType == blockchain.TX_VALIDATOR_REWARD {
+						rewardEvent := map[string]interface{}{
+							"blockHeight": utxo.BlockHeight,
+							"amount":      utxo.Amount,
+							"timestamp":   utxo.Timestamp,
+							"type":        "validator_reward",
+							"txId":        utxo.TransactionID,
+						}
+
+						rewardsList = append(rewardsList, rewardEvent)
+						totalRewards += utxo.Amount
+						break
+					}
+				}
+			}
+		}
+	}
 
 	return map[string]interface{}{
 		"address":      args.Address,
@@ -305,23 +383,91 @@ func (api *ValidatorAPI) GetDailyValidatorRewards(params json.RawMessage) (inter
 		args.Days = 365 // Cap at 365 days
 	}
 
-	// In a real implementation, validator rewards would be tracked daily
-	// For this example, we'll return a simulated response
-
-	// Generate sample data
-	dailyRewards := make([]map[string]interface{}, args.Days)
-
-	for i := 0; i < args.Days; i++ {
-		// Simulated daily reward, increasing slightly each day
-		rewardAmount := 10.0 + float64(i)*0.1
-
-		dailyRewards[i] = map[string]interface{}{
-			"day":       i + 1,
-			"timestamp": 1625097600 + int64(i*86400), // Example timestamp, increasing by 1 day each time
-			"reward":    rewardAmount,
-			"blocks":    24, // Simulated number of blocks validated that day
-		}
+	// Get UTXO pool
+	utxoPool := api.node.UTXOPool
+	if utxoPool == nil {
+		return nil, fmt.Errorf("UTXO pool not available")
 	}
+
+	// Get validator rewards using the GetValidatorRewards function
+	rewardsResult, err := api.GetValidatorRewards(params)
+	if err != nil {
+		return nil, err
+	}
+
+	// Group rewards by day
+	rewardsMap, ok := rewardsResult.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid rewards data format")
+	}
+
+	rewardsList, ok := rewardsMap["rewards"].([]map[string]interface{})
+	if !ok {
+		rewardsList = []map[string]interface{}{} // Default to empty list
+	}
+
+	// Map to store daily rewards
+	dailyRewardsMap := make(map[int64]map[string]interface{})
+
+	// Current time to calculate relative days
+	currentTime := time.Now().Unix()
+
+	// Calculate the timestamp for the earliest day we care about
+	earliestTime := currentTime - int64(args.Days*86400)
+
+	// Process each reward and group by day
+	for _, reward := range rewardsList {
+		timestamp, ok := reward["timestamp"].(int64)
+		if !ok {
+			continue // Skip if timestamp is invalid
+		}
+
+		// Skip rewards older than our requested days
+		if timestamp < earliestTime {
+			continue
+		}
+
+		// Convert timestamp to day (UTC midnight)
+		dayTimestamp := (timestamp / 86400) * 86400
+
+		// Calculate relative day (0 = today, 1 = yesterday, etc.)
+		relativeDay := int((currentTime - dayTimestamp) / 86400)
+
+		// Skip if beyond our requested days
+		if relativeDay >= args.Days {
+			continue
+		}
+
+		// Get or create the daily entry
+		dayEntry, exists := dailyRewardsMap[dayTimestamp]
+		if !exists {
+			dayEntry = map[string]interface{}{
+				"day":       relativeDay,
+				"timestamp": dayTimestamp,
+				"reward":    0.0,
+				"blocks":    0,
+			}
+		}
+
+		// Add this reward to the day
+		rewardAmount, _ := reward["amount"].(float64)
+		dayEntry["reward"] = dayEntry["reward"].(float64) + rewardAmount
+		dayEntry["blocks"] = dayEntry["blocks"].(int) + 1
+
+		// Store updated entry
+		dailyRewardsMap[dayTimestamp] = dayEntry
+	}
+
+	// Convert map to sorted slice
+	var dailyRewards []map[string]interface{}
+	for _, dayEntry := range dailyRewardsMap {
+		dailyRewards = append(dailyRewards, dayEntry)
+	}
+
+	// Sort by day, ascending
+	sort.Slice(dailyRewards, func(i, j int) bool {
+		return dailyRewards[i]["day"].(int) < dailyRewards[j]["day"].(int)
+	})
 
 	// Calculate total rewards
 	totalRewards := 0.0
@@ -329,6 +475,7 @@ func (api *ValidatorAPI) GetDailyValidatorRewards(params json.RawMessage) (inter
 		totalRewards += day["reward"].(float64)
 	}
 
+	// Return the result
 	return map[string]interface{}{
 		"address":      args.Address,
 		"days":         args.Days,
@@ -391,7 +538,7 @@ func (api *ValidatorAPI) GetValidatorPerformance(params json.RawMessage) (interf
 		return nil, fmt.Errorf("validator not found: %s", args.Address)
 	}
 
-	// Get performance metrics
+	// Get performance metrics directly from the validator object
 	var performance map[string]interface{}
 
 	if validator.Performance != nil {
@@ -400,7 +547,7 @@ func (api *ValidatorAPI) GetValidatorPerformance(params json.RawMessage) (interf
 			"blocksValidated":   validator.Performance.BlocksValidated,
 			"missedValidations": validator.Performance.MissedValidations,
 			"uptimePercentage":  validator.Performance.UptimePercentage,
-			"lastUpdate":        validator.Performance.LastUpdate,
+			"lastUpdate":        validator.Performance.LastUpdate.Unix(),
 		}
 	} else {
 		performance = map[string]interface{}{
@@ -412,12 +559,38 @@ func (api *ValidatorAPI) GetValidatorPerformance(params json.RawMessage) (interf
 		}
 	}
 
+	// Get reward information for this validator
+	rewardsData, err := api.GetValidatorRewards(params)
+	if err == nil {
+		if rewardsMap, ok := rewardsData.(map[string]interface{}); ok {
+			if totalRewards, ok := rewardsMap["totalRewards"]; ok {
+				performance["totalRewards"] = totalRewards
+			}
+		}
+	}
+
+	// Calculate additional metrics if possible
+
+	// Get total blocks in the blockchain to calculate participation percentage
+	latestBlock := api.blockchain.GetLatestBlock()
+	if latestBlock.Header.BlockNumber > 0 {
+		totalBlocks := latestBlock.Header.BlockNumber
+
+		// Calculate participation percentage
+		if validator.Performance != nil && validator.Performance.BlocksValidated > 0 {
+			participationRate := float64(validator.Performance.BlocksValidated) / float64(totalBlocks) * 100
+			performance["participationRate"] = participationRate
+		} else {
+			performance["participationRate"] = 0.0
+		}
+	}
+
 	// Add general validator metrics
 	result := map[string]interface{}{
 		"address":     args.Address,
 		"status":      validator.Status,
 		"score":       validator.Score,
-		"lastActive":  validator.LastActive,
+		"lastActive":  validator.LastActive.Unix(),
 		"performance": performance,
 		"violations":  validator.Violations,
 		"timeouts":    validator.Timeouts,
@@ -528,7 +701,7 @@ func (api *ValidatorAPI) GetTopValidators(params json.RawMessage) (interface{}, 
 
 // GetValidatorStats gets comprehensive validator statistics
 func (api *ValidatorAPI) GetValidatorStats(params json.RawMessage) (interface{}, error) {
-	// Get validators
+	// Get validators from blockchain directly
 	validators := api.blockchain.Validators
 
 	// Count validators by status
@@ -536,6 +709,13 @@ func (api *ValidatorAPI) GetValidatorStats(params json.RawMessage) (interface{},
 	slashedValidators := 0
 	probationValidators := 0
 	totalValidators := len(validators)
+
+	// Track total and average statistics
+	totalScore := uint64(0)
+	totalBlocksValidated := uint64(0)
+	totalBlocksProposed := uint64(0)
+	totalUptime := float64(0)
+	validatorsWithPerformance := 0
 
 	for _, val := range validators {
 		switch val.Status {
@@ -546,38 +726,56 @@ func (api *ValidatorAPI) GetValidatorStats(params json.RawMessage) (interface{},
 		case blockchain.ValidatorStatusProbation:
 			probationValidators++
 		}
-	}
 
-	// Get stake pool
-	stakePool := api.blockchain.GetStakePool()
-	var totalStakeTokens float64 = 0
+		// Accumulate validator metrics for averages
+		totalScore += val.Score
 
-	if stakePool != nil {
-		// Manual calculation to avoid using GetTotalStake
-		for _, stake := range stakePool.Stakes {
-			totalStakeTokens += float64(stake.Amount) / 100000000.0
+		if val.Performance != nil {
+			totalBlocksValidated += val.Performance.BlocksValidated
+			totalBlocksProposed += val.Performance.BlocksProposed
+			totalUptime += val.Performance.UptimePercentage
+			validatorsWithPerformance++
 		}
 	}
 
-	// Calculate average score
-	totalScore := uint64(0)
-	for _, val := range validators {
-		totalScore += val.Score
-	}
-
+	// Calculate averages
 	averageScore := uint64(0)
+	averageUptime := float64(0)
+
 	if totalValidators > 0 {
 		averageScore = totalScore / uint64(totalValidators)
 	}
 
-	// Create response
+	if validatorsWithPerformance > 0 {
+		averageUptime = totalUptime / float64(validatorsWithPerformance)
+	}
+
+	// Get stake pool data
+	stakePool := api.blockchain.GetStakePool()
+	var totalStakeTokens float64 = 0
+
+	if stakePool != nil {
+		// Use StakePool.GetTotalStake() if available
+		totalStake := stakePool.GetTotalStake()
+		totalStakeTokens = float64(totalStake) / 100000000.0 // Convert to tokens with decimal precision
+	}
+
+	// Get latest block for additional metrics
+	latestBlock := api.blockchain.GetLatestBlock()
+	blockchainHeight := latestBlock.Header.BlockNumber
+
+	// Create response with comprehensive stats
 	stats := map[string]interface{}{
-		"totalValidators":     totalValidators,
-		"activeValidators":    activeValidators,
-		"slashedValidators":   slashedValidators,
-		"probationValidators": probationValidators,
-		"totalStaked":         totalStakeTokens,
-		"averageScore":        averageScore,
+		"totalValidators":      totalValidators,
+		"activeValidators":     activeValidators,
+		"slashedValidators":    slashedValidators,
+		"probationValidators":  probationValidators,
+		"totalStaked":          totalStakeTokens,
+		"averageScore":         averageScore,
+		"averageUptime":        averageUptime,
+		"totalBlocksValidated": totalBlocksValidated,
+		"totalBlocksProposed":  totalBlocksProposed,
+		"blockchainHeight":     blockchainHeight,
 	}
 
 	return stats, nil

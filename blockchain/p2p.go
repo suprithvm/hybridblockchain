@@ -489,6 +489,28 @@ func (n *Node) handleBlockStream(s network.Stream) {
 			block.Header.BlockNumber)
 	}
 
+	// Clean up the mempool by removing transactions that were included in this block
+	if n.Mempool != nil && block.Body != nil && block.Body.Transactions != nil {
+		// Get all transactions in the block
+		blockTxs := block.Body.Transactions.GetAllTransactions()
+
+		// Extract transaction IDs
+		txIDs := make([]string, 0, len(blockTxs))
+		for _, tx := range blockTxs {
+			// Skip coinbase and validator reward transactions
+			if !tx.IsCoinbase() && !tx.IsValidatorReward() {
+				txIDs = append(txIDs, tx.TransactionID)
+			}
+		}
+
+		// If we have transactions to remove, clean them from the mempool
+		if len(txIDs) > 0 {
+			log.Printf("🧹 Removing %d transactions from mempool that were included in block #%d",
+				len(txIDs), block.Header.BlockNumber)
+			n.Mempool.ClearProcessedTransactions(txIDs)
+		}
+	}
+
 	// Update peer score positively for good behavior
 	n.PeerManager.UpdatePeerScore(peerID, 5)
 }

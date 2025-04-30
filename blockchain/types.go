@@ -136,3 +136,33 @@ type WithdrawalRequest struct {
 	Amount      uint64    `json:"amount"`
 	Status      string    `json:"status"` // "pending", "processed", "cancelled"
 }
+
+// TransactionTrace represents detailed information about transaction execution
+type TransactionTrace struct {
+	TransactionID  string                 `json:"transaction_id"`
+	BlockHash      string                 `json:"block_hash"`
+	BlockNumber    uint64                 `json:"block_number"`
+	GasUsed        uint64                 `json:"gas_used"`
+	Status         string                 `json:"status"` // "success", "failed", "pending"
+	ErrorMessage   string                 `json:"error_message,omitempty"`
+	InputsAccessed []string               `json:"inputs_accessed,omitempty"`
+	OutputsCreated []string               `json:"outputs_created,omitempty"`
+	Timestamp      int64                  `json:"timestamp"`
+	StateChanges   map[string]interface{} `json:"state_changes,omitempty"`
+	Logs           []string               `json:"logs,omitempty"`
+}
+
+// BlockTrace represents detailed information about block execution
+type BlockTrace struct {
+	BlockHash         string             `json:"block_hash"`
+	BlockNumber       uint64             `json:"block_number"`
+	PreviousBlockHash string             `json:"previous_block_hash"`
+	Timestamp         int64              `json:"timestamp"`
+	MerkleRoot        string             `json:"merkle_root"`
+	StateRoot         string             `json:"state_root"`
+	TotalGasUsed      uint64             `json:"total_gas_used"`
+	ExecutionTimeMs   int64              `json:"execution_time_ms"`
+	TransactionTraces []TransactionTrace `json:"transaction_traces"`
+	ValidatorAddress  string             `json:"validator_address"`
+	MinerAddress      string             `json:"miner_address"`
+}
