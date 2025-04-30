@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"blockchain-core/RPC" // Add the RPC package import
 	"blockchain-core/blockchain"
 	"blockchain-core/blockchain/db"
 	"blockchain-core/blockchain/gas"
@@ -1952,22 +1952,24 @@ func runRPCNode(config *NodeConfig, store *blockchain.Store) error {
 		log.Printf("⚠️ No suitable peers found for syncing. Starting shell anyway...")
 	}
 
-
 	// Initialize the RPC server
 	rpcAddr := config.RPCAddr
 	log.Printf("🚀 Starting JSON-RPC server on %s", rpcAddr)
-	rpcService := blockchain.NewRPCService(node)
 
-	// Create HTTP server
-	server := &http.Server{
-		Addr:    rpcAddr,
-		Handler: rpcService,
+	// Create RPC server configuration
+	rpcConfig := &RPC.Config{
+		ListenAddr:    rpcAddr,
+		EnableCORS:    true,
+		EnableMetrics: config.EnableMetrics,
 	}
+
+	// Create RPC server instance
+	rpcServer := RPC.NewRPCServer(node, bc, rpcConfig)
 
 	// Start the RPC server in a goroutine
 	go func() {
 		log.Printf("🌐 JSON-RPC server listening on %s", rpcAddr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := rpcServer.Start(); err != nil {
 			log.Fatalf("❌ RPC server error: %v", err)
 		}
 	}()
@@ -1983,6 +1985,10 @@ func runRPCNode(config *NodeConfig, store *blockchain.Store) error {
 	log.Printf("   • getSyncStatus - Get blockchain sync status")
 	log.Printf("   • getNetworkDifficulty - Get current network difficulty")
 	log.Printf("   • getPeerList - Get list of connected peers")
+	log.Printf("   • createWallet - Create a new wallet")
+	log.Printf("   • importWallet - Import a wallet from mnemonic")
+	log.Printf("   • getValidators - Get list of validators")
+	log.Printf("   • and many more...")
 
 	log.Printf("✅ RPC node is fully initialized and running")
 	log.Printf("💡 Press Ctrl+C to exit")
@@ -1994,9 +2000,9 @@ func runRPCNode(config *NodeConfig, store *blockchain.Store) error {
 
 	// Cleanup
 	log.Println("🛑 Shutting down RPC node...")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	server.Shutdown(ctx)
+
+	// Stop the RPC server gracefully
+	rpcServer.Stop()
 	node.Close()
 
 	return nil
