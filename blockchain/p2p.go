@@ -610,12 +610,6 @@ func processTransaction(n *Node, peerID peer.ID, tx *Transaction) {
 	}
 	log.Printf("✅ Transaction %s successfully added to mempool", tx.TransactionID)
 
-	// Broadcast to other peers
-	log.Printf("📡 Re-broadcasting transaction %s to other peers", tx.TransactionID)
-	if err := n.BroadcastTransaction(tx, []peer.ID{peerID}); err != nil {
-		log.Printf("⚠️ Error re-broadcasting transaction %s: %v", tx.TransactionID, err)
-	}
-
 	// Update peer score positively
 	n.PeerManager.UpdatePeerScore(peerID, 1)
 	log.Printf("📈 Updated peer %s score positively for good transaction", peerID.String())

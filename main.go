@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"blockchain-core/blockchain"
@@ -30,11 +33,13 @@ const TXNSNodeID = "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31"
 type NodeRole int
 
 const (
-	RoleObserver NodeRole = iota
-	RoleMiner
-	RoleValidator
-	RoleBootstrap
-	RoleTXNS //Test node to test transactions
+	UnknownRole NodeRole = iota
+	BootstrapRole
+	MinerRole
+	ValidatorRole
+	ObserverRole
+	TXNSRole
+	RPCRole // New role for RPC node
 )
 
 type NodeConfig struct {
@@ -76,18 +81,32 @@ func main() {
 
 	// Initialize node based on role
 	switch config.Role {
-	case RoleBootstrap:
+	case BootstrapRole:
 		runBootstrapNode(config)
-	case RoleMiner:
-		runMinerNode(config, store)
-	case RoleValidator:
-		runValidatorNode(config, store)
-	case RoleObserver:
-		runObserverNode(config, store)
-	case RoleTXNS:
-		if err := runTXNS(config, store); err != nil {
-			log.Fatalf("❌ Failed to run TXNS node: %v", err)
+	case MinerRole:
+		err := runMinerNode(config, store)
+		if err != nil {
+			log.Fatalf("Failed to run miner node: %v", err)
 		}
+	case ValidatorRole:
+		err := runValidatorNode(config, store)
+		if err != nil {
+			log.Fatalf("Failed to run validator node: %v", err)
+		}
+	case ObserverRole:
+		runObserverNode(config, store)
+	case TXNSRole:
+		err := runTXNS(config, store)
+		if err != nil {
+			log.Fatalf("Failed to run TXNS node: %v", err)
+		}
+	case RPCRole:
+		err := runRPCNode(config, store)
+		if err != nil {
+			log.Fatalf("Failed to run RPC node: %v", err)
+		}
+	default:
+		log.Fatalf("Unknown role: %s", getRoleName(config.Role))
 	}
 
 	// Keep the application running
@@ -609,30 +628,38 @@ func startSyncService(config *NodeConfig, bc *blockchain.Blockchain, store *bloc
 func parseRole(role string) NodeRole {
 	switch strings.ToLower(role) {
 	case "bootstrap":
-		return RoleBootstrap
+		return BootstrapRole
 	case "miner":
-		return RoleMiner
+		return MinerRole
 	case "validator":
-		return RoleValidator
+		return ValidatorRole
+	case "observer":
+		return ObserverRole
 	case "txns":
-		return RoleTXNS
+		return TXNSRole
+	case "rpc":
+		return RPCRole
 	default:
-		return RoleObserver
+		return UnknownRole
 	}
 }
 
 func getRoleName(role NodeRole) string {
 	switch role {
-	case RoleBootstrap:
-		return "Bootstrap Node"
-	case RoleMiner:
-		return "Miner"
-	case RoleValidator:
-		return "Validator"
-	case RoleTXNS:
-		return "txns Node"
+	case BootstrapRole:
+		return "bootstrap"
+	case MinerRole:
+		return "miner"
+	case ValidatorRole:
+		return "validator"
+	case ObserverRole:
+		return "observer"
+	case TXNSRole:
+		return "txns"
+	case RPCRole:
+		return "rpc"
 	default:
-		return "Observer"
+		return "unknown"
 	}
 }
 
@@ -1710,6 +1737,273 @@ func handleGetBalance(input string, bc *blockchain.Blockchain) {
 // loadOrCreateTXNSKey loads a private key from the specified file
 // or creates a new one if the file doesn't exist
 func loadOrCreateTXNSKey(keyFile string) (crypto.PrivKey, error) {
+	// Check if the key file exists
+	_, err := os.Stat(keyFile)
+	if err == nil {
+		// Key file exists, load it
+		keyBytes, err := os.ReadFile(keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read key file: %v", err)
+		}
+
+		// Decode the private key
+		privKey, err := crypto.UnmarshalPrivateKey(keyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode private key: %v", err)
+		}
+
+		return privKey, nil
+	}
+
+	// Key file doesn't exist, create a new key
+	privKey, _, err := crypto.GenerateKeyPair(crypto.Ed25519, -1)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate key pair: %v", err)
+	}
+
+	// Encode and save the private key
+	keyBytes, err := crypto.MarshalPrivateKey(privKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode private key: %v", err)
+	}
+
+	// Save key to file
+	err = os.WriteFile(keyFile, keyBytes, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write key file: %v", err)
+	}
+
+	return privKey, nil
+}
+
+// runRPCNode initializes and runs an RPC node that provides JSON-RPC API access to the blockchain
+func runRPCNode(config *NodeConfig, store *blockchain.Store) error {
+	log.Printf("🌐 Starting RPC Node (JSON-RPC API Server)")
+
+	// Use different ports by default for RPC node when running on same machine as other nodes
+	// Only override if not explicitly set through command-line
+	if config.ListenAddr == ":50505" {
+		config.ListenAddr = ":50508" // Use different P2P port
+		log.Printf("📡 Using alternate P2P port: %s to avoid conflicts", config.ListenAddr)
+	}
+	if config.RPCAddr == ":8545" {
+		config.RPCAddr = ":8548" // Use different RPC port
+		log.Printf("🌐 Using alternate RPC port: %s to avoid conflicts", config.RPCAddr)
+	}
+
+	// Load or create persistent node key
+	rpcKeyFile := filepath.Join(config.DataDir, "rpcnode.key")
+	privKey, err := loadOrCreateRPCNodeKey(rpcKeyFile)
+	if err != nil {
+		return fmt.Errorf("❌ Failed to load or create RPC node key: %v", err)
+	}
+	log.Printf("🔑 Loaded RPC node private key from %s", rpcKeyFile)
+
+	// Initialize blockchain from store
+	bc := blockchain.InitialiseBlockchainWithStore(store)
+	if bc == nil {
+		return fmt.Errorf("❌ Failed to initialize blockchain")
+	}
+	log.Printf("⛓️ Blockchain initialized successfully")
+
+	// Read bootnode address from file if not provided in config
+	if len(config.BootstrapNodes) == 0 {
+		bootnodeAddr, err := os.ReadFile("bootnode.addr")
+		if err != nil {
+			return fmt.Errorf("❌ Failed to read bootnode address: %v", err)
+		}
+		config.BootstrapNodes = []string{strings.TrimSpace(string(bootnodeAddr))}
+		log.Printf("📡 Using bootnode address from file: %s", config.BootstrapNodes[0])
+	}
+
+	// Create network configuration
+	networkConfig := &blockchain.NetworkConfig{
+		P2PPort:        extractPort(config.ListenAddr),
+		RPCPort:        extractPort(config.RPCAddr),
+		BootstrapNodes: config.BootstrapNodes,
+		NetworkID:      config.NetworkID,
+		ChainID:        parseChainID(config.NetworkID),
+		NetworkPath:    config.DataDir,
+		Blockchain:     bc,
+		DHTServerMode:  true,
+		ObserverMode:   true, // RPC nodes operate in observer mode
+	}
+
+	// Create node with the persistent private key
+	node, err := blockchain.NewNodeWithPrivKey(networkConfig, privKey)
+	if err != nil {
+		return fmt.Errorf("❌ Failed to create node with private key: %v", err)
+	}
+
+	// Log the RPC node ID for future reference
+	log.Printf("📝 RPC Node created with ID: %s using persistent private key", node.Host.ID())
+
+	// Set node reference in blockchain
+	bc.Node = node
+	log.Printf("🔗 Blockchain node connection established with ID: %s", node.Host.ID())
+
+	// Additional debug logs
+	log.Printf("🔍 Verifying blockchain components:")
+	log.Printf("   • Blockchain UTXOPool: %v", bc.GetUTXOPool() != nil)
+	log.Printf("   • Node UTXOPool: %v", node.UTXOPool != nil)
+	log.Printf("   • Node AccountManager: %v", node.GetAccountManager() != nil)
+
+	// Start the node
+	if err := node.Start(); err != nil {
+		return fmt.Errorf("❌ Failed to start node: %v", err)
+	}
+	log.Printf("✅ P2P node started successfully")
+
+	// Connect to bootstrap nodes with retries
+	log.Printf("🔄 Connecting to bootstrap nodes...")
+	maxRetries := 5
+	retryDelay := 5 * time.Second
+	connected := false
+
+	for i := 0; i < maxRetries; i++ {
+		err := node.ConnectToBootstrapNodes(context.Background())
+		if err == nil {
+			connected = true
+			log.Printf("✅ Successfully connected to bootstrap nodes")
+			break
+		}
+		log.Printf("⚠️ Failed to connect to bootstrap nodes (attempt %d/%d): %v", i+1, maxRetries, err)
+		if i < maxRetries-1 {
+			log.Printf("⏳ Waiting %s before retrying...", retryDelay)
+			time.Sleep(retryDelay)
+		}
+	}
+
+	if !connected {
+		return fmt.Errorf("❌ Failed to connect to any bootstrap nodes after %d attempts", maxRetries)
+	}
+
+	// Discover peers
+	log.Printf("🔍 Starting peer discovery...")
+	maxPeerDiscoveryAttempts := 3
+	var candidates []peer.ID
+
+	for i := 0; i < maxPeerDiscoveryAttempts; i++ {
+		log.Printf("👥 Peer discovery attempt %d/%d", i+1, maxPeerDiscoveryAttempts)
+		if err := node.DiscoverPeers(); err != nil {
+			log.Printf("⚠️ Peer discovery attempt failed: %v", err)
+		}
+
+		log.Printf("Found %d peers", len(node.Host.Network().Peers()))
+		for _, peer := range node.Host.Network().Peers() {
+			log.Printf("Peer: %s", peer)
+		}
+
+		if i < maxPeerDiscoveryAttempts-1 {
+			log.Printf("⏳ Waiting before next attempt...")
+			time.Sleep(5 * time.Second)
+		}
+
+		if len(node.Host.Network().Peers()) > 1 {
+			break
+		}
+	}
+
+	//select random peer from available peers to sync with it
+	peers := node.Host.Network().Peers()
+
+	for _, p := range peers {
+		if !node.IsPeerBootstrapNode(p) {
+			candidates = append(candidates, p)
+		}
+	}
+
+	// Check if we have any candidate peers for syncing
+	if len(candidates) > 0 {
+		selectedPeer := candidates[rand.Intn(len(candidates))]
+
+		// Perform syncs with the found validator peer
+		log.Printf("🔄 Starting sync process with validator peer %s", selectedPeer)
+
+		// Sync blockchain
+		log.Printf("🔄 Syncing blockchain with validator peer %s", selectedPeer)
+		if err := node.SyncWithPeer(selectedPeer); err != nil {
+			log.Printf("⚠️ Failed to sync blockchain with validator peer %s: %v", selectedPeer, err)
+			return fmt.Errorf("blockchain sync failed: %v", err)
+		}
+
+		// Initialize stake pool if not already initialized
+		if node.StakePool == nil {
+			log.Printf("🔐 Initializing stake pool for miner node")
+			node.StakePool = blockchain.NewStakePool(bc)
+		}
+
+		// Sync stake pool
+		log.Printf("🔄 Syncing stake pool with validator peer %s", selectedPeer)
+		if err := node.StakePool.SyncWithPeer(selectedPeer); err != nil {
+			log.Printf("⚠️ Failed to sync stake pool with validator peer %s: %v", selectedPeer, err)
+			return fmt.Errorf("stake pool sync failed: %v", err)
+		}
+
+		// Sync mempool
+		log.Printf("🔄 Syncing mempool with validator peer %s", selectedPeer)
+		if err := node.Mempool.SyncWithPeer(node, selectedPeer); err != nil {
+			log.Printf("⚠️ Failed to sync mempool with validator peer %s: %v", selectedPeer, err)
+			return fmt.Errorf("mempool sync failed: %v", err)
+		}
+
+		log.Printf("✅ All syncs completed with validator peer %s", selectedPeer)
+	} else {
+		log.Printf("⚠️ No suitable peers found for syncing. Starting shell anyway...")
+	}
+
+
+	// Initialize the RPC server
+	rpcAddr := config.RPCAddr
+	log.Printf("🚀 Starting JSON-RPC server on %s", rpcAddr)
+	rpcService := blockchain.NewRPCService(node)
+
+	// Create HTTP server
+	server := &http.Server{
+		Addr:    rpcAddr,
+		Handler: rpcService,
+	}
+
+	// Start the RPC server in a goroutine
+	go func() {
+		log.Printf("🌐 JSON-RPC server listening on %s", rpcAddr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("❌ RPC server error: %v", err)
+		}
+	}()
+
+	// Log all available RPC methods
+	log.Printf("📋 Available JSON-RPC methods:")
+	log.Printf("   • getBalance - Get balance for an address")
+	log.Printf("   • getTransactionHistory - Get transaction history for an address")
+	log.Printf("   • sendTransaction - Send a new transaction")
+	log.Printf("   • getBlockHeight - Get current blockchain height")
+	log.Printf("   • getPeerCount - Get number of connected peers")
+	log.Printf("   • getMempool - Get pending transactions in mempool")
+	log.Printf("   • getSyncStatus - Get blockchain sync status")
+	log.Printf("   • getNetworkDifficulty - Get current network difficulty")
+	log.Printf("   • getPeerList - Get list of connected peers")
+
+	log.Printf("✅ RPC node is fully initialized and running")
+	log.Printf("💡 Press Ctrl+C to exit")
+
+	// Wait for interrupt signal
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	<-c
+
+	// Cleanup
+	log.Println("🛑 Shutting down RPC node...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server.Shutdown(ctx)
+	node.Close()
+
+	return nil
+}
+
+// loadOrCreateRPCNodeKey loads or creates a persistent private key for the RPC node
+func loadOrCreateRPCNodeKey(keyFile string) (crypto.PrivKey, error) {
 	// Check if the key file exists
 	_, err := os.Stat(keyFile)
 	if err == nil {
