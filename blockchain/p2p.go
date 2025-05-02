@@ -2382,25 +2382,50 @@ func (n *Node) handleStakeSync(stream network.Stream) {
 	peerID := stream.Conn().RemotePeer()
 	log.Printf("📥 Received stake sync request from %s", peerID.String())
 
-	// Read the data
-	data, err := io.ReadAll(stream)
-	if err != nil {
-		log.Printf("❌ Error reading stake sync data: %v", err)
-		return
-	}
+	// Initialize decoder and encoder for the stream
+	decoder := json.NewDecoder(stream)
+	encoder := json.NewEncoder(stream)
 
-	// Check if this is a sync request or an update
+	// Decode the request
 	var syncRequest StakeSyncRequest
-	if err := json.Unmarshal(data, &syncRequest); err == nil && syncRequest.Type == "sync" {
-		// This is a sync request, respond with our full stake pool
-		log.Printf("ℹ️ Handling full stake pool sync request")
-		n.sendStakePoolData(stream)
+	if err := decoder.Decode(&syncRequest); err != nil {
+		log.Printf("❌ Error decoding stake sync request: %v", err)
 		return
 	}
 
-	// Otherwise, treat it as a stake update
+	// Check if this is a sync request
+	if syncRequest.Type == "sync" {
+		// This is a sync request, respond with our full stake pool
+		log.Printf("ℹ️ Handling full stake pool sync request from %s", peerID.String())
+
+		if n.StakePool == nil {
+			log.Printf("❌ Stake pool is nil, cannot send data to %s", peerID.String())
+			return
+		}
+
+		// Prepare response data
+		n.StakePool.mu.Lock()
+		resp := n.StakePool.Stakes
+		n.StakePool.mu.Unlock()
+
+		log.Printf("📤 Sending stake pool data with %d entries to %s", len(resp), peerID.String())
+
+		// Send the data directly to the stream
+		if err := encoder.Encode(resp); err != nil {
+			log.Printf("❌ Error sending stake pool data to %s: %v", peerID.String(), err)
+			return
+		}
+
+		log.Printf("✅ Successfully sent stake pool data to %s", peerID.String())
+		return
+	}
+
+	// If not a sync request, handle it as a stake update
+	log.Printf("📝 Handling stake update from %s", peerID.String())
+
+	// Decode the update data again
 	var update map[string]interface{}
-	if err := json.Unmarshal(data, &update); err != nil {
+	if err := decoder.Decode(&update); err != nil {
 		log.Printf("❌ Error parsing stake update: %v", err)
 		return
 	}
@@ -2433,24 +2458,6 @@ func (n *Node) handleStakeSync(stream network.Stream) {
 			return
 		}
 		log.Printf("✅ Stake pool updated successfully")
-	}
-}
-
-// sendStakePoolData sends our entire stake pool to the requester
-func (n *Node) sendStakePoolData(stream network.Stream) {
-	if n.StakePool == nil {
-		log.Printf("❌ Stake pool is nil, cannot send data")
-		return
-	}
-
-	// Prepare response data
-	n.StakePool.mu.Lock()
-	resp := n.StakePool.Stakes
-	n.StakePool.mu.Unlock()
-
-	// Send the data
-	if err := json.NewEncoder(stream).Encode(resp); err != nil {
-		log.Printf("❌ Error sending stake pool data: %v", err)
 	}
 }
 
