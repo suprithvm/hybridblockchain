@@ -183,6 +183,17 @@ func (n *Node) OnLogEvent(callback func(*LogEvent)) {
 
 // NotifyNewBlock notifies all registered callbacks about a new block
 func (n *Node) NotifyNewBlock(block *Block) {
+	// Get the current node ID
+	nodeID := n.Host.ID().String()
+
+	// STRICT CHECK: Only the official RPC node can send notifications
+	// This prevents other nodes from triggering validation loops
+	if nodeID != "12D3KooWPKEzhaR6NGzJNMQ3nDSbWpeD7bpmVYwxQvHcxUT3eWwu" {
+		log.Printf("🔕 Node %s is NOT the RPC node - skipping block #%d notifications",
+			nodeID[:12], block.Header.BlockNumber)
+		return
+	}
+
 	n.callbacksMu.RLock()
 	defer n.callbacksMu.RUnlock()
 
@@ -190,13 +201,31 @@ func (n *Node) NotifyNewBlock(block *Block) {
 		return
 	}
 
-	for _, callback := range n.newBlockCallbacks {
+	// This is the RPC node - OK to notify external subscribers
+	log.Printf("🔔 RPC node notifying external subscribers about block #%d",
+		block.Header.BlockNumber)
+
+	// Execute callbacks (for RPC server's WebSocket notifications, etc.)
+	for i, callback := range n.newBlockCallbacks {
+		log.Printf("  → Executing block notification callback #%d for block #%d",
+			i, block.Header.BlockNumber)
 		go callback(block)
 	}
 }
 
 // NotifyNewTransaction notifies all registered callbacks about a new transaction
 func (n *Node) NotifyNewTransaction(tx *Transaction) {
+	// Get the current node ID
+	nodeID := n.Host.ID().String()
+
+	// STRICT CHECK: Only the official RPC node can send notifications
+	// This prevents other nodes from triggering notification loops
+	if nodeID != "12D3KooWPKEzhaR6NGzJNMQ3nDSbWpeD7bpmVYwxQvHcxUT3eWwu" {
+		log.Printf("🔕 Node %s is NOT the RPC node - skipping transaction %s notifications",
+			nodeID[:12], tx.TransactionID[:10])
+		return
+	}
+
 	n.callbacksMu.RLock()
 	defer n.callbacksMu.RUnlock()
 
@@ -204,6 +233,7 @@ func (n *Node) NotifyNewTransaction(tx *Transaction) {
 		return
 	}
 
+	log.Printf("🔔 RPC node notifying subscribers about transaction %s", tx.TransactionID[:10])
 	for _, callback := range n.newTransactionCallbacks {
 		go callback(tx)
 	}
@@ -211,6 +241,16 @@ func (n *Node) NotifyNewTransaction(tx *Transaction) {
 
 // NotifyLogEvent notifies all registered callbacks about a new log event
 func (n *Node) NotifyLogEvent(logEvent *LogEvent) {
+	// Get the current node ID
+	nodeID := n.Host.ID().String()
+
+	// STRICT CHECK: Only the official RPC node can send notifications
+	// This prevents other nodes from triggering notification loops
+	if nodeID != "12D3KooWPKEzhaR6NGzJNMQ3nDSbWpeD7bpmVYwxQvHcxUT3eWwu" {
+		log.Printf("🔕 Node %s is NOT the RPC node - skipping log event notifications", nodeID[:12])
+		return
+	}
+
 	n.callbacksMu.RLock()
 	defer n.callbacksMu.RUnlock()
 
@@ -218,6 +258,8 @@ func (n *Node) NotifyLogEvent(logEvent *LogEvent) {
 		return
 	}
 
+	log.Printf("🔔 RPC node notifying subscribers about log event from tx %s",
+		logEvent.TransactionHash[:10])
 	for _, callback := range n.logEventCallbacks {
 		go callback(logEvent)
 	}
@@ -606,9 +648,20 @@ func (n *Node) handleBlockStream(s network.Stream) {
 		}
 	}
 
+	// Notify external subscribers (like RPC clients) about the new block
+	// But be cautious not to trigger unnecessary P2P rebroadcasts
+	nodeID := n.Host.ID().String()
+
+	// Check if this is the RPC node - if so, log specially
+	if nodeID == "12D3KooWPKEzhaR6NGzJNMQ3nDSbWpeD7bpmVYwxQvHcxUT3eWwu" {
+		log.Printf("🔔 RPC node notifying subscribers about block #%d", block.Header.BlockNumber)
+	} else {
+		log.Printf("🔔 Node %s notifying external subscribers about block #%d",
+			nodeID[:12], block.Header.BlockNumber)
+	}
+
 	// Notify subscribers about the new block
 	n.NotifyNewBlock(&block)
-	log.Printf("🔔 Notified subscribers about block #%d", block.Header.BlockNumber)
 
 	// Update peer score positively for good behavior
 	n.PeerManager.UpdatePeerScore(peerID, 5)

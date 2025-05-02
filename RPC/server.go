@@ -141,8 +141,17 @@ func (sm *SubscriptionManager) NotifySubscribers(eventType string, data interfac
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	for _, sub := range sm.subscriptions {
+	// Log start of notification process
+	subscriberCount := 0
+	matchingCount := 0
+
+	log.Printf("🔔 Starting notification for event type: %s with %d total subscribers",
+		eventType, len(sm.subscriptions))
+
+	for subID, sub := range sm.subscriptions {
 		if sub.Type == eventType && sm.matchesFilters(sub, eventType, data) {
+			matchingCount++
+
 			// Create notification payload
 			notification := map[string]interface{}{
 				"method": "sup_subscription",
@@ -153,10 +162,31 @@ func (sm *SubscriptionManager) NotifySubscribers(eventType string, data interfac
 			}
 
 			// Send notification to client
-			if sub.WebSocket != nil && sub.WebSocket.WriteJSON(notification) == nil {
-				sub.LastActivity = time.Now()
+			if sub.WebSocket != nil {
+				err := sub.WebSocket.WriteJSON(notification)
+				if err == nil {
+					sub.LastActivity = time.Now()
+					subscriberCount++
+					log.Printf("✅ Notified subscriber %s (client: %s) for event type: %s",
+						subID[:8], sub.ClientIP, eventType)
+				} else {
+					log.Printf("❌ Failed to notify subscriber %s: %v", subID[:8], err)
+				}
+			} else {
+				log.Printf("⚠️ Subscriber %s has no WebSocket connection", subID[:8])
 			}
 		}
+	}
+
+	// Log summary of notification process
+	if subscriberCount > 0 {
+		log.Printf("📊 Notified %d/%d matching subscribers for event type: %s",
+			subscriberCount, matchingCount, eventType)
+	} else if matchingCount > 0 {
+		log.Printf("⚠️ Found %d matching subscribers but none were notified for event type: %s",
+			matchingCount, eventType)
+	} else {
+		log.Printf("ℹ️ No matching subscribers for event type: %s", eventType)
 	}
 }
 
@@ -1851,21 +1881,28 @@ func (s *RPCServer) handleSupSubscribe(params interface{}) (interface{}, error) 
 		return nil, fmt.Errorf("missing context for subscription")
 	}
 
+	s.logger.Printf("📥 Received subscription request from client %s", ctx.ClientIP)
+
 	// Parse parameters from the RawMessage
 	var args []interface{}
 	if err := json.Unmarshal(ctx.RawMessage, &args); err != nil {
+		s.logger.Printf("❌ Failed to parse subscription parameters: %v", err)
 		return nil, fmt.Errorf("invalid parameters: %v", err)
 	}
 
 	if len(args) < 1 {
+		s.logger.Printf("❌ Missing event type in subscription request")
 		return nil, fmt.Errorf("missing event type parameter")
 	}
 
 	// Get event type parameter
 	eventType, ok := args[0].(string)
 	if !ok {
+		s.logger.Printf("❌ Event type parameter is not a string")
 		return nil, fmt.Errorf("event_type must be a string")
 	}
+
+	s.logger.Printf("📋 Subscription request for event type: %s from client %s", eventType, ctx.ClientIP)
 
 	// Validate event type
 	validEventTypes := map[string]bool{
@@ -1875,6 +1912,7 @@ func (s *RPCServer) handleSupSubscribe(params interface{}) (interface{}, error) 
 	}
 
 	if !validEventTypes[eventType] {
+		s.logger.Printf("❌ Unsupported event type: %s", eventType)
 		return nil, fmt.Errorf("unsupported event type: %s", eventType)
 	}
 
@@ -1883,12 +1921,13 @@ func (s *RPCServer) handleSupSubscribe(params interface{}) (interface{}, error) 
 	if len(args) > 1 {
 		if filtersArg, ok := args[1].(map[string]interface{}); ok {
 			filters = filtersArg
+			s.logger.Printf("📋 Subscription includes filters: %v", filters)
 		}
 	}
 
 	// Check if this is an HTTP request (no WebSocket)
 	if ctx.WebSocket == nil {
-		s.logger.Printf("🔔 HTTP-based subscription request for %s events from %s", eventType, ctx.ClientIP)
+		s.logger.Printf("⚠️ HTTP-based subscription request (no WebSocket) from %s", ctx.ClientIP)
 
 		// For HTTP connections, we'll return mock subscription data for testing
 		mockSubID := uuid.New().String()
@@ -1947,6 +1986,7 @@ func (s *RPCServer) handleSupSubscribe(params interface{}) (interface{}, error) 
 			}
 		}
 
+		s.logger.Printf("⚠️ Returning mock subscription response for HTTP client: %s", ctx.ClientIP)
 		return map[string]interface{}{
 			"subscription_id":     mockSubID,
 			"test_mode":           true,
@@ -1958,9 +1998,12 @@ func (s *RPCServer) handleSupSubscribe(params interface{}) (interface{}, error) 
 	// Create subscription (for WebSocket connections)
 	subID, err := s.subscriptionMgr.AddSubscription(ctx.ClientIP, eventType, filters, ctx.WebSocket)
 	if err != nil {
+		s.logger.Printf("❌ Failed to add subscription for client %s: %v", ctx.ClientIP, err)
 		return nil, err
 	}
 
+	s.logger.Printf("✅ Created new subscription %s for client %s (event type: %s)",
+		subID, ctx.ClientIP, eventType)
 	return subID, nil
 }
 
@@ -2029,8 +2072,13 @@ func (c jsonExtendedContext) MarshalJSON() ([]byte, error) {
 
 // setupBlockchainSubscriptions sets up notification triggers for blockchain events
 func (s *RPCServer) setupBlockchainSubscriptions() {
+	s.logger.Printf("🔄 Setting up blockchain subscriptions for RPC server...")
+
 	// Listen for new blocks
 	s.node.OnNewBlock(func(block *blockchain.Block) {
+		s.logger.Printf("📥 RPC server received block #%d notification from node",
+			block.Header.BlockNumber)
+
 		// Create block notification data
 		blockData := map[string]interface{}{
 			"block_hash":   block.Hash(),
@@ -2038,12 +2086,19 @@ func (s *RPCServer) setupBlockchainSubscriptions() {
 			"timestamp":    block.Header.Timestamp,
 		}
 
-		// Notify subscribers
+		// Notify websocket subscribers only (don't cause p2p rebroadcasting)
+		s.logger.Printf("📤 RPC server forwarding block #%d to %d subscribers",
+			block.Header.BlockNumber, len(s.subscriptionMgr.subscriptions))
 		s.subscriptionMgr.NotifySubscribers("new_blocks", blockData)
+
+		s.logger.Printf("🔔 RPC server completed notification for block #%d", block.Header.BlockNumber)
 	})
 
 	// Listen for new transactions in mempool
 	s.node.OnNewTransaction(func(tx *blockchain.Transaction) {
+		s.logger.Printf("📥 RPC server received transaction %s notification from node",
+			tx.TransactionID[:10])
+
 		// Create transaction notification data
 		txData := map[string]interface{}{
 			"tx_hash":   tx.TransactionID,
@@ -2054,7 +2109,11 @@ func (s *RPCServer) setupBlockchainSubscriptions() {
 		}
 
 		// Notify subscribers
+		s.logger.Printf("📤 RPC server forwarding transaction %s to %d subscribers",
+			tx.TransactionID[:10], len(s.subscriptionMgr.subscriptions))
 		s.subscriptionMgr.NotifySubscribers("pending_transactions", txData)
+
+		s.logger.Printf("🔔 RPC server completed notification for transaction %s", tx.TransactionID[:10])
 	})
 
 	// Listen for log events (if implemented)
@@ -2062,6 +2121,9 @@ func (s *RPCServer) setupBlockchainSubscriptions() {
 		if log == nil {
 			return
 		}
+
+		s.logger.Printf("📥 RPC server received log event notification from tx %s",
+			log.TransactionHash[:10])
 
 		// Create log notification data
 		logData := map[string]interface{}{
@@ -2074,6 +2136,13 @@ func (s *RPCServer) setupBlockchainSubscriptions() {
 		}
 
 		// Notify subscribers
+		s.logger.Printf("📤 RPC server forwarding log event to %d subscribers",
+			len(s.subscriptionMgr.subscriptions))
 		s.subscriptionMgr.NotifySubscribers("logs", logData)
+
+		s.logger.Printf("🔔 RPC server completed notification for log event from tx %s",
+			log.TransactionHash[:10])
 	})
+
+	s.logger.Printf("✅ Blockchain subscription setup completed for RPC server")
 }
