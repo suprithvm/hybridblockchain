@@ -385,7 +385,8 @@ func (s *RPCServer) handleRPCRequest(w http.ResponseWriter, r *http.Request) {
 		"sup_getSubscriptions": true,
 	}
 
-	var params interface{} = req.Params
+	// For HTTP requests, regular params will be used by default
+	var finalParams json.RawMessage = req.Params
 
 	// Add client context for subscription methods
 	if subscriptionMethods[req.Method] {
@@ -401,11 +402,70 @@ func (s *RPCServer) handleRPCRequest(w http.ResponseWriter, r *http.Request) {
 			// WebSocket will be nil for HTTP requests,
 			// the subscription handler will check this and handle accordingly
 		}
-		params = extendedContext
+
+		// For HTTP API endpoints, we need special handling
+		if req.Method == "sup_subscribe" {
+			result, err := s.handleSupSubscribe(extendedContext)
+			if err != nil {
+				s.writeError(w, req.ID, -32603, "Internal error", err)
+				return
+			}
+
+			// Send successful response
+			resp := JSONRPCResponse{
+				JSONRPC: "2.0",
+				Result:  result,
+				ID:      req.ID,
+			}
+
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				s.logger.Printf("Error encoding response: %v", err)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
+			return
+		} else if req.Method == "sup_unsubscribe" {
+			result, err := s.handleSupUnsubscribe(extendedContext)
+			if err != nil {
+				s.writeError(w, req.ID, -32603, "Internal error", err)
+				return
+			}
+
+			// Send successful response
+			resp := JSONRPCResponse{
+				JSONRPC: "2.0",
+				Result:  result,
+				ID:      req.ID,
+			}
+
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				s.logger.Printf("Error encoding response: %v", err)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
+			return
+		} else if req.Method == "sup_getSubscriptions" {
+			result, err := s.handleSupGetSubscriptions(extendedContext)
+			if err != nil {
+				s.writeError(w, req.ID, -32603, "Internal error", err)
+				return
+			}
+
+			// Send successful response
+			resp := JSONRPCResponse{
+				JSONRPC: "2.0",
+				Result:  result,
+				ID:      req.ID,
+			}
+
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				s.logger.Printf("Error encoding response: %v", err)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
+			return
+		}
 	}
 
-	// Execute method
-	result, err := handler(params.(json.RawMessage))
+	// Execute method with json.RawMessage params
+	result, err := handler(finalParams)
 	if err != nil {
 		s.writeError(w, req.ID, -32603, "Internal error", err)
 		return
@@ -688,18 +748,18 @@ func (s *RPCServer) registerAllHandlers() {
 
 // Wrappers for subscription handlers to match RPCMethodHandler type
 func (s *RPCServer) handleSupSubscribeWrapper(params json.RawMessage) (interface{}, error) {
-	// This will be properly handled in handleRPCRequest where we set the extended context
-	return s.handleSupSubscribe(params)
+	// Return an error if called directly - subscriptions should be handled via WebSocket
+	return nil, fmt.Errorf("subscription methods should be called via WebSocket connection")
 }
 
 func (s *RPCServer) handleSupUnsubscribeWrapper(params json.RawMessage) (interface{}, error) {
-	// This will be properly handled in handleRPCRequest where we set the extended context
-	return s.handleSupUnsubscribe(params)
+	// Return an error if called directly - subscriptions should be handled via WebSocket
+	return nil, fmt.Errorf("subscription methods should be called via WebSocket connection")
 }
 
 func (s *RPCServer) handleSupGetSubscriptionsWrapper(params json.RawMessage) (interface{}, error) {
-	// This will be properly handled in handleRPCRequest where we set the extended context
-	return s.handleSupGetSubscriptions(params)
+	// Return an error if called directly - subscriptions should be handled via WebSocket
+	return nil, fmt.Errorf("subscription methods should be called via WebSocket connection")
 }
 
 // Example handler implementations
@@ -1824,20 +1884,76 @@ func (s *RPCServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			// Find method handler
-			s.mu.RLock()
-			handler, exists := s.methods[req.Method]
-			s.mu.RUnlock()
+			// Check if this is a subscription method
+			var result interface{}
+			var handlerErr error
 
-			if !exists {
-				s.sendWebSocketError(conn, req.ID, ErrMethodNotFound, "Method not found", fmt.Sprintf("Method '%s' not found", req.Method))
-				continue
+			// Handle subscription methods specially
+			if req.Method == "sup_subscribe" {
+				if !s.config.EnableSubscriptions {
+					s.sendWebSocketError(conn, req.ID, -32601, "Method not available", "Subscription methods are disabled on this server")
+					continue
+				}
+
+				// Create context with WebSocket connection
+				ctx := &jsonExtendedContext{
+					RawMessage: req.Params,
+					ClientIP:   clientIP,
+					WebSocket:  conn,
+				}
+
+				// Handle subscription directly
+				result, handlerErr = s.handleSupSubscribe(ctx)
+				s.logger.Printf("📩 Processed sup_subscribe request from %s via WebSocket", clientIP)
+			} else if req.Method == "sup_unsubscribe" {
+				if !s.config.EnableSubscriptions {
+					s.sendWebSocketError(conn, req.ID, -32601, "Method not available", "Subscription methods are disabled on this server")
+					continue
+				}
+
+				// Create context with WebSocket connection
+				ctx := &jsonExtendedContext{
+					RawMessage: req.Params,
+					ClientIP:   clientIP,
+					WebSocket:  conn,
+				}
+
+				// Handle unsubscribe directly
+				result, handlerErr = s.handleSupUnsubscribe(ctx)
+				s.logger.Printf("📩 Processed sup_unsubscribe request from %s via WebSocket", clientIP)
+			} else if req.Method == "sup_getSubscriptions" {
+				if !s.config.EnableSubscriptions {
+					s.sendWebSocketError(conn, req.ID, -32601, "Method not available", "Subscription methods are disabled on this server")
+					continue
+				}
+
+				// Create context with WebSocket connection
+				ctx := &jsonExtendedContext{
+					RawMessage: req.Params,
+					ClientIP:   clientIP,
+					WebSocket:  conn,
+				}
+
+				// Handle get subscriptions directly
+				result, handlerErr = s.handleSupGetSubscriptions(ctx)
+				s.logger.Printf("📩 Processed sup_getSubscriptions request from %s via WebSocket", clientIP)
+			} else {
+				// For regular methods, use the standard handler
+				s.mu.RLock()
+				handler, exists := s.methods[req.Method]
+				s.mu.RUnlock()
+
+				if !exists {
+					s.sendWebSocketError(conn, req.ID, ErrMethodNotFound, "Method not found", fmt.Sprintf("Method '%s' not found", req.Method))
+					continue
+				}
+
+				result, handlerErr = handler(req.Params)
 			}
 
-			// Execute method
-			result, err := handler(req.Params)
-			if err != nil {
-				s.sendWebSocketError(conn, req.ID, ErrInternalError, "Internal error", err)
+			// Handle errors
+			if handlerErr != nil {
+				s.sendWebSocketError(conn, req.ID, ErrInternalError, "Internal error", handlerErr)
 				continue
 			}
 
