@@ -96,6 +96,7 @@ func (api *ValidatorAPI) StakeTokens(params json.RawMessage) (interface{}, error
 		Address     string  `json:"address"`
 		Amount      float64 `json:"amount"`
 		Signature   string  `json:"signature"`
+		PublicKey   string  `json:"publicKey"` // Sender's public key in hex format
 		Transaction string  `json:"transaction"`
 	}
 
@@ -161,6 +162,18 @@ func (api *ValidatorAPI) StakeTokens(params json.RawMessage) (interface{}, error
 			return nil, fmt.Errorf("transaction signature is required")
 		}
 
+		// Require public key if no full transaction was provided
+		if args.PublicKey == "" {
+			return nil, fmt.Errorf("sender's public key is required")
+		}
+
+		// Decode and set the public key
+		publicKeyBytes, err := hex.DecodeString(args.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid public key format: %v", err)
+		}
+		stakeTransaction.SenderPubKey = publicKeyBytes
+
 		// Apply provided signature
 		stakeTransaction.Signature = args.Signature
 
@@ -197,6 +210,7 @@ func (api *ValidatorAPI) UnstakeTokens(params json.RawMessage) (interface{}, err
 		Address     string  `json:"address"`
 		Amount      float64 `json:"amount"`
 		Signature   string  `json:"signature"`
+		PublicKey   string  `json:"publicKey"` // Sender's public key in hex format
 		Transaction string  `json:"transaction"`
 	}
 
@@ -264,6 +278,18 @@ func (api *ValidatorAPI) UnstakeTokens(params json.RawMessage) (interface{}, err
 		if args.Signature == "" {
 			return nil, fmt.Errorf("transaction signature is required")
 		}
+
+		// Require public key if no full transaction was provided
+		if args.PublicKey == "" {
+			return nil, fmt.Errorf("sender's public key is required")
+		}
+
+		// Decode and set the public key
+		publicKeyBytes, err := hex.DecodeString(args.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid public key format: %v", err)
+		}
+		unstakeTransaction.SenderPubKey = publicKeyBytes
 
 		// Apply provided signature
 		unstakeTransaction.Signature = args.Signature

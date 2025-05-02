@@ -60,6 +60,9 @@ const (
 	ProtocolID                   = "/blockchain/1.0.0"
 )
 
+// Add this constant with the other protocol constants at the top of the file
+const ValidatorBroadcastProtocol = "/blockchain/1.0.0/validator/broadcast"
+
 // NodeOptions contains options for creating a node
 type NodeOptions struct {
 	ListenAddr     string
@@ -127,6 +130,97 @@ type Node struct {
 	lastPeerDiscovery      time.Time
 	broadcastedBlocks      map[string]bool // Track broadcasted blocks by hash
 	broadcastMu            sync.RWMutex    // Mutex for broadcasted blocks map
+
+	// Notification callback fields
+	newBlockCallbacks       []func(*Block)
+	newTransactionCallbacks []func(*Transaction)
+	logEventCallbacks       []func(*LogEvent)
+	callbacksMu             sync.RWMutex
+}
+
+// LogEvent represents a log event emitted by transactions or smart contracts
+type LogEvent struct {
+	TransactionHash string
+	Address         string
+	Topics          []interface{}
+	Data            string
+	BlockNumber     uint64
+	LogIndex        int
+}
+
+// OnNewBlock registers a callback for new block events
+func (n *Node) OnNewBlock(callback func(*Block)) {
+	n.callbacksMu.Lock()
+	defer n.callbacksMu.Unlock()
+
+	if n.newBlockCallbacks == nil {
+		n.newBlockCallbacks = make([]func(*Block), 0)
+	}
+	n.newBlockCallbacks = append(n.newBlockCallbacks, callback)
+}
+
+// OnNewTransaction registers a callback for new transaction events
+func (n *Node) OnNewTransaction(callback func(*Transaction)) {
+	n.callbacksMu.Lock()
+	defer n.callbacksMu.Unlock()
+
+	if n.newTransactionCallbacks == nil {
+		n.newTransactionCallbacks = make([]func(*Transaction), 0)
+	}
+	n.newTransactionCallbacks = append(n.newTransactionCallbacks, callback)
+}
+
+// OnLogEvent registers a callback for log events
+func (n *Node) OnLogEvent(callback func(*LogEvent)) {
+	n.callbacksMu.Lock()
+	defer n.callbacksMu.Unlock()
+
+	if n.logEventCallbacks == nil {
+		n.logEventCallbacks = make([]func(*LogEvent), 0)
+	}
+	n.logEventCallbacks = append(n.logEventCallbacks, callback)
+}
+
+// NotifyNewBlock notifies all registered callbacks about a new block
+func (n *Node) NotifyNewBlock(block *Block) {
+	n.callbacksMu.RLock()
+	defer n.callbacksMu.RUnlock()
+
+	if n.newBlockCallbacks == nil {
+		return
+	}
+
+	for _, callback := range n.newBlockCallbacks {
+		go callback(block)
+	}
+}
+
+// NotifyNewTransaction notifies all registered callbacks about a new transaction
+func (n *Node) NotifyNewTransaction(tx *Transaction) {
+	n.callbacksMu.RLock()
+	defer n.callbacksMu.RUnlock()
+
+	if n.newTransactionCallbacks == nil {
+		return
+	}
+
+	for _, callback := range n.newTransactionCallbacks {
+		go callback(tx)
+	}
+}
+
+// NotifyLogEvent notifies all registered callbacks about a new log event
+func (n *Node) NotifyLogEvent(logEvent *LogEvent) {
+	n.callbacksMu.RLock()
+	defer n.callbacksMu.RUnlock()
+
+	if n.logEventCallbacks == nil {
+		return
+	}
+
+	for _, callback := range n.logEventCallbacks {
+		go callback(logEvent)
+	}
 }
 
 // publishMessage publishes a message to a specific topic using pubsub
@@ -236,13 +330,10 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 
 	// Set validator mode if specified
 	if config.ValidatorMode {
-		node.isInitializedValidator = true
-		log.Printf("🔐 Node initialized in validator mode")
-	}
-
-	// Initialize validator protocol if in validator mode
-	if config.ValidatorMode {
+		// Initialize validator protocol but don't mark as initialized yet
+		// This will be set later when we confirm this is a genesis validator
 		node.validatorProtocol = NewValidatorProtocol(node)
+		log.Printf("🔐 Node initialized with validator capabilities (not activated yet)")
 	}
 
 	// Initialize pubsub with validator-specific options
@@ -306,10 +397,12 @@ func (n *Node) Close() error {
 }
 
 // DiscoverPeers finds and connects to peers in the network
+// If forceDiscovery is true, discovery will proceed even for initialized validators
 func (n *Node) DiscoverPeers() error {
-	// Skip peer discovery if this is an initialized validator
-	if n.isInitializedValidator {
-		log.Printf("🔐 Skipping peer discovery for initialized validator")
+	// Check if we should skip discovery due to being an initialized validator
+	// but not when we're still in the initialization process
+	if n.isInitializedValidator && n.isRunning {
+		log.Printf("🔐 Skipping routine peer discovery for active validator")
 		return nil
 	}
 
@@ -343,6 +436,8 @@ func (n *Node) DiscoverPeers() error {
 		log.Printf("⚠️ No peers connected after discovery")
 	}
 
+	// Update last discovery time
+	n.lastPeerDiscovery = time.Now()
 	return nil
 }
 
@@ -511,6 +606,10 @@ func (n *Node) handleBlockStream(s network.Stream) {
 		}
 	}
 
+	// Notify subscribers about the new block
+	n.NotifyNewBlock(&block)
+	log.Printf("🔔 Notified subscribers about block #%d", block.Header.BlockNumber)
+
 	// Update peer score positively for good behavior
 	n.PeerManager.UpdatePeerScore(peerID, 5)
 }
@@ -631,6 +730,10 @@ func processTransaction(n *Node, peerID peer.ID, tx *Transaction) {
 		return
 	}
 	log.Printf("✅ Transaction %s successfully added to mempool", tx.TransactionID)
+
+	// Notify subscribers about the new transaction
+	n.NotifyNewTransaction(tx)
+	log.Printf("🔔 Notified subscribers about transaction %s", tx.TransactionID)
 
 	// Update peer score positively
 	n.PeerManager.UpdatePeerScore(peerID, 1)
@@ -782,9 +885,12 @@ func (n *Node) registerProtocolHandlers() {
 		n.validatorProtocol.Start()
 	}
 	n.Host.SetStreamHandler(BlockValidationProtocolID, n.handleMinerBlockValidationRequest)
+
+	// Add handler for validator broadcasts
+	n.Host.SetStreamHandler(ValidatorBroadcastProtocol, n.handleValidatorBroadcast)
+
 	log.Printf("✅ Protocol handlers registered successfully")
 
-	// Register validator handle
 }
 
 // handleValidatorStream processes incoming validator-related messages
@@ -2273,32 +2379,78 @@ func (n *Node) RegisterBlockchainHandlers(bc *Blockchain) error {
 func (n *Node) handleStakeSync(stream network.Stream) {
 	defer stream.Close()
 
-	// Decode the request
-	var request StakeSyncRequest
-	if err := json.NewDecoder(stream).Decode(&request); err != nil {
-		log.Printf("Error decoding stake sync request: %v", err)
+	peerID := stream.Conn().RemotePeer()
+	log.Printf("📥 Received stake sync request from %s", peerID.String())
+
+	// Read the data
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		log.Printf("❌ Error reading stake sync data: %v", err)
 		return
 	}
 
-	// Get current stake pool state
-	n.StakePool.mu.Lock()
-	stakes := make(map[string]*StakeInfo)
-	for wallet, stake := range n.StakePool.Stakes {
-		stakes[wallet] = stake
+	// Check if this is a sync request or an update
+	var syncRequest StakeSyncRequest
+	if err := json.Unmarshal(data, &syncRequest); err == nil && syncRequest.Type == "sync" {
+		// This is a sync request, respond with our full stake pool
+		log.Printf("ℹ️ Handling full stake pool sync request")
+		n.sendStakePoolData(stream)
+		return
 	}
+
+	// Otherwise, treat it as a stake update
+	var update map[string]interface{}
+	if err := json.Unmarshal(data, &update); err != nil {
+		log.Printf("❌ Error parsing stake update: %v", err)
+		return
+	}
+
+	// Extract validator information from update
+	validator, ok := update["validator"].(string)
+	if !ok {
+		log.Printf("❌ Invalid validator address in stake update")
+		return
+	}
+
+	stakeFloat, ok := update["stake"].(float64)
+	if !ok {
+		log.Printf("❌ Invalid stake amount in stake update")
+		return
+	}
+
+	hostID, ok := update["hostID"].(string)
+	if !ok {
+		log.Printf("❌ Invalid host ID in stake update")
+		return
+	}
+
+	log.Printf("📣 Received stake update for validator %s with stake %.4f", validator, stakeFloat)
+
+	// Update our stake pool
+	if n.StakePool != nil {
+		if err := n.StakePool.AddValidator(validator, stakeFloat, hostID); err != nil {
+			log.Printf("❌ Failed to update stake pool: %v", err)
+			return
+		}
+		log.Printf("✅ Stake pool updated successfully")
+	}
+}
+
+// sendStakePoolData sends our entire stake pool to the requester
+func (n *Node) sendStakePoolData(stream network.Stream) {
+	if n.StakePool == nil {
+		log.Printf("❌ Stake pool is nil, cannot send data")
+		return
+	}
+
+	// Prepare response data
+	n.StakePool.mu.Lock()
+	resp := n.StakePool.Stakes
 	n.StakePool.mu.Unlock()
 
-	// Log stake pool state being sent
-	log.Printf("Sending stake pool state to peer:")
-	log.Printf("Total validators: %d", len(stakes))
-	for wallet, stake := range stakes {
-		log.Printf("Validator %s: Stake %.4f", wallet, stake.Amount)
-	}
-
-	// Send stake pool state
-	if err := json.NewEncoder(stream).Encode(stakes); err != nil {
-		log.Printf("Error sending stake pool state: %v", err)
-		return
+	// Send the data
+	if err := json.NewEncoder(stream).Encode(resp); err != nil {
+		log.Printf("❌ Error sending stake pool data: %v", err)
 	}
 }
 
@@ -3007,13 +3159,10 @@ func NewNodeWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (*Node, e
 
 	// Set validator mode if specified
 	if config.ValidatorMode {
-		node.isInitializedValidator = true
-		log.Printf("🔐 Node initialized in validator mode")
-	}
-
-	// Initialize validator protocol if in validator mode
-	if config.ValidatorMode {
+		// Initialize validator protocol but don't mark as initialized yet
+		// This will be set later when we confirm this is a genesis validator
 		node.validatorProtocol = NewValidatorProtocol(node)
+		log.Printf("🔐 Node initialized with validator capabilities (not activated yet)")
 	}
 
 	// Initialize pubsub with validator-specific options
@@ -3137,4 +3286,153 @@ func (n *Node) BroadcastBlockToTXNSNode(block Block) error {
 	stream.Close()
 	log.Printf("✅ Successfully sent block #%d directly to TXNS node", block.Header.BlockNumber)
 	return nil
+}
+
+// Add this function to broadcast a new validator to the network
+func (n *Node) BroadcastNewValidator(validatorAddress string, stake float64, hostID string, txID string) error {
+	log.Printf("📣 Broadcasting new validator: %s with stake %.4f to the network", validatorAddress, stake)
+
+	// Create validator data structure
+	validatorData := map[string]interface{}{
+		"address":        validatorAddress,
+		"stake":          stake,
+		"host_id":        hostID,
+		"transaction_id": txID,
+		"timestamp":      time.Now().Unix(),
+	}
+
+	// Marshal to JSON
+	data, err := json.Marshal(validatorData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal validator data: %v", err)
+	}
+
+	// Get connected peers
+	peers := n.Host.Network().Peers()
+
+	// Keep track of successful broadcasts
+	successful := 0
+
+	// Broadcast to all peers
+	for _, peer := range peers {
+		// Skip ourselves
+		if peer == n.Host.ID() {
+			continue
+		}
+
+		// Create stream to peer
+		ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
+		stream, err := n.Host.NewStream(ctx, peer, ValidatorBroadcastProtocol)
+		cancel()
+
+		if err != nil {
+			log.Printf("⚠️ Failed to open stream to peer %s: %v", peer.String(), err)
+			continue
+		}
+
+		// Send data
+		_, err = stream.Write(data)
+		if err != nil {
+			log.Printf("⚠️ Failed to send validator data to peer %s: %v", peer.String(), err)
+			stream.Close()
+			continue
+		}
+
+		// Read acknowledgement
+		response := make([]byte, 2)
+		_, err = stream.Read(response)
+		if err != nil {
+			log.Printf("⚠️ Failed to read response from peer %s: %v", peer.String(), err)
+		} else if string(response) == "OK" {
+			successful++
+		}
+
+		stream.Close()
+	}
+
+	log.Printf("✅ Successfully broadcasted new validator to %d/%d peers", successful, len(peers)-1)
+	return nil
+}
+
+// Add handler for validator broadcast protocol
+func (n *Node) handleValidatorBroadcast(stream network.Stream) {
+	defer stream.Close()
+
+	peerID := stream.Conn().RemotePeer()
+	log.Printf("📥 Received validator broadcast from peer %s", peerID.String())
+
+	// Read all data from stream
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		log.Printf("❌ Error reading validator broadcast data: %v", err)
+		return
+	}
+
+	// Parse validator data
+	var validatorData map[string]interface{}
+	if err := json.Unmarshal(data, &validatorData); err != nil {
+		log.Printf("❌ Error parsing validator data: %v", err)
+		return
+	}
+
+	// Extract validator information
+	validatorAddress, ok := validatorData["address"].(string)
+	if !ok {
+		log.Printf("❌ Invalid validator address format")
+		return
+	}
+
+	stakeFloat, ok := validatorData["stake"].(float64)
+	if !ok {
+		log.Printf("❌ Invalid stake amount format")
+		return
+	}
+
+	hostID, ok := validatorData["host_id"].(string)
+	if !ok {
+		log.Printf("❌ Invalid host ID format")
+		return
+	}
+
+	txID, ok := validatorData["transaction_id"].(string)
+	if !ok {
+		log.Printf("❌ Invalid transaction ID format")
+		return
+	}
+
+	// Verify transaction exists and is confirmed
+	// This would typically check the blockchain or mempool
+	transactionValid := false
+	if n.Blockchain != nil {
+		// Check if transaction exists
+		tx, err := n.Blockchain.FindTransaction(txID)
+		if err == nil && tx != nil {
+			transactionValid = true
+		}
+	}
+
+	if !transactionValid {
+		log.Printf("⚠️ Cannot verify validator stake transaction %s", txID)
+		// Still proceed with adding validator as other nodes may have confirmed it
+	}
+
+	log.Printf("📋 New validator data:")
+	log.Printf("   • Address: %s", validatorAddress)
+	log.Printf("   • Stake: %.4f", stakeFloat)
+	log.Printf("   • Host ID: %s", hostID)
+	log.Printf("   • Transaction: %s", txID)
+
+	// Update stake pool with new validator
+	if n.StakePool != nil {
+		if err := n.StakePool.AddValidator(validatorAddress, stakeFloat, hostID); err != nil {
+			log.Printf("❌ Failed to add validator to stake pool: %v", err)
+			stream.Write([]byte("ER"))
+			return
+		}
+		log.Printf("✅ Successfully added validator %s to stake pool", validatorAddress)
+		stream.Write([]byte("OK"))
+	} else {
+		log.Printf("❌ Stake pool not available")
+		stream.Write([]byte("ER"))
+	}
 }

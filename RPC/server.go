@@ -15,29 +15,212 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 )
 
 // Config holds RPC server configuration
 type Config struct {
-	ListenAddr    string
-	EnableCORS    bool
-	EnableMetrics bool
+	ListenAddr          string
+	EnableCORS          bool
+	EnableMetrics       bool
+	EnableSubscriptions bool
+	WebSocketAddr       string
 }
 
 // RPCMethodHandler is a function type for RPC method handlers
 type RPCMethodHandler func(json.RawMessage) (interface{}, error)
 
+// Subscription represents a client subscription to blockchain events
+type Subscription struct {
+	ID           string
+	Type         string
+	Filters      map[string]interface{}
+	WebSocket    *websocket.Conn
+	CreatedAt    time.Time
+	LastActivity time.Time
+	ClientIP     string
+}
+
+// SubscriptionManager manages active subscriptions
+type SubscriptionManager struct {
+	subscriptions       map[string]*Subscription
+	clientSubscriptions map[string]map[string]bool // clientID -> map of subscription IDs
+	maxPerClient        int
+	mu                  sync.RWMutex
+}
+
+// NewSubscriptionManager creates a new subscription manager
+func NewSubscriptionManager(maxPerClient int) *SubscriptionManager {
+	return &SubscriptionManager{
+		subscriptions:       make(map[string]*Subscription),
+		clientSubscriptions: make(map[string]map[string]bool),
+		maxPerClient:        maxPerClient,
+	}
+}
+
+// AddSubscription adds a new subscription
+func (sm *SubscriptionManager) AddSubscription(clientIP string, subType string, filters map[string]interface{}, ws *websocket.Conn) (string, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Check if client has reached subscription limit
+	if _, exists := sm.clientSubscriptions[clientIP]; !exists {
+		sm.clientSubscriptions[clientIP] = make(map[string]bool)
+	}
+
+	if len(sm.clientSubscriptions[clientIP]) >= sm.maxPerClient {
+		return "", fmt.Errorf("subscription limit reached for client")
+	}
+
+	// Generate a new subscription ID
+	subID := uuid.New().String()
+
+	// Create new subscription
+	sub := &Subscription{
+		ID:           subID,
+		Type:         subType,
+		Filters:      filters,
+		WebSocket:    ws,
+		CreatedAt:    time.Now(),
+		LastActivity: time.Now(),
+		ClientIP:     clientIP,
+	}
+
+	// Add to subscription maps
+	sm.subscriptions[subID] = sub
+	sm.clientSubscriptions[clientIP][subID] = true
+
+	return subID, nil
+}
+
+// RemoveSubscription removes a subscription
+func (sm *SubscriptionManager) RemoveSubscription(subID string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sub, exists := sm.subscriptions[subID]
+	if !exists {
+		return false
+	}
+
+	// Remove from client subscriptions map
+	if subs, ok := sm.clientSubscriptions[sub.ClientIP]; ok {
+		delete(subs, subID)
+		if len(subs) == 0 {
+			delete(sm.clientSubscriptions, sub.ClientIP)
+		}
+	}
+
+	// Remove from subscriptions map
+	delete(sm.subscriptions, subID)
+	return true
+}
+
+// GetSubscriptions returns all subscriptions for a client
+func (sm *SubscriptionManager) GetSubscriptions(clientIP string) []string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	subs, exists := sm.clientSubscriptions[clientIP]
+	if !exists {
+		return []string{}
+	}
+
+	result := make([]string, 0, len(subs))
+	for subID := range subs {
+		result = append(result, subID)
+	}
+
+	return result
+}
+
+// NotifySubscribers notifies subscribers of an event
+func (sm *SubscriptionManager) NotifySubscribers(eventType string, data interface{}) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	for _, sub := range sm.subscriptions {
+		if sub.Type == eventType && sm.matchesFilters(sub, eventType, data) {
+			// Create notification payload
+			notification := map[string]interface{}{
+				"method": "sup_subscription",
+				"params": map[string]interface{}{
+					"subscription_id": sub.ID,
+					"result":          data,
+				},
+			}
+
+			// Send notification to client
+			if sub.WebSocket != nil && sub.WebSocket.WriteJSON(notification) == nil {
+				sub.LastActivity = time.Now()
+			}
+		}
+	}
+}
+
+// matchesFilters checks if an event matches subscription filters
+func (sm *SubscriptionManager) matchesFilters(sub *Subscription, eventType string, data interface{}) bool {
+	// If no filters, match all events of the requested type
+	if sub.Filters == nil || len(sub.Filters) == 0 {
+		return true
+	}
+
+	switch eventType {
+	case "logs":
+		// Match log events against address and topic filters
+		if log, ok := data.(map[string]interface{}); ok {
+			// Check address filter
+			if address, hasAddress := sub.Filters["address"]; hasAddress {
+				if logAddr, ok := log["address"].(string); ok && logAddr != address {
+					return false
+				}
+			}
+
+			// Check topics filter
+			if topics, hasTopics := sub.Filters["topics"].([]interface{}); hasTopics {
+				if logTopics, ok := log["topics"].([]interface{}); ok {
+					// Simple topic matching - each filter topic must match corresponding log topic
+					for i, filterTopic := range topics {
+						if i >= len(logTopics) || filterTopic != logTopics[i] {
+							return false
+						}
+					}
+				}
+			}
+			return true
+		}
+	case "pending_transactions":
+		// Match transaction events against address filter
+		if tx, ok := data.(map[string]interface{}); ok {
+			if address, hasAddress := sub.Filters["address"]; hasAddress {
+				from, hasFrom := tx["sender"].(string)
+				to, hasTo := tx["receiver"].(string)
+				return (hasFrom && from == address) || (hasTo && to == address)
+			}
+			return true
+		}
+	}
+
+	// Default: no filtering for other event types
+	return true
+}
+
 // RPCServer represents a JSON-RPC server
 type RPCServer struct {
-	node       *blockchain.Node
-	blockchain *blockchain.Blockchain
-	router     *mux.Router
-	server     *http.Server
-	methods    map[string]RPCMethodHandler
-	config     *Config
-	mu         sync.RWMutex
-	logger     *log.Logger
+	node            *blockchain.Node
+	blockchain      *blockchain.Blockchain
+	router          *mux.Router
+	server          *http.Server
+	methods         map[string]RPCMethodHandler
+	config          *Config
+	mu              sync.RWMutex
+	logger          *log.Logger
+	subscriptionMgr *SubscriptionManager
+	upgrader        websocket.Upgrader
+	wsConnections   map[*websocket.Conn]string // WebSocket -> client IP
+	wsConnectionsMu sync.RWMutex
 }
 
 // JSONRPCRequest represents a JSON-RPC 2.0 request
@@ -76,7 +259,49 @@ const (
 // Start starts the RPC server
 func (s *RPCServer) Start() error {
 	s.logger.Printf("Starting RPC server on %s", s.config.ListenAddr)
+
+	// Start subscription cleanup routine if subscriptions are enabled
+	if s.config.EnableSubscriptions {
+		go s.cleanupStaleSubscriptions()
+	}
+
 	return s.server.ListenAndServe()
+}
+
+// cleanupStaleSubscriptions periodically removes stale subscriptions
+func (s *RPCServer) cleanupStaleSubscriptions() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.subscriptionMgr.mu.Lock()
+
+			now := time.Now()
+			staleThreshold := 30 * time.Minute
+
+			// Find stale subscriptions
+			for id, sub := range s.subscriptionMgr.subscriptions {
+				if now.Sub(sub.LastActivity) > staleThreshold {
+					// Remove from client subscriptions map
+					if subs, ok := s.subscriptionMgr.clientSubscriptions[sub.ClientIP]; ok {
+						delete(subs, id)
+						if len(subs) == 0 {
+							delete(s.subscriptionMgr.clientSubscriptions, sub.ClientIP)
+						}
+					}
+
+					// Remove from subscriptions map
+					delete(s.subscriptionMgr.subscriptions, id)
+
+					s.logger.Printf("Removed stale subscription %s for client %s", id, sub.ClientIP)
+				}
+			}
+
+			s.subscriptionMgr.mu.Unlock()
+		}
+	}
 }
 
 // Stop stops the RPC server
@@ -123,8 +348,29 @@ func (s *RPCServer) handleRPCRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if this is a subscription method that requires context
+	subscriptionMethods := map[string]bool{
+		"sup_subscribe":        true,
+		"sup_unsubscribe":      true,
+		"sup_getSubscriptions": true,
+	}
+
+	var params interface{} = req.Params
+
+	// Add client context for subscription methods
+	if subscriptionMethods[req.Method] && s.config.EnableSubscriptions {
+		// Create extended context with client information
+		extendedContext := &jsonExtendedContext{
+			RawMessage: req.Params,
+			ClientIP:   r.RemoteAddr,
+			// WebSocket will be nil for HTTP requests,
+			// subscription methods will check and return appropriate error
+		}
+		params = extendedContext
+	}
+
 	// Execute method
-	result, err := handler(req.Params)
+	result, err := handler(params.(json.RawMessage))
 	if err != nil {
 		s.writeError(w, req.ID, -32603, "Internal error", err)
 		return
@@ -221,11 +467,22 @@ func (s *RPCServer) corsMiddleware(next http.Handler) http.Handler {
 // NewRPCServer creates a new RPC server instance
 func NewRPCServer(node *blockchain.Node, bc *blockchain.Blockchain, config *Config) *RPCServer {
 	server := &RPCServer{
-		node:       node,
-		blockchain: bc,
-		config:     config,
-		logger:     log.New(os.Stdout, "[RPC] ", log.LstdFlags),
-		methods:    make(map[string]RPCMethodHandler),
+		node:            node,
+		blockchain:      bc,
+		config:          config,
+		logger:          log.New(os.Stdout, "[RPC] ", log.LstdFlags),
+		methods:         make(map[string]RPCMethodHandler),
+		subscriptionMgr: NewSubscriptionManager(10), // Max 10 subscriptions per client
+		wsConnections:   make(map[*websocket.Conn]string),
+		upgrader: websocket.Upgrader{
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+			CheckOrigin: func(r *http.Request) bool {
+				// Allow all origins in this example
+				// In production, this should be more restrictive
+				return true
+			},
+		},
 	}
 
 	// Register all API methods
@@ -235,6 +492,14 @@ func NewRPCServer(node *blockchain.Node, bc *blockchain.Blockchain, config *Conf
 	router := mux.NewRouter()
 	router.HandleFunc("/", server.handleRPCRequest).Methods("POST")
 	router.HandleFunc("/health", server.handleHealthCheck).Methods("GET")
+
+	// Add WebSocket endpoint if subscriptions are enabled
+	if config.EnableSubscriptions {
+		router.HandleFunc("/ws", server.handleWebSocket)
+
+		// Setup blockchain event subscriptions
+		server.setupBlockchainSubscriptions()
+	}
 
 	// Add metrics endpoint if enabled
 	if config.EnableMetrics {
@@ -354,6 +619,13 @@ func (s *RPCServer) registerAllHandlers() {
 	s.registerMethod("getValidatorStats", validatorAPI.GetValidatorStats)
 	s.registerMethod("getDailyValidatorRewards", validatorAPI.GetDailyValidatorRewards)
 
+	// Register Subscription API methods
+	if s.config.EnableSubscriptions {
+		s.registerMethod("sup_subscribe", s.handleSupSubscribeWrapper)
+		s.registerMethod("sup_unsubscribe", s.handleSupUnsubscribeWrapper)
+		s.registerMethod("sup_getSubscriptions", s.handleSupGetSubscriptionsWrapper)
+	}
+
 	// Register internal handlers as alternatives/fallbacks
 	s.registerMethod("_internal_getBlockCount", s.internalGetBlockCount)
 	s.registerMethod("_internal_getBlockByHash", s.internalGetBlockByHash)
@@ -377,6 +649,22 @@ func (s *RPCServer) registerAllHandlers() {
 	s.registerMethod("_internal_createMultiSigWallet", s.internalCreateMultiSigWallet)
 	s.registerMethod("_internal_getValidators", s.internalGetValidators)
 	s.registerMethod("_internal_getStakeInfo", s.internalGetStakeInfo)
+}
+
+// Wrappers for subscription handlers to match RPCMethodHandler type
+func (s *RPCServer) handleSupSubscribeWrapper(params json.RawMessage) (interface{}, error) {
+	// This will be properly handled in handleRPCRequest where we set the extended context
+	return s.handleSupSubscribe(params)
+}
+
+func (s *RPCServer) handleSupUnsubscribeWrapper(params json.RawMessage) (interface{}, error) {
+	// This will be properly handled in handleRPCRequest where we set the extended context
+	return s.handleSupUnsubscribe(params)
+}
+
+func (s *RPCServer) handleSupGetSubscriptionsWrapper(params json.RawMessage) (interface{}, error) {
+	// This will be properly handled in handleRPCRequest where we set the extended context
+	return s.handleSupGetSubscriptions(params)
 }
 
 // Example handler implementations
@@ -1448,4 +1736,275 @@ func (s *RPCServer) internalGetStakeInfo(params json.RawMessage) (interface{}, e
 		return nil, fmt.Errorf(rpcErr.Message)
 	}
 	return result, nil
+}
+
+// handleWebSocket handles WebSocket connections
+func (s *RPCServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Upgrade HTTP connection to WebSocket
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		s.logger.Printf("Error upgrading to WebSocket: %v", err)
+		return
+	}
+
+	// Store client connection
+	clientIP := r.RemoteAddr
+	s.wsConnectionsMu.Lock()
+	s.wsConnections[conn] = clientIP
+	s.wsConnectionsMu.Unlock()
+
+	s.logger.Printf("New WebSocket connection from %s", clientIP)
+
+	// Handle WebSocket messages in a loop
+	go func() {
+		defer func() {
+			// Clean up connection when done
+			conn.Close()
+			s.wsConnectionsMu.Lock()
+			delete(s.wsConnections, conn)
+			s.wsConnectionsMu.Unlock()
+			s.logger.Printf("WebSocket connection closed for %s", clientIP)
+		}()
+
+		for {
+			// Read message
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					s.logger.Printf("WebSocket error: %v", err)
+				}
+				break
+			}
+
+			// Parse as JSON-RPC request
+			var req JSONRPCRequest
+			if err := json.Unmarshal(msg, &req); err != nil {
+				s.sendWebSocketError(conn, nil, ErrParseError, "Parse error", err)
+				continue
+			}
+
+			// Validate JSON-RPC version
+			if req.JSONRPC != "2.0" {
+				s.sendWebSocketError(conn, req.ID, ErrInvalidRequest, "Invalid Request", "Expected JSON-RPC 2.0")
+				continue
+			}
+
+			// Find method handler
+			s.mu.RLock()
+			handler, exists := s.methods[req.Method]
+			s.mu.RUnlock()
+
+			if !exists {
+				s.sendWebSocketError(conn, req.ID, ErrMethodNotFound, "Method not found", fmt.Sprintf("Method '%s' not found", req.Method))
+				continue
+			}
+
+			// Execute method
+			result, err := handler(req.Params)
+			if err != nil {
+				s.sendWebSocketError(conn, req.ID, ErrInternalError, "Internal error", err)
+				continue
+			}
+
+			// Send successful response
+			resp := JSONRPCResponse{
+				JSONRPC: "2.0",
+				Result:  result,
+				ID:      req.ID,
+			}
+
+			if err := conn.WriteJSON(resp); err != nil {
+				s.logger.Printf("Error writing response: %v", err)
+				break
+			}
+		}
+	}()
+}
+
+// sendWebSocketError sends a JSON-RPC error over WebSocket
+func (s *RPCServer) sendWebSocketError(conn *websocket.Conn, id interface{}, code int, message string, data interface{}) {
+	resp := JSONRPCResponse{
+		JSONRPC: "2.0",
+		Error: &RPCError{
+			Code:    code,
+			Message: message,
+			Data:    data,
+		},
+		ID: id,
+	}
+
+	if err := conn.WriteJSON(resp); err != nil {
+		s.logger.Printf("Error sending error response: %v", err)
+	}
+}
+
+// handleSupSubscribe handles sup_subscribe RPC method
+func (s *RPCServer) handleSupSubscribe(params interface{}) (interface{}, error) {
+	// Get client context
+	ctx, ok := params.(*jsonExtendedContext)
+	if !ok {
+		return nil, fmt.Errorf("missing context for subscription")
+	}
+
+	// Parse parameters from the RawMessage
+	var args []interface{}
+	if err := json.Unmarshal(ctx.RawMessage, &args); err != nil {
+		return nil, fmt.Errorf("invalid parameters: %v", err)
+	}
+
+	if len(args) < 1 {
+		return nil, fmt.Errorf("missing event type parameter")
+	}
+
+	// Get event type parameter
+	eventType, ok := args[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("event_type must be a string")
+	}
+
+	// Validate event type
+	validEventTypes := map[string]bool{
+		"new_blocks":           true,
+		"pending_transactions": true,
+		"logs":                 true,
+	}
+
+	if !validEventTypes[eventType] {
+		return nil, fmt.Errorf("unsupported event type: %s", eventType)
+	}
+
+	// Extract filters if provided
+	var filters map[string]interface{}
+	if len(args) > 1 {
+		if filtersArg, ok := args[1].(map[string]interface{}); ok {
+			filters = filtersArg
+		}
+	}
+
+	// WebSocket connection is required for subscriptions
+	if ctx.WebSocket == nil {
+		return nil, fmt.Errorf("WebSocket connection required for subscriptions")
+	}
+
+	// Create subscription
+	subID, err := s.subscriptionMgr.AddSubscription(ctx.ClientIP, eventType, filters, ctx.WebSocket)
+	if err != nil {
+		return nil, err
+	}
+
+	return subID, nil
+}
+
+// handleSupUnsubscribe handles sup_unsubscribe RPC method
+func (s *RPCServer) handleSupUnsubscribe(params interface{}) (interface{}, error) {
+	var rawMessage json.RawMessage
+
+	// Check if we received a jsonExtendedContext or a raw message
+	if ctx, ok := params.(*jsonExtendedContext); ok {
+		rawMessage = ctx.RawMessage
+	} else if rm, ok := params.(json.RawMessage); ok {
+		rawMessage = rm
+	} else {
+		return nil, fmt.Errorf("invalid parameters type")
+	}
+
+	// Parse parameters
+	var args []string
+	if err := json.Unmarshal(rawMessage, &args); err != nil {
+		return nil, fmt.Errorf("invalid parameters: %v", err)
+	}
+
+	if len(args) < 1 {
+		return nil, fmt.Errorf("missing subscription_id parameter")
+	}
+
+	// Get subscription ID
+	subscriptionID := args[0]
+
+	// Remove subscription
+	success := s.subscriptionMgr.RemoveSubscription(subscriptionID)
+
+	return success, nil
+}
+
+// handleSupGetSubscriptions handles sup_getSubscriptions RPC method
+func (s *RPCServer) handleSupGetSubscriptions(params interface{}) (interface{}, error) {
+	// Get client context
+	ctx, ok := params.(*jsonExtendedContext)
+	if !ok {
+		return nil, fmt.Errorf("missing context for subscription")
+	}
+
+	// Get subscriptions for client
+	subscriptions := s.subscriptionMgr.GetSubscriptions(ctx.ClientIP)
+
+	return subscriptions, nil
+}
+
+// jsonExtendedContext is used to pass additional context to RPC methods
+type jsonExtendedContext struct {
+	json.RawMessage
+	ClientIP  string
+	WebSocket *websocket.Conn
+}
+
+// UnmarshalJSON implements json.Unmarshaler for jsonExtendedContext
+func (c *jsonExtendedContext) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, &c.RawMessage)
+}
+
+// MarshalJSON implements json.Marshaler for jsonExtendedContext
+func (c jsonExtendedContext) MarshalJSON() ([]byte, error) {
+	return c.RawMessage.MarshalJSON()
+}
+
+// setupBlockchainSubscriptions sets up notification triggers for blockchain events
+func (s *RPCServer) setupBlockchainSubscriptions() {
+	// Listen for new blocks
+	s.node.OnNewBlock(func(block *blockchain.Block) {
+		// Create block notification data
+		blockData := map[string]interface{}{
+			"block_hash":   block.Hash(),
+			"block_number": block.Header.BlockNumber,
+			"timestamp":    block.Header.Timestamp,
+		}
+
+		// Notify subscribers
+		s.subscriptionMgr.NotifySubscribers("new_blocks", blockData)
+	})
+
+	// Listen for new transactions in mempool
+	s.node.OnNewTransaction(func(tx *blockchain.Transaction) {
+		// Create transaction notification data
+		txData := map[string]interface{}{
+			"tx_hash":   tx.TransactionID,
+			"sender":    tx.Sender,
+			"receiver":  tx.Receiver,
+			"amount":    tx.Amount,
+			"timestamp": tx.Timestamp,
+		}
+
+		// Notify subscribers
+		s.subscriptionMgr.NotifySubscribers("pending_transactions", txData)
+	})
+
+	// Listen for log events (if implemented)
+	s.node.OnLogEvent(func(log *blockchain.LogEvent) {
+		if log == nil {
+			return
+		}
+
+		// Create log notification data
+		logData := map[string]interface{}{
+			"tx_hash":      log.TransactionHash,
+			"address":      log.Address,
+			"topics":       log.Topics,
+			"data":         log.Data,
+			"block_number": log.BlockNumber,
+			"log_index":    log.LogIndex,
+		}
+
+		// Notify subscribers
+		s.subscriptionMgr.NotifySubscribers("logs", logData)
+	})
 }

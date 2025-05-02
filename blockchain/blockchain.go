@@ -648,12 +648,14 @@ func (bc *Blockchain) GetBlockByHeight(height interface{}) *Block {
 		return nil
 	}
 
-	// First check in memory
-	if h < uint64(len(bc.Chain)) {
-		block := &bc.Chain[h]
-		// Recalculate hash to ensure consistency
-		block.hash = block.Hash()
-		return block
+	// First check in memory by iterating through blocks to find the correct block number
+	for i := 0; i < len(bc.Chain); i++ {
+		if bc.Chain[i].Header.BlockNumber == h {
+			block := &bc.Chain[i]
+			// Recalculate hash to ensure consistency
+			block.hash = block.Hash()
+			return block
+		}
 	}
 
 	// If not in memory, try to get from database
@@ -1755,4 +1757,36 @@ func (bc *Blockchain) ProcessBlockUTXOs(block *Block) error {
 	}
 
 	return nil
+}
+
+// FindTransaction searches for a transaction by ID in the blockchain or mempool
+func (bc *Blockchain) FindTransaction(txID string) (*Transaction, error) {
+	if txID == "" {
+		return nil, fmt.Errorf("transaction ID cannot be empty")
+	}
+
+	// First check mempool
+	if bc.mempool != nil {
+		for _, tx := range bc.mempool.GetTransactions() {
+			if tx.TransactionID == txID {
+				return &tx, nil
+			}
+		}
+	}
+
+	// Then check blocks in reverse order (newest first)
+	height := bc.GetHeight()
+	for i := height; i >= 1; i-- {
+		block := bc.GetBlockByHeight(i)
+		if block == nil || block.Body == nil || block.Body.Transactions == nil {
+			continue
+		}
+
+		tx, found := block.Body.Transactions.Search(txID)
+		if found {
+			return tx, nil
+		}
+	}
+
+	return nil, fmt.Errorf("transaction %s not found", txID)
 }

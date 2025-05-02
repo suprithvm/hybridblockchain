@@ -582,3 +582,53 @@ func (tx *Transaction) SelectUTXOs(utxoPool *UTXOPool) error {
 
 	return nil
 }
+
+// NewStakeTransaction creates a new transaction for staking tokens
+func NewStakeTransaction(senderAddress string, amount float64, publicKey []byte) (*Transaction, error) {
+	if amount <= 0 {
+		return nil, fmt.Errorf("stake amount must be positive")
+	}
+
+	// Create a transaction to the system's stake pool
+	tx := &Transaction{
+		Sender:    senderAddress,
+		Receiver:  senderAddress, // Send to self first, UTXOs will be marked as staked
+		Amount:    amount,
+		Timestamp: time.Now().Unix(),
+		GasLimit:  0,        // No gas for stake transactions
+		GasPrice:  0,        // No gas price for stake transactions
+		GasUsed:   0,        // No gas used for stake transactions
+		GasFee:    0,        // No gas fee for stake transactions
+		Priority:  10,       // High priority for stake transactions
+		TxType:    TX_STAKE, // Mark as staking transaction
+		Inputs:    []TransactionInput{},
+		Outputs: []TransactionOutput{
+			{
+				Receiver:     senderAddress,
+				Amount:       amount,
+				ScriptPubKey: "STAKE", // Mark this output as staked
+			},
+		},
+		Data:         []byte(fmt.Sprintf("Stake %.4f", amount)),
+		SenderPubKey: publicKey,
+	}
+
+	// Generate unique ID for the transaction
+	txData := fmt.Sprintf("%s%s%.8f%d%d",
+		tx.Sender,
+		tx.Receiver,
+		tx.Amount,
+		tx.Timestamp,
+		tx.TxType)
+
+	// Add "STAKE" prefix to make it distinct
+	hashData := "STAKE-" + txData
+	hash := sha256.Sum256([]byte(hashData))
+	tx.TransactionID = hex.EncodeToString(hash[:])
+
+	// Log detailed information about transaction creation
+	log.Printf("[DEBUG] Transaction hash data: %s", txData)
+	log.Printf("[DEBUG] Hash to Sign: %s", tx.TransactionID)
+
+	return tx, nil
+}

@@ -39,6 +39,15 @@ type ValidatorSetUpdateMessage struct {
 	BlockHeight      uint64    `json:"block_height"`
 }
 
+// ValidatorRegistrationMessage represents a validator registration
+type ValidatorRegistrationMessage struct {
+	ValidatorAddress string    `json:"validator_address"`
+	Stake            float64   `json:"stake"`
+	HostID           string    `json:"host_id"`
+	Timestamp        time.Time `json:"timestamp"`
+	TransactionID    string    `json:"transaction_id"`
+}
+
 // ValidatorMessage represents a generic validator message
 type ValidatorMessage struct {
 	Type    string          `json:"type"`

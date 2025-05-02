@@ -84,51 +84,6 @@ func NewValidator(bc *Blockchain, config *ValidatorConfig, walletAddress string)
 		Performance: &ValidatorPerformance{LastUpdate: time.Now()},
 	}
 
-	// Register with stake pool only if this is a new validator
-	if bc != nil && bc.StakePool != nil {
-		// For genesis validators, we need to ensure they're registered before genesis block
-		if bc.GetHeight() == 0 {
-			log.Printf("🔐 Registering genesis validator %s with stake %.4f", walletAddress, config.Stake)
-
-			// Get node ID if available
-			var nodeID string
-			if bc.Node != nil && bc.Node.Host != nil {
-				nodeID = bc.Node.Host.ID().String()
-				log.Printf("📡 Using node ID: %s", nodeID)
-			} else {
-				// Generate a temporary node ID for genesis validator
-				tempID := fmt.Sprintf("genesis-validator-%s", walletAddress[:8])
-				log.Printf("⚠️ Node or Host not initialized, using temporary node ID: %s", tempID)
-				nodeID = tempID
-			}
-
-			if err := bc.StakePool.AddValidator(walletAddress, config.Stake, nodeID); err != nil {
-				return nil, fmt.Errorf("failed to register genesis validator: %v", err)
-			}
-			// Set validator as active for genesis
-			validator.Status = ValidatorStatusActive
-			validator.isValidating = true
-
-			// Add to blockchain's validator set
-			if bc.Validators == nil {
-				bc.Validators = make(map[string]*Validator)
-			}
-			bc.Validators[walletAddress] = validator
-
-			log.Printf("✅ Genesis validator %s registered and activated", walletAddress)
-		} else {
-			// For non-genesis validators, ensure node is initialized
-			if bc.Node == nil || bc.Node.Host == nil {
-				return nil, fmt.Errorf("cannot register validator: node not properly initialized")
-			}
-			// Register normally
-			if err := bc.StakePool.AddValidator(walletAddress, config.Stake, bc.Node.Host.ID().String()); err != nil {
-				return nil, fmt.Errorf("failed to register validator: %v", err)
-			}
-			log.Printf("✅ Validator %s registered with stake %.4f", walletAddress, config.Stake)
-		}
-	}
-
 	return validator, nil
 }
 
@@ -184,7 +139,6 @@ func (v *Validator) validate() {
 		// Get latest block
 		currentBlock := v.blockchain.GetLatestBlock()
 		if currentBlock.Header.BlockNumber == 0 {
-			log.Printf("⏳ Waiting for genesis block...")
 			continue
 		}
 

@@ -119,6 +119,7 @@ func (sp *StakePool) AddValidator(walletAddress string, stake float64, hostID st
 		log.Printf("     - Last Active: %s", stake.LastActive.Format(time.RFC3339))
 	}
 
+
 	return nil
 }
 
@@ -275,7 +276,7 @@ func (sp *StakePool) GetValidators(count int) ([]ValidatorNode, error) {
 	// Return requested number of validators
 	if count == 0 {
 		count = len(validators)
-	}else if count > len(validators) {
+	} else if count > len(validators) {
 		count = len(validators)
 	}
 
@@ -291,7 +292,7 @@ const (
 	MaxStakeAge          = 365 * 24 * time.Hour // Maximum age for stake weight calculation
 	BaseStakeWeight      = 100                  // Base weight for stake calculations
 	WithdrawalLockPeriod = 72 * time.Hour       // Time required before withdrawal
-	MinValidatorStake    = 0.0                  // Minimum stake required for validation (0 for genesis validators)
+	MinValidatorStake    = 1.0                  // Minimum stake required for validation (0 for genesis validators)
 	MaxInactivityPeriod  = 24 * time.Hour       // Maximum allowed inactivity period
 )
 
@@ -568,4 +569,9 @@ func (sp *StakePool) UpdateValidators(data []byte) error {
 	sp.stateRoot = info.StateRoot
 
 	return nil
+}
+
+// GetMinimumStake returns the minimum stake required for validation
+func (sp *StakePool) GetMinimumStake() float64 {
+	return MinValidatorStake
 }

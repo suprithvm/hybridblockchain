@@ -3,9 +3,11 @@ package api
 import (
 	"blockchain-core/blockchain"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 )
 
 // WalletAPI handles wallet-related RPC methods
@@ -380,6 +382,7 @@ func (api *WalletAPI) SignMessage(params json.RawMessage) (interface{}, error) {
 func (api *WalletAPI) VerifySignature(params json.RawMessage) (interface{}, error) {
 	var args struct {
 		Address   string `json:"address"`
+		PublicKey string `json:"publicKey"`
 		Message   string `json:"message"`
 		Signature string `json:"signature"`
 	}
@@ -392,6 +395,9 @@ func (api *WalletAPI) VerifySignature(params json.RawMessage) (interface{}, erro
 	if args.Address == "" {
 		return nil, fmt.Errorf("address is required")
 	}
+	if args.PublicKey == "" {
+		return nil, fmt.Errorf("publicKey is required")
+	}
 	if args.Message == "" {
 		return nil, fmt.Errorf("message is required")
 	}
@@ -399,16 +405,50 @@ func (api *WalletAPI) VerifySignature(params json.RawMessage) (interface{}, erro
 		return nil, fmt.Errorf("signature is required")
 	}
 
-	// Get public key from address - this is a simplification since we don't have access
-	// to a way to retrieve a public key from an address in this API context
+	// Decode the hex public key
+	publicKeyBytes, err := hex.DecodeString(args.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid public key format: %v", err)
+	}
 
-	// In a real implementation, we would need to have a way to resolve a public key
-	// For now, we'll return a result that indicates verification isn't possible
+	// Check if public key length is valid (must be at least 64 bytes for X and Y coordinates)
+	if len(publicKeyBytes) < 64 {
+		return nil, fmt.Errorf("invalid public key length: got %d, need at least 64 bytes", len(publicKeyBytes))
+	}
+
+	// Create ECDSA public key from the bytes
+	curve := elliptic.P256()
+	publicKey := &ecdsa.PublicKey{
+		Curve: curve,
+		X:     new(big.Int).SetBytes(publicKeyBytes[:32]),
+		Y:     new(big.Int).SetBytes(publicKeyBytes[32:64]),
+	}
+
+	// Verify the point is on the curve
+	if !curve.IsOnCurve(publicKey.X, publicKey.Y) {
+		return nil, fmt.Errorf("public key is not a valid point on the curve")
+	}
+
+	// Derive address from the public key
+	derivedAddress := blockchain.GenerateAddress(publicKey)
+
+	// Verify the address matches the provided address
+	if derivedAddress != args.Address {
+		return map[string]interface{}{
+			"address":  args.Address,
+			"message":  args.Message,
+			"isValid":  false,
+			"error":    "Public key does not match the provided address",
+			"expected": derivedAddress,
+		}, nil
+	}
+
+	// Verify the signature using the blockchain's VerifySignature function
+	isValid := blockchain.VerifySignature(publicKey, args.Message, args.Signature)
 
 	return map[string]interface{}{
 		"address": args.Address,
 		"message": args.Message,
-		"isValid": false,
-		"error":   "Verification not possible without public key",
+		"isValid": isValid,
 	}, nil
 }

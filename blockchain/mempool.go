@@ -114,15 +114,48 @@ func (m *Mempool) AddTransaction(tx Transaction, utxoSet map[string]UTXO) bool {
 func (m *Mempool) ValidateTransaction(tx Transaction, utxos map[string]UTXO) bool {
 	log.Printf("\n🔍 Validating Transaction: %s", tx.TransactionID)
 
-	// Skip validation for coinbase transactions
+	// Skip validation for coinbase and other system transactions
 	if tx.IsCoinbase() || tx.IsValidatorReward() {
 		return true
+	}
+
+	// Special handling for stake transactions
+	isStakeTransaction := tx.TxType == TX_STAKE
+	if isStakeTransaction {
+		log.Printf("🔒 Processing stake transaction")
 	}
 
 	// Validate gas parameters
 	if err := tx.ValidateGas(); err != nil {
 		log.Printf("❌ Gas validation failed: %v", err)
 		return false
+	}
+
+	// For stake transactions, verify proper structure
+	if isStakeTransaction {
+		if len(tx.Inputs) == 0 {
+			log.Printf("❌ Stake transaction has no inputs")
+			return false
+		}
+
+		// Verify the stake transaction has at least one output
+		if len(tx.Outputs) == 0 {
+			log.Printf("❌ Stake transaction has no outputs")
+			return false
+		}
+
+		// First output should be the stake amount sent to self
+		if tx.Outputs[0].Receiver != tx.Sender {
+			log.Printf("❌ Stake transaction main output must go to sender (got %s, expected %s)",
+				tx.Outputs[0].Receiver, tx.Sender)
+			return false
+		}
+
+		// Optional: Verify the output has the stake marker
+		if tx.Outputs[0].ScriptPubKey != "STAKE" {
+			log.Printf("⚠️ Stake transaction output doesn't have STAKE marker")
+			// Continue anyway, just a warning
+		}
 	}
 
 	// Validate inputs
@@ -145,14 +178,18 @@ func (m *Mempool) ValidateTransaction(tx Transaction, utxos map[string]UTXO) boo
 		inputSum += utxo.Amount
 	}
 
-	// Calculate total input value needed (amount + max gas fee)
-	maxGasFee := tx.GasLimit * tx.MaxFeePerGas
-	// Convert gas units to tokens before adding to amount
-	maxGasFeeInTokens := ConvertGasToTokens(maxGasFee)
-	totalRequired := tx.Amount + maxGasFeeInTokens
+	// Calculate required amount
+	totalRequired := tx.Amount
+
+	// Add gas fee for non-stake transactions
+	if !isStakeTransaction {
+		maxGasFee := tx.GasLimit * tx.MaxFeePerGas
+		maxGasFeeInTokens := ConvertGasToTokens(maxGasFee)
+		totalRequired += maxGasFeeInTokens
+	}
 
 	if inputSum < totalRequired {
-		log.Printf("❌ Insufficient funds for amount + gas: have %.8f, need %.8f",
+		log.Printf("❌ Insufficient funds: have %.8f, need %.8f",
 			inputSum, totalRequired)
 		return false
 	}
@@ -166,9 +203,15 @@ func (m *Mempool) ValidateTransaction(tx Transaction, utxos map[string]UTXO) boo
 	log.Printf("✅ Transaction validation successful")
 	log.Printf("   • Input Sum: %.8f", inputSum)
 	log.Printf("   • Amount: %.8f", tx.Amount)
-	log.Printf("   • Gas Limit: %d", tx.GasLimit)
-	log.Printf("   • Gas Price: %d", tx.GasPrice)
-	log.Printf("   • Max Gas Fee: %d gas units = %.8f tokens", maxGasFee, maxGasFeeInTokens)
+	if !isStakeTransaction {
+		log.Printf("   • Gas Limit: %d", tx.GasLimit)
+		log.Printf("   • Gas Price: %d", tx.GasPrice)
+		maxGasFee := tx.GasLimit * tx.MaxFeePerGas
+		maxGasFeeInTokens := ConvertGasToTokens(maxGasFee)
+		log.Printf("   • Max Gas Fee: %d gas units = %.8f tokens", maxGasFee, maxGasFeeInTokens)
+	} else {
+		log.Printf("   • Transaction Type: Stake Transaction")
+	}
 
 	return true
 }

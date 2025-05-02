@@ -6,3 +6,5 @@ miner_data/
 bootnode.key
 bootnode.addr
 validator_data/
+Validator_data/
+RPC/gitBook_docs/

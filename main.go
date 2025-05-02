@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -478,6 +479,21 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) error {
 		return fmt.Errorf("failed to connect to bootstrap nodes after %d attempts", maxRetries)
 	}
 
+	// After connecting to bootstrap nodes, add explicit bootstrap DHT call
+	if connected {
+		log.Printf("✅ Successfully connected to bootstrap nodes")
+
+		// Force peer discovery immediately after connecting to bootstrap nodes
+		log.Printf("🔍 Initiating immediate peer discovery through bootstrap nodes...")
+		if err := node.DiscoverPeers(); err != nil {
+			log.Printf("⚠️ Initial peer discovery failed: %v", err)
+		} else {
+			log.Printf("✅ Initial peer discovery initiated successfully")
+		}
+	} else {
+		return fmt.Errorf("failed to connect to bootstrap nodes after %d attempts", maxRetries)
+	}
+
 	// 6. Create validator instance
 	validator, err := blockchain.NewValidator(bc, &blockchain.ValidatorConfig{
 		Stake:        config.ValidatorStake,
@@ -492,39 +508,393 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) error {
 	}
 	log.Printf("✅ Validator instance created with stake: %.2f", config.ValidatorStake)
 
-	// Ensure the validator is properly registered with the blockchain
-	if bc.GetHeight() == 0 {
-		log.Printf("🔐 Ensuring validator is properly registered with blockchain")
-		// Force re-registration of the validator with the correct node ID
-		if bc.Node != nil && bc.Node.Host != nil {
-			nodeID := bc.Node.Host.ID().String()
-			log.Printf("📡 Re-registering validator with node ID: %s", nodeID)
-			if err := bc.StakePool.AddValidator(wallet.Address, config.ValidatorStake, nodeID); err != nil {
-				log.Printf("⚠️ Failed to re-register validator: %v", err)
-			} else {
-				log.Printf("✅ Validator re-registered successfully with node ID: %s", nodeID)
-			}
+	// 7. Wait for peer discovery and check for non-bootnode peers
+	log.Printf("👥 Waiting for peer discovery...")
+
+	// Actively attempt peer discovery several times to ensure complete discovery
+	for i := 0; i < 3; i++ {
+		// Actively discover peers before checking
+		if err := node.DiscoverPeers(); err != nil {
+			log.Printf("⚠️ Peer discovery attempt %d failed: %v", i+1, err)
+		}
+
+		// Wait longer between checks to ensure discovery completes
+		waitTime := time.Duration(3+i*2) * time.Second
+		time.Sleep(waitTime)
+
+		// Get current peer count
+		nonBootnodePeers := node.CountNonBootnodePeers()
+		log.Printf("👥 Check %d: Found %d non-bootnode peers", i+1, nonBootnodePeers)
+
+		// If we found peers already, no need to wait further
+		if nonBootnodePeers > 0 {
+			break
 		}
 	}
 
-	// 7. Check if this is a new blockchain
-	if bc.GetHeight() == 0 {
-		log.Printf("🌟 No existing blockchain found. Initializing as first validator...")
-		log.Printf("🌟 Creating genesis block...")
+	// Final check for peers after all attempts
+	nonBootnodePeers := node.CountNonBootnodePeers()
+	log.Printf("👥 Final check: Found %d non-bootnode peers", nonBootnodePeers)
 
+	// 8. Logic to handle genesis vs non-genesis validator
+	if bc.GetHeight() == 0 && nonBootnodePeers == 0 {
+		// This is a genesis validator on a new blockchain with no other peers
+		log.Printf("🌟 No existing blockchain or peers found. Initializing as genesis validator...")
+
+		// Register the validator with the stake pool
+		if bc.Node != nil && bc.Node.Host != nil {
+			nodeID := bc.Node.Host.ID().String()
+			log.Printf("🔐 Registering genesis validator with node ID: %s", nodeID)
+			if err := bc.StakePool.AddValidator(wallet.Address, config.ValidatorStake, nodeID); err != nil {
+				log.Printf("⚠️ Failed to register validator: %v", err)
+			} else {
+				log.Printf("✅ Genesis validator %s registered successfully with node ID: %s",
+					wallet.Address, nodeID)
+			}
+		}
+
+		// Initialize chain with genesis block
+		log.Printf("🌟 Creating genesis block...")
 		if err := bc.InitializeChain(); err != nil {
 			return fmt.Errorf("failed to initialize chain: %v", err)
 		}
 
 		displayGenesisBlock(bc, wallet.Address)
+
+		// Only NOW do we mark the node as an initialized validator
+		// This ensures peer discovery will work properly during startup
 		node.SetInitializedValidator(true)
-		log.Printf("🔐 Validator node activated and waiting for miner connections")
+		log.Printf("✅ Genesis validator node activated and waiting for connections")
 	} else {
-		log.Printf("📊 Existing blockchain found at height: %d", bc.GetHeight())
-		log.Printf("🔍 Validator will start validating from the current state")
+		log.Printf("📊 Existing blockchain or peers found. Joining as regular validator...")
+
+		if bc.GetHeight() == 0 {
+			// Wait for blockchain sync from peers
+			log.Printf("⏳ Waiting for blockchain sync from peers...")
+			// Wait for a bit to allow sync to start
+			time.Sleep(10 * time.Second)
+		} else {
+			log.Printf("📊 Local blockchain found at height: %d", bc.GetHeight())
+		}
+
+		// First, sync with existing peers to get latest blockchain state
+		log.Printf("🔄 Syncing blockchain state with network before staking...")
+		peerIDs := node.Host.Network().Peers()
+		if len(peerIDs) > 0 {
+			// Select a random peer to sync with
+			randIndex := rand.Intn(len(peerIDs))
+			syncPeerID := peerIDs[randIndex]
+
+			// Sync blockchain (blocks)
+			log.Printf("🔄 Syncing blockchain with peer: %s", syncPeerID.String())
+			if err := node.SyncWithPeer(syncPeerID); err != nil {
+				log.Printf("⚠️ Failed to sync blockchain: %v", err)
+			} else {
+				log.Printf("✅ Blockchain sync complete - current height: %d", bc.GetHeight())
+			}
+
+			// Sync stake pool specifically
+			log.Printf("🔄 Syncing stake pool with peer: %s", syncPeerID.String())
+			if err := bc.StakePool.SyncWithPeer(syncPeerID); err != nil {
+				log.Printf("⚠️ Failed to sync stake pool: %v", err)
+			} else {
+				log.Printf("✅ Stake pool sync complete")
+			}
+
+			// Sync mempool
+			log.Printf("🔄 Syncing mempool with peer: %s", syncPeerID.String())
+			if err := node.Mempool.SyncWithPeer(node, syncPeerID); err != nil {
+				log.Printf("⚠️ Failed to sync mempool: %v", err)
+			} else {
+				log.Printf("✅ Mempool sync complete")
+			}
+
+			// Refresh UTXO state after sync
+			log.Printf("🔄 Refreshing UTXO state after sync...")
+			utxoPool := bc.GetUTXOPool()
+			if utxoPool != nil {
+				senderUTXOs := utxoPool.GetUTXOsForAddress(wallet.Address)
+				availableBalance := 0.0
+				for _, utxo := range senderUTXOs {
+					if !utxo.Spent {
+						availableBalance += utxo.Amount
+					}
+				}
+
+				log.Printf("💰 Current wallet balance after sync: %.4f tokens", availableBalance)
+				if availableBalance < config.ValidatorStake {
+					log.Printf("⚠️ Warning: Current balance (%.4f) is less than required stake (%.4f)",
+						availableBalance, config.ValidatorStake)
+				} else {
+					log.Printf("✅ Sufficient balance for staking")
+				}
+			} else {
+				log.Printf("⚠️ Unable to refresh UTXO state - UTXO pool is nil")
+			}
+		} else {
+			log.Printf("⚠️ No peers found for syncing. Proceeding with local state.")
+		}
+
+		// Check if minimum stake is required
+		minStake := bc.StakePool.GetMinimumStake()
+		if minStake > 0 && config.ValidatorStake < minStake {
+			log.Printf("⚠️ Configured stake (%.2f) is below minimum required (%.2f)",
+				config.ValidatorStake, minStake)
+			log.Printf("⚠️ Adjusting stake to minimum required: %.2f", minStake)
+			config.ValidatorStake = minStake
+		}
+
+		// Create a staking transaction
+		log.Printf("💰 Creating stake transaction for %.2f tokens...", config.ValidatorStake)
+
+		// Final balance check before proceeding
+		finalUTXOPool := bc.GetUTXOPool()
+		if finalUTXOPool == nil {
+			return fmt.Errorf("UTXO pool is nil, cannot proceed with staking")
+		}
+
+		finalSenderUTXOs := finalUTXOPool.GetUTXOsForAddress(wallet.Address)
+		finalAvailableBalance := 0.0
+		for _, utxo := range finalSenderUTXOs {
+			if !utxo.Spent {
+				finalAvailableBalance += utxo.Amount
+			}
+		}
+
+		if finalAvailableBalance < config.ValidatorStake {
+			return fmt.Errorf("insufficient balance for staking: have %.4f, need %.4f",
+				finalAvailableBalance, config.ValidatorStake)
+		}
+
+		log.Printf("💰 Final balance check passed: %.4f tokens available", finalAvailableBalance)
+
+		// Prompt user for confirmation
+		fmt.Printf("\n⚠️ You are about to create a stake transaction of %.4f tokens. \nThis will register your node as a validator. Continue? (yes/no): ", config.ValidatorStake)
+		reader := bufio.NewReader(os.Stdin)
+		confirmation, _ := reader.ReadString('\n')
+		confirmation = strings.TrimSpace(confirmation)
+
+		if strings.ToLower(confirmation) != "yes" && strings.ToLower(confirmation) != "y" {
+			return fmt.Errorf("validator registration cancelled by user")
+		}
+
+		// Extract public key bytes from wallet
+		publicKeyBytes := append(wallet.PublicKey.X.Bytes(), wallet.PublicKey.Y.Bytes()...)
+		// Ensure we have exactly 64 bytes (32 for X, 32 for Y)
+		if len(publicKeyBytes) < 64 {
+			// Pad X component if needed
+			paddedX := make([]byte, 32)
+			xBytes := wallet.PublicKey.X.Bytes()
+			copy(paddedX[32-len(xBytes):], xBytes)
+
+			// Pad Y component if needed
+			paddedY := make([]byte, 32)
+			yBytes := wallet.PublicKey.Y.Bytes()
+			copy(paddedY[32-len(yBytes):], yBytes)
+
+			publicKeyBytes = append(paddedX, paddedY...)
+		}
+
+		stakeTransaction, err := blockchain.NewStakeTransaction(wallet.Address, config.ValidatorStake, publicKeyBytes)
+		if err != nil {
+			return fmt.Errorf("failed to create stake transaction: %v", err)
+		}
+
+		// Select UTXOs for the transaction
+		log.Printf("🔍 Selecting UTXOs for stake transaction...")
+		utxoPool := bc.GetUTXOPool()
+		if utxoPool == nil {
+			return fmt.Errorf("UTXO pool is nil, cannot select inputs for transaction")
+		}
+
+		// Get all UTXOs for the sender
+		senderUTXOs := utxoPool.GetUTXOsForAddress(wallet.Address)
+		if len(senderUTXOs) == 0 {
+			return fmt.Errorf("no UTXOs found for address %s, cannot stake tokens", wallet.Address)
+		}
+
+		// Calculate total available balance
+		availableBalance := 0.0
+		for _, utxo := range senderUTXOs {
+			if !utxo.Spent {
+				availableBalance += utxo.Amount
+			}
+		}
+
+		if availableBalance < config.ValidatorStake {
+			return fmt.Errorf("insufficient balance: have %.4f, need %.4f for staking",
+				availableBalance, config.ValidatorStake)
+		}
+
+		log.Printf("💰 Available balance: %.4f tokens", availableBalance)
+		log.Printf("🔒 Stake amount: %.4f tokens", config.ValidatorStake)
+
+		// Select suitable UTXOs for this transaction
+		selectedUTXOs := []blockchain.UTXO{}
+		selectedAmount := 0.0
+
+		// Sort by amount (largest first) for simplicity
+		sort.Slice(senderUTXOs, func(i, j int) bool {
+			return senderUTXOs[i].Amount > senderUTXOs[j].Amount
+		})
+
+		for _, utxo := range senderUTXOs {
+			if utxo.Spent {
+				continue
+			}
+			selectedUTXOs = append(selectedUTXOs, utxo)
+			selectedAmount += utxo.Amount
+			if selectedAmount >= config.ValidatorStake {
+				break
+			}
+		}
+
+		// Add inputs to transaction
+		for _, utxo := range selectedUTXOs {
+			stakeTransaction.AddInput(utxo.TransactionID, utxo.OutputIndex, "")
+		}
+
+		// Add change output if necessary
+		changeAmount := selectedAmount - config.ValidatorStake
+		if changeAmount > 0.0001 { // Small threshold to avoid dust outputs
+			stakeTransaction.AddChangeOutput(changeAmount)
+		}
+
+		// Sign the transaction
+		privateKey := wallet.PrivateKey
+		signature, err := blockchain.SignTransaction(stakeTransaction, privateKey)
+		if err != nil {
+			return fmt.Errorf("failed to sign stake transaction: %v", err)
+		}
+		stakeTransaction.Signature = signature
+
+		// Log the transaction details
+		log.Printf("📝 Stake transaction created:")
+		log.Printf("   • Transaction ID: %s", stakeTransaction.TransactionID)
+		log.Printf("   • From: %s", stakeTransaction.Sender)
+		log.Printf("   • Amount: %.4f", stakeTransaction.Amount)
+		log.Printf("   • Public key included: %v", len(stakeTransaction.SenderPubKey) == 64)
+
+		// Ask for final confirmation before broadcasting
+		fmt.Printf("\n🚀 Ready to broadcast transaction. Proceed? (yes/no): ")
+		broadcastConfirmation, _ := reader.ReadString('\n')
+		broadcastConfirmation = strings.TrimSpace(broadcastConfirmation)
+
+		if strings.ToLower(broadcastConfirmation) != "yes" && strings.ToLower(broadcastConfirmation) != "y" {
+			return fmt.Errorf("transaction broadcast cancelled by user")
+		}
+
+		// Broadcast the transaction
+		log.Printf("📣 Broadcasting stake transaction: %s", stakeTransaction.TransactionID)
+		if err := node.BroadcastTransaction(stakeTransaction, nil); err != nil {
+			return fmt.Errorf("failed to broadcast stake transaction: %v", err)
+		}
+
+		// Wait for transaction to be included in a block
+		log.Printf("⏳ Waiting for stake transaction to be confirmed...")
+		confirmed := false
+		var txBlock *blockchain.Block
+
+		// Try for up to 5 minutes (30 attempts with 10 second intervals)
+		for attempt := 1; attempt <= 30; attempt++ {
+			// Check if transaction is in a block
+			tx, err := bc.FindTransaction(stakeTransaction.TransactionID)
+			if err == nil && tx != nil {
+				// Transaction found, now find which block contains it
+				for i := uint64(1); i <= bc.GetHeight(); i++ {
+					block := bc.GetBlockByHeight(i)
+					if block == nil || block.Body == nil || block.Body.Transactions == nil {
+						continue
+					}
+
+					_, found := block.Body.Transactions.Search(stakeTransaction.TransactionID)
+					if found {
+						confirmed = true
+						txBlock = block
+						break
+					}
+				}
+			}
+
+			if confirmed {
+				break
+			}
+
+			// Check if still in mempool
+			inMempool := false
+			for _, tx := range node.Mempool.GetTransactions() {
+				if tx.TransactionID == stakeTransaction.TransactionID {
+					inMempool = true
+					break
+				}
+			}
+
+			if !inMempool && !confirmed {
+				log.Printf("⚠️ Transaction no longer in mempool and not confirmed - may have been rejected")
+				log.Printf("⚠️ This likely means the transaction failed validation. Common reasons:")
+				log.Printf("   • STAKEPOOL is not a valid UTXO destination")
+				log.Printf("   • Insufficient funds or no valid UTXOs found")
+				log.Printf("   • Transaction signature verification failed")
+				break
+			}
+
+			// Wait before next check
+			log.Printf("⏳ Waiting for confirmation... attempt %d/30", attempt)
+			time.Sleep(10 * time.Second)
+		}
+
+		if confirmed && txBlock != nil {
+			log.Printf("✅ Stake transaction confirmed in block #%d!", txBlock.Header.BlockNumber)
+
+			// Only register validator locally once transaction is confirmed
+			nodeID := node.Host.ID().String()
+			log.Printf("📡 Registering validator with node ID: %s", nodeID)
+			if err := bc.StakePool.AddValidator(wallet.Address, config.ValidatorStake, nodeID); err != nil {
+				log.Printf("⚠️ Failed to register validator: %v", err)
+				return fmt.Errorf("failed to register validator after confirmation: %v", err)
+			} else {
+				log.Printf("✅ Validator registered successfully in stake pool")
+			}
+
+			// Broadcast validator registration to other nodes
+			log.Printf("📣 Broadcasting validator registration to network...")
+			if err := node.BroadcastNewValidator(
+				wallet.Address,
+				config.ValidatorStake,
+				nodeID,
+				stakeTransaction.TransactionID,
+			); err != nil {
+				log.Printf("⚠️ Failed to broadcast validator registration: %v", err)
+			} else {
+				log.Printf("✅ Successfully broadcast validator registration to network")
+			}
+
+			// Start syncing with a random peer
+			peerIDs := node.Host.Network().Peers()
+			if len(peerIDs) > 0 {
+				// Select a random peer to sync with
+				randIndex := rand.Intn(len(peerIDs))
+				syncPeerID := peerIDs[randIndex]
+
+				log.Printf("🔄 Syncing blockchain state with peer: %s", syncPeerID.String())
+				if err := node.SyncWithPeer(syncPeerID); err != nil {
+					log.Printf("⚠️ Failed to sync with peer: %v", err)
+				}
+
+				// Sync stake pool specifically
+				if err := bc.StakePool.SyncWithPeer(syncPeerID); err != nil {
+					log.Printf("⚠️ Failed to sync stake pool: %v", err)
+				}
+			}
+		} else {
+			log.Printf("⚠️ Stake transaction was not confirmed within timeout period")
+			log.Printf("❌ Validator registration failed - transaction was not confirmed")
+			log.Printf("Please check your balances and try again.")
+			return fmt.Errorf("validator registration failed: stake transaction was not confirmed")
+		}
 	}
 
-	// 8. Start validator process
+	// 9. Start validator process
 	log.Printf("🚀 Starting validator process...")
 	if err := validator.Start(); err != nil {
 		return fmt.Errorf("failed to start validator: %v", err)
@@ -532,8 +902,14 @@ func runValidatorNode(config *NodeConfig, store *blockchain.Store) error {
 	log.Printf("✅ Validator process started successfully")
 	log.Printf("📡 Validator is now active and monitoring the network")
 	log.Printf("💰 Current stake: %.2f", config.ValidatorStake)
+	log.Printf("👀 Validator watching for new blocks - last processed: #%d", bc.GetHeight())
+	log.Printf("🔍 Validator status: Active=true, Stake=%.4f, Score=0", config.ValidatorStake)
 
-	// 9. Keep the node running
+	// Mark node as initialized validator to avoid redundant peer discovery
+	node.SetInitializedValidator(true)
+	log.Printf("🔐 Node marked as initialized validator")
+
+	// 10. Keep the node running
 	select {}
 }
 

@@ -104,11 +104,12 @@ func (api *TransactionAPI) GetAccountState(params json.RawMessage) (interface{},
 // CreateUnsignedTransaction creates an unsigned transaction structure
 func (api *TransactionAPI) CreateUnsignedTransaction(params json.RawMessage) (interface{}, error) {
 	var args struct {
-		From     string  `json:"from"`
-		To       string  `json:"to"`
-		Amount   float64 `json:"amount"`
-		GasPrice uint64  `json:"gasPrice"`
-		GasLimit uint64  `json:"gasLimit"`
+		From      string  `json:"from"`
+		To        string  `json:"to"`
+		Amount    float64 `json:"amount"`
+		GasPrice  uint64  `json:"gasPrice"`
+		GasLimit  uint64  `json:"gasLimit"`
+		PublicKey string  `json:"publicKey"` // Sender's public key in hex format
 	}
 
 	if err := json.Unmarshal(params, &args); err != nil {
@@ -129,6 +130,16 @@ func (api *TransactionAPI) CreateUnsignedTransaction(params json.RawMessage) (in
 		return nil, fmt.Errorf("failed to create transaction: %v", err)
 	}
 
+	// Set public key if provided
+	if args.PublicKey != "" {
+		// Decode the public key from hex
+		publicKeyBytes, err := hex.DecodeString(args.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid public key format: %v", err)
+		}
+		tx.SenderPubKey = publicKeyBytes
+	}
+
 	// Return the transaction object with a note about it being unsigned
 	return map[string]interface{}{
 		"transaction": tx,
@@ -146,6 +157,7 @@ func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{},
 		GasPrice       uint64  `json:"gasPrice"`
 		GasLimit       uint64  `json:"gasLimit"`
 		Signature      string  `json:"signature"`      // Signed transaction data
+		PublicKey      string  `json:"publicKey"`      // Sender's public key in hex format
 		RawTransaction string  `json:"rawTransaction"` // Optional: Complete serialized transaction
 		CallbackURL    string  `json:"callbackUrl"`    // Optional: URL to notify when transaction status changes
 	}
@@ -185,13 +197,24 @@ func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{},
 		if args.Signature == "" {
 			return nil, fmt.Errorf("transaction signature is required")
 		}
+		if args.PublicKey == "" {
+			return nil, fmt.Errorf("sender's public key is required")
+		}
+
+		// Decode the public key from hex
+		publicKeyBytes, err := hex.DecodeString(args.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid public key format: %v", err)
+		}
 
 		// Create unsigned transaction
-		var err error
 		tx, err = blockchain.NewTransaction(args.From, args.To, args.Amount, args.GasPrice, args.GasLimit)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create transaction: %v", err)
 		}
+
+		// Set the sender's public key
+		tx.SenderPubKey = publicKeyBytes
 
 		// Apply the provided signature - verify it's valid hex first
 		_, hexErr := hex.DecodeString(args.Signature)
