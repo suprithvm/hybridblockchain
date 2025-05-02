@@ -131,139 +131,11 @@ type Node struct {
 	broadcastedBlocks      map[string]bool // Track broadcasted blocks by hash
 	broadcastMu            sync.RWMutex    // Mutex for broadcasted blocks map
 
-	// Notification callback fields
-	newBlockCallbacks       []func(*Block)
-	newTransactionCallbacks []func(*Transaction)
-	logEventCallbacks       []func(*LogEvent)
+	
 	callbacksMu             sync.RWMutex
 }
 
-// LogEvent represents a log event emitted by transactions or smart contracts
-type LogEvent struct {
-	TransactionHash string
-	Address         string
-	Topics          []interface{}
-	Data            string
-	BlockNumber     uint64
-	LogIndex        int
-}
 
-// OnNewBlock registers a callback for new block events
-func (n *Node) OnNewBlock(callback func(*Block)) {
-	n.callbacksMu.Lock()
-	defer n.callbacksMu.Unlock()
-
-	if n.newBlockCallbacks == nil {
-		n.newBlockCallbacks = make([]func(*Block), 0)
-	}
-	n.newBlockCallbacks = append(n.newBlockCallbacks, callback)
-}
-
-// OnNewTransaction registers a callback for new transaction events
-func (n *Node) OnNewTransaction(callback func(*Transaction)) {
-	n.callbacksMu.Lock()
-	defer n.callbacksMu.Unlock()
-
-	if n.newTransactionCallbacks == nil {
-		n.newTransactionCallbacks = make([]func(*Transaction), 0)
-	}
-	n.newTransactionCallbacks = append(n.newTransactionCallbacks, callback)
-}
-
-// OnLogEvent registers a callback for log events
-func (n *Node) OnLogEvent(callback func(*LogEvent)) {
-	n.callbacksMu.Lock()
-	defer n.callbacksMu.Unlock()
-
-	if n.logEventCallbacks == nil {
-		n.logEventCallbacks = make([]func(*LogEvent), 0)
-	}
-	n.logEventCallbacks = append(n.logEventCallbacks, callback)
-}
-
-// NotifyNewBlock notifies all registered callbacks about a new block
-func (n *Node) NotifyNewBlock(block *Block) {
-	// Get the current node ID
-	nodeID := n.Host.ID().String()
-
-	// STRICT CHECK: Only the official RPC node can send notifications
-	// This prevents other nodes from triggering validation loops
-	if nodeID != "12D3KooWPKEzhaR6NGzJNMQ3nDSbWpeD7bpmVYwxQvHcxUT3eWwu" {
-		log.Printf("🔕 Node %s is NOT the RPC node - skipping block #%d notifications",
-			nodeID[:12], block.Header.BlockNumber)
-		return
-	}
-
-	n.callbacksMu.RLock()
-	defer n.callbacksMu.RUnlock()
-
-	if n.newBlockCallbacks == nil {
-		return
-	}
-
-	// This is the RPC node - OK to notify external subscribers
-	log.Printf("🔔 RPC node notifying external subscribers about block #%d",
-		block.Header.BlockNumber)
-
-	// Execute callbacks (for RPC server's WebSocket notifications, etc.)
-	for i, callback := range n.newBlockCallbacks {
-		log.Printf("  → Executing block notification callback #%d for block #%d",
-			i, block.Header.BlockNumber)
-		go callback(block)
-	}
-}
-
-// NotifyNewTransaction notifies all registered callbacks about a new transaction
-func (n *Node) NotifyNewTransaction(tx *Transaction) {
-	// Get the current node ID
-	nodeID := n.Host.ID().String()
-
-	// STRICT CHECK: Only the official RPC node can send notifications
-	// This prevents other nodes from triggering notification loops
-	if nodeID != "12D3KooWPKEzhaR6NGzJNMQ3nDSbWpeD7bpmVYwxQvHcxUT3eWwu" {
-		log.Printf("🔕 Node %s is NOT the RPC node - skipping transaction %s notifications",
-			nodeID[:12], tx.TransactionID[:10])
-		return
-	}
-
-	n.callbacksMu.RLock()
-	defer n.callbacksMu.RUnlock()
-
-	if n.newTransactionCallbacks == nil {
-		return
-	}
-
-	log.Printf("🔔 RPC node notifying subscribers about transaction %s", tx.TransactionID[:10])
-	for _, callback := range n.newTransactionCallbacks {
-		go callback(tx)
-	}
-}
-
-// NotifyLogEvent notifies all registered callbacks about a new log event
-func (n *Node) NotifyLogEvent(logEvent *LogEvent) {
-	// Get the current node ID
-	nodeID := n.Host.ID().String()
-
-	// STRICT CHECK: Only the official RPC node can send notifications
-	// This prevents other nodes from triggering notification loops
-	if nodeID != "12D3KooWPKEzhaR6NGzJNMQ3nDSbWpeD7bpmVYwxQvHcxUT3eWwu" {
-		log.Printf("🔕 Node %s is NOT the RPC node - skipping log event notifications", nodeID[:12])
-		return
-	}
-
-	n.callbacksMu.RLock()
-	defer n.callbacksMu.RUnlock()
-
-	if n.logEventCallbacks == nil {
-		return
-	}
-
-	log.Printf("🔔 RPC node notifying subscribers about log event from tx %s",
-		logEvent.TransactionHash[:10])
-	for _, callback := range n.logEventCallbacks {
-		go callback(logEvent)
-	}
-}
 
 // publishMessage publishes a message to a specific topic using pubsub
 func (n *Node) publishMessage(topic string, message interface{}) error {
@@ -648,20 +520,7 @@ func (n *Node) handleBlockStream(s network.Stream) {
 		}
 	}
 
-	// Notify external subscribers (like RPC clients) about the new block
-	// But be cautious not to trigger unnecessary P2P rebroadcasts
-	nodeID := n.Host.ID().String()
-
-	// Check if this is the RPC node - if so, log specially
-	if nodeID == "12D3KooWPKEzhaR6NGzJNMQ3nDSbWpeD7bpmVYwxQvHcxUT3eWwu" {
-		log.Printf("🔔 RPC node notifying subscribers about block #%d", block.Header.BlockNumber)
-	} else {
-		log.Printf("🔔 Node %s notifying external subscribers about block #%d",
-			nodeID[:12], block.Header.BlockNumber)
-	}
-
-	// Notify subscribers about the new block
-	n.NotifyNewBlock(&block)
+	
 
 	// Update peer score positively for good behavior
 	n.PeerManager.UpdatePeerScore(peerID, 5)
@@ -784,9 +643,7 @@ func processTransaction(n *Node, peerID peer.ID, tx *Transaction) {
 	}
 	log.Printf("✅ Transaction %s successfully added to mempool", tx.TransactionID)
 
-	// Notify subscribers about the new transaction
-	n.NotifyNewTransaction(tx)
-	log.Printf("🔔 Notified subscribers about transaction %s", tx.TransactionID)
+	
 
 	// Update peer score positively
 	n.PeerManager.UpdatePeerScore(peerID, 1)

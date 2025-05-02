@@ -2074,75 +2074,106 @@ func (c jsonExtendedContext) MarshalJSON() ([]byte, error) {
 func (s *RPCServer) setupBlockchainSubscriptions() {
 	s.logger.Printf("🔄 Setting up blockchain subscriptions for RPC server...")
 
-	// Listen for new blocks
-	s.node.OnNewBlock(func(block *blockchain.Block) {
-		s.logger.Printf("📥 RPC server received block #%d notification from node",
-			block.Header.BlockNumber)
+	// Periodically check blockchain state and notify subscribers
+	go func() {
+		// Create channels for graceful shutdown
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
 
-		// Create block notification data
-		blockData := map[string]interface{}{
-			"block_hash":   block.Hash(),
-			"block_number": block.Header.BlockNumber,
-			"timestamp":    block.Header.Timestamp,
+		// Track last seen block and transaction state
+		lastBlockHeight := s.blockchain.GetHeight()
+		knownTxIDs := make(map[string]bool)
+
+		// Initialize with current mempool transactions
+		for _, tx := range s.node.Mempool.GetTransactions() {
+			knownTxIDs[tx.TransactionID] = true
 		}
 
-		// Notify websocket subscribers only (don't cause p2p rebroadcasting)
-		s.logger.Printf("📤 RPC server forwarding block #%d to %d subscribers",
-			block.Header.BlockNumber, len(s.subscriptionMgr.subscriptions))
-		s.subscriptionMgr.NotifySubscribers("new_blocks", blockData)
+		s.logger.Printf("✅ Blockchain subscription monitoring started at block #%d", lastBlockHeight)
 
-		s.logger.Printf("🔔 RPC server completed notification for block #%d", block.Header.BlockNumber)
-	})
+		for {
+			select {
+			case <-ticker.C:
+				// Check for new blocks
+				currentHeight := s.blockchain.GetHeight()
+				if currentHeight > lastBlockHeight {
+					s.logger.Printf("📊 Detected new block: #%d (previous: #%d)",
+						currentHeight, lastBlockHeight)
 
-	// Listen for new transactions in mempool
-	s.node.OnNewTransaction(func(tx *blockchain.Transaction) {
-		s.logger.Printf("📥 RPC server received transaction %s notification from node",
-			tx.TransactionID[:10])
+					// Process all new blocks
+					for height := lastBlockHeight + 1; height <= currentHeight; height++ {
+						block := s.blockchain.GetBlockByHeight(height)
+						if block != nil {
+							// Create block notification data
+							blockData := map[string]interface{}{
+								"block_hash":   block.Hash(),
+								"block_number": block.Header.BlockNumber,
+								"timestamp":    block.Header.Timestamp,
+							}
 
-		// Create transaction notification data
-		txData := map[string]interface{}{
-			"tx_hash":   tx.TransactionID,
-			"sender":    tx.Sender,
-			"receiver":  tx.Receiver,
-			"amount":    tx.Amount,
-			"timestamp": tx.Timestamp,
+							// Notify websocket subscribers
+							s.logger.Printf("📤 RPC server forwarding block #%d to subscribers",
+								block.Header.BlockNumber)
+							s.subscriptionMgr.NotifySubscribers("new_blocks", blockData)
+						}
+					}
+
+					// Update last known block height
+					lastBlockHeight = currentHeight
+				}
+
+				// Check for new transactions in mempool
+				currentTxs := s.node.Mempool.GetTransactions()
+				newTxsFound := false
+
+				for _, tx := range currentTxs {
+					if !knownTxIDs[tx.TransactionID] {
+						// This is a new transaction
+						newTxsFound = true
+						knownTxIDs[tx.TransactionID] = true
+
+						// Create transaction notification data
+						txData := map[string]interface{}{
+							"tx_hash":   tx.TransactionID,
+							"sender":    tx.Sender,
+							"receiver":  tx.Receiver,
+							"amount":    tx.Amount,
+							"timestamp": tx.Timestamp,
+						}
+
+						// Notify subscribers
+						s.logger.Printf("📤 RPC server forwarding new transaction %s to subscribers",
+							tx.TransactionID[:10])
+						s.subscriptionMgr.NotifySubscribers("pending_transactions", txData)
+					}
+				}
+
+				// Clean up the knownTxIDs map by removing transactions that are no longer in the mempool
+				// This happens when transactions get included in blocks or are evicted
+				if len(knownTxIDs) > 1000 { // Only clean up if the map is getting large
+					// Create a map of current transactions in mempool
+					currentTxMap := make(map[string]bool)
+					for _, tx := range currentTxs {
+						currentTxMap[tx.TransactionID] = true
+					}
+
+					// Remove transactions that are no longer in mempool
+					for txID := range knownTxIDs {
+						if !currentTxMap[txID] {
+							delete(knownTxIDs, txID)
+						}
+					}
+
+					s.logger.Printf("🧹 Cleaned up transaction tracking map, now tracking %d transactions",
+						len(knownTxIDs))
+				}
+
+				if newTxsFound {
+					s.logger.Printf("📊 Now tracking %d transactions in mempool", len(knownTxIDs))
+				}
+			}
 		}
-
-		// Notify subscribers
-		s.logger.Printf("📤 RPC server forwarding transaction %s to %d subscribers",
-			tx.TransactionID[:10], len(s.subscriptionMgr.subscriptions))
-		s.subscriptionMgr.NotifySubscribers("pending_transactions", txData)
-
-		s.logger.Printf("🔔 RPC server completed notification for transaction %s", tx.TransactionID[:10])
-	})
-
-	// Listen for log events (if implemented)
-	s.node.OnLogEvent(func(log *blockchain.LogEvent) {
-		if log == nil {
-			return
-		}
-
-		s.logger.Printf("📥 RPC server received log event notification from tx %s",
-			log.TransactionHash[:10])
-
-		// Create log notification data
-		logData := map[string]interface{}{
-			"tx_hash":      log.TransactionHash,
-			"address":      log.Address,
-			"topics":       log.Topics,
-			"data":         log.Data,
-			"block_number": log.BlockNumber,
-			"log_index":    log.LogIndex,
-		}
-
-		// Notify subscribers
-		s.logger.Printf("📤 RPC server forwarding log event to %d subscribers",
-			len(s.subscriptionMgr.subscriptions))
-		s.subscriptionMgr.NotifySubscribers("logs", logData)
-
-		s.logger.Printf("🔔 RPC server completed notification for log event from tx %s",
-			log.TransactionHash[:10])
-	})
+	}()
 
 	s.logger.Printf("✅ Blockchain subscription setup completed for RPC server")
 }
