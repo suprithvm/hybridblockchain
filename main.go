@@ -2332,11 +2332,13 @@ func runRPCNode(config *NodeConfig, store *blockchain.Store) error {
 	rpcAddr := config.RPCAddr
 	log.Printf("🚀 Starting JSON-RPC server on %s", rpcAddr)
 
-	// Create RPC server configuration
+	// Create RPC configuration
 	rpcConfig := &RPC.Config{
-		ListenAddr:    rpcAddr,
-		EnableCORS:    true,
-		EnableMetrics: config.EnableMetrics,
+		ListenAddr:          rpcAddr,
+		EnableCORS:          true,
+		EnableMetrics:       config.EnableMetrics,
+		EnableSubscriptions: true,
+		WebSocketAddr:       rpcAddr, // Use same address for WebSocket
 	}
 
 	// Create RPC server instance
@@ -2364,7 +2366,15 @@ func runRPCNode(config *NodeConfig, store *blockchain.Store) error {
 	log.Printf("   • createWallet - Create a new wallet")
 	log.Printf("   • importWallet - Import a wallet from mnemonic")
 	log.Printf("   • getValidators - Get list of validators")
-	log.Printf("   • and many more...")
+
+	// Log subscription methods
+	log.Printf("📊 Subscription methods (WebSocket preferred, HTTP for testing):")
+	log.Printf("   • sup_subscribe - Subscribe to blockchain events")
+	log.Printf("     Example: {\"jsonrpc\":\"2.0\",\"method\":\"sup_subscribe\",\"params\":[\"new_blocks\"],\"id\":1}")
+	log.Printf("   • sup_unsubscribe - Unsubscribe from events")
+	log.Printf("     Example: {\"jsonrpc\":\"2.0\",\"method\":\"sup_unsubscribe\",\"params\":[\"subscription_id\"],\"id\":2}")
+	log.Printf("   • sup_getSubscriptions - List active subscriptions")
+	log.Printf("     Example: {\"jsonrpc\":\"2.0\",\"method\":\"sup_getSubscriptions\",\"id\":3}")
 
 	log.Printf("✅ RPC node is fully initialized and running")
 	log.Printf("💡 Press Ctrl+C to exit")
