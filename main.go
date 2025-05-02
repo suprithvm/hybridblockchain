@@ -29,7 +29,7 @@ import (
 )
 
 // Constant for TXNS node ID to skip during block propagation
-const TXNSNodeID = "12D3KooWFz4MY4XYWW49fZP3WpzSe3eoEUzrg5k92zPvkD7VkW31"
+const TXNSNodeID = "12D3KooWPKEzhaR6NGzJNMQ3nDSbWpeD7bpmVYwxQvHcxUT3eWwu"
 
 type NodeRole int
 
@@ -188,6 +188,15 @@ func runBootstrapNode(config *NodeConfig) {
 
 func runMinerNode(config *NodeConfig, store *blockchain.Store) error {
 	log.Printf("⛏️ Starting Miner Node")
+
+	if config.ListenAddr == ":50505" {
+		config.ListenAddr = ":50509" // Use different P2P port
+		log.Printf("📡 Using alternate P2P port: %s to avoid conflicts", config.ListenAddr)
+	}
+	if config.RPCAddr == ":8545" {
+			config.RPCAddr = ":8549" // Use different RPC port
+			log.Printf("🌐 Using alternate RPC port: %s to avoid conflicts", config.RPCAddr)
+	}
 
 	// Load or create wallet
 	wallet, err := setupWallet(config.DataDir)

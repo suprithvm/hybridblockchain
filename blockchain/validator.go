@@ -117,68 +117,11 @@ func (v *Validator) Start() error {
 	log.Printf("⏱️ Block timeout: %s, Max missed blocks: %d",
 		v.config.BlockTimeout, v.config.MaxMissed)
 
-	// Start validation in background
-	go v.validate()
 
 	return nil
 }
 
-func (v *Validator) validate() {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
 
-	log.Printf("👀 Validator watching for new blocks - last processed: #%d", v.lastBlock)
-	log.Printf("🔍 Validator status: Active=%v, Stake=%.4f, Score=%d", v.isValidating, v.config.Stake, v.Score)
-
-	processedBlocks := make(map[string]bool)
-
-	for range ticker.C {
-		if !v.isValidating {
-			log.Printf("🛑 Validation process terminated")
-			return
-		}
-
-		// Get latest block
-		currentBlock := v.blockchain.GetLatestBlock()
-		if currentBlock.Header.BlockNumber == 0 {
-			continue
-		}
-
-		// Check if we missed any blocks
-		if currentBlock.Header.BlockNumber > v.lastBlock+1 {
-			missed := currentBlock.Header.BlockNumber - v.lastBlock - 1
-			log.Printf("⚠️ Missed %d blocks between #%d and #%d", missed, v.lastBlock, currentBlock.Header.BlockNumber)
-			v.handleMissedBlocks(int(missed))
-		}
-
-		// Get block hash for deduplication
-		blockHash := currentBlock.Hash()
-
-		// Validate new block if available AND not already processed
-		// This prevents duplicate validation of the same block from multiple notifications
-		if currentBlock.Header.BlockNumber > v.lastBlock && !processedBlocks[blockHash] {
-			log.Printf("🔍 New block #%d detected - beginning validation", currentBlock.Header.BlockNumber)
-			log.Printf("   • Hash: %s", blockHash)
-			log.Printf("   • Previous Hash: %s", currentBlock.Header.PreviousHash)
-			log.Printf("   • Timestamp: %s", time.Unix(currentBlock.Header.Timestamp, 0).Format(time.RFC3339))
-			log.Printf("   • Transactions: %d", len(currentBlock.Body.Transactions.GetAllTransactions()))
-			log.Printf("   • Source: Blockchain notification via validator.validate()")
-
-			// Mark block as processed BEFORE validation to prevent concurrent validations
-			processedBlocks[blockHash] = true
-
-			if err := v.validateBlock(currentBlock); err != nil {
-				log.Printf("❌ Block validation failed: %v", err)
-				continue
-			}
-			log.Printf("✅ Block #%d successfully validated", currentBlock.Header.BlockNumber)
-			v.lastBlock = currentBlock.Header.BlockNumber
-			v.distributeRewards(currentBlock)
-		} else {
-			log.Printf("👀 Waiting for new blocks... Current height: #%d", currentBlock.Header.BlockNumber)
-		}
-	}
-}
 
 func (v *Validator) validateBlock(block Block) error {
 	log.Printf("🔐 Validating block #%d with hash %s", block.Header.BlockNumber, block.Hash())
