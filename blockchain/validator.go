@@ -277,8 +277,19 @@ func (v *Validator) calculateStateRoot(txs []Transaction) string {
 }
 
 func (v *Validator) validateStateTransitions(block Block) error {
-	// Verify state root
-	stateRoot := v.calculateStateRoot(block.Body.Transactions.GetAllTransactions())
+	// Create a temporary UTXO pool clone to simulate the state transitions
+	tempPool := v.blockchain.utxoPool.Clone()
+
+	// Apply the transactions to the temporary pool
+	for _, tx := range block.Body.Transactions.GetAllTransactions() {
+		// Process the transaction on the temporary UTXO pool
+		txCopy := tx
+		tempPool.AddUTXO(&txCopy, block.Header.BlockNumber)
+	}
+
+	// Calculate the state root using the same method as the block processor
+	stateRoot := tempPool.GetMerkleRoot()
+
 	if stateRoot != block.Header.StateRoot {
 		return fmt.Errorf("invalid state root")
 	}

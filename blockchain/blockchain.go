@@ -527,6 +527,20 @@ func (bc *Blockchain) AddBlockWithoutValidation(block *Block) error {
 	bc.currentHash = block.hash
 
 	log.Printf("✅ Added block #%d to chain without validation", block.Header.BlockNumber)
+
+	// Process UTXOs for this block
+	if bc.utxoPool != nil {
+		err := bc.utxoPool.ProcessBlockTransactions(block)
+		if err != nil {
+			log.Printf("⚠️ Warning: Error processing UTXOs for block %d: %v",
+				block.Header.BlockNumber, err)
+			// Don't return error here, as the block has already been added
+		} else {
+			log.Printf("✅ Successfully updated UTXO state for block #%d",
+				block.Header.BlockNumber)
+		}
+	}
+
 	return nil
 }
 
