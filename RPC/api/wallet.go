@@ -452,3 +452,130 @@ func (api *WalletAPI) VerifySignature(params json.RawMessage) (interface{}, erro
 		"isValid": isValid,
 	}, nil
 }
+
+// SignTransaction signs a transaction using the provided wallet credentials
+func (api *WalletAPI) SignTransaction(params json.RawMessage) (interface{}, error) {
+	var args struct {
+		Mnemonic            string                 `json:"mnemonic"`
+		PrivateKey          string                 `json:"privateKey"`
+		TransactionID       string                 `json:"transactionId"`
+		UnsignedTransaction map[string]interface{} `json:"unsignedTransaction"`
+		RawTransaction      string                 `json:"rawTransaction"`
+	}
+
+	if err := json.Unmarshal(params, &args); err != nil {
+		return nil, fmt.Errorf("invalid parameters: %v", err)
+	}
+
+	// Make sure we have a way to recover the wallet
+	if args.Mnemonic == "" && args.PrivateKey == "" {
+		return nil, fmt.Errorf("either mnemonic or private key is required to sign transaction")
+	}
+
+	// Make sure we have transaction data to sign
+	if args.UnsignedTransaction == nil && args.RawTransaction == "" && args.TransactionID == "" {
+		return nil, fmt.Errorf("transaction data is required (provide either unsignedTransaction, rawTransaction, or transactionId)")
+	}
+
+	// Recover wallet
+	var wallet *blockchain.Wallet
+	var err error
+
+	if args.Mnemonic != "" {
+		wallet, err = blockchain.RecoverWalletFromMnemonic(args.Mnemonic)
+		if err != nil {
+			return nil, fmt.Errorf("failed to recover wallet from mnemonic: %v", err)
+		}
+	} else {
+		// Recover from private key
+		privateKeyBytes, err := hex.DecodeString(args.PrivateKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid private key format: %v", err)
+		}
+
+		// Deserialize private key (empty public key for now)
+		privateKey, publicKey, err := blockchain.DeserializeKeys(privateKeyBytes, make([]byte, 64))
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize private key: %v", err)
+		}
+
+		// Create wallet from private key
+		wallet = blockchain.NewWalletFromPrivateKey(privateKey)
+
+		// Make sure public key was generated correctly
+		if wallet.PublicKey == nil || publicKey == nil {
+			return nil, fmt.Errorf("failed to generate public key from private key")
+		}
+	}
+
+	// Get the transaction to sign
+	var tx *blockchain.Transaction
+
+	if args.UnsignedTransaction != nil {
+		// Convert map to Transaction
+		jsonData, err := json.Marshal(args.UnsignedTransaction)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal unsigned transaction: %v", err)
+		}
+
+		tx = &blockchain.Transaction{}
+		if err := json.Unmarshal(jsonData, tx); err != nil {
+			return nil, fmt.Errorf("failed to parse unsigned transaction: %v", err)
+		}
+	} else if args.RawTransaction != "" {
+		// Decode hex-encoded transaction
+		txBytes, err := hex.DecodeString(args.RawTransaction)
+		if err != nil {
+			return nil, fmt.Errorf("invalid raw transaction format: %v", err)
+		}
+
+		tx = &blockchain.Transaction{}
+		if err := json.Unmarshal(txBytes, tx); err != nil {
+			return nil, fmt.Errorf("failed to deserialize transaction: %v", err)
+		}
+	} else if args.TransactionID != "" {
+		// Find transaction in mempool
+		for _, memTx := range api.node.Mempool.GetTransactions() {
+			if memTx.TransactionID == args.TransactionID {
+				tx = &memTx
+				break
+			}
+		}
+
+		if tx == nil {
+			return nil, fmt.Errorf("transaction not found in mempool: %s", args.TransactionID)
+		}
+	}
+
+	// Make sure we have a transaction
+	if tx == nil {
+		return nil, fmt.Errorf("could not resolve transaction to sign")
+	}
+
+	// Verify the sender address matches wallet address
+	if tx.Sender != wallet.Address {
+		return nil, fmt.Errorf("transaction sender (%s) does not match wallet address (%s)", tx.Sender, wallet.Address)
+	}
+
+	// Sign the transaction
+	if err := wallet.SignTransaction(tx); err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %v", err)
+	}
+
+	// Return the signed transaction
+	signedTxBytes, err := json.Marshal(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize signed transaction: %v", err)
+	}
+
+	result := map[string]interface{}{
+		"transaction":    tx,
+		"transactionId":  tx.TransactionID,
+		"signature":      tx.Signature,
+		"senderPubKey":   hex.EncodeToString(tx.SenderPubKey),
+		"rawTransaction": hex.EncodeToString(signedTxBytes),
+		"status":         "signed",
+	}
+
+	return result, nil
+}

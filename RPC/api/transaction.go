@@ -2,10 +2,12 @@ package api
 
 import (
 	"blockchain-core/blockchain"
+	"blockchain-core/blockchain/gas"
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -130,6 +132,12 @@ func (api *TransactionAPI) CreateUnsignedTransaction(params json.RawMessage) (in
 		return nil, fmt.Errorf("failed to create transaction: %v", err)
 	}
 
+	// Select UTXOs for the transaction
+	err = tx.SelectUTXOs(api.node.UTXOPool)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select UTXOs for transaction: %v", err)
+	}
+
 	// Set public key if provided
 	if args.PublicKey != "" {
 		// Decode the public key from hex
@@ -221,6 +229,7 @@ func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{},
 				GasLimit:      args.GasLimit,
 				SenderPubKey:  publicKeyBytes,
 				Signature:     args.Signature,
+				Priority:      gas.PriorityNormal,
 			}
 			if args.Timestamp > 0 {
 				tx.Timestamp = args.Timestamp
@@ -248,16 +257,23 @@ func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{},
 			if args.Timestamp > 0 {
 				tx.Timestamp = args.Timestamp
 				tx.TransactionID = tx.Hash()
-			} 
+			}
 
 			if args.Nonce > 0 {
 				tx.Nonce = uint64(args.Nonce)
 
 				tx.TransactionID = tx.Hash()
 			}
-			
-			
+		}
 
+		// Ensure priority is set to the standard value
+		if tx.Priority == 0 {
+			tx.Priority = gas.PriorityNormal
+		}
+
+		// If not specified elsewhere, set the TransactionID based on the hash
+		if tx.TransactionID == "" {
+			tx.TransactionID = tx.Hash()
 		}
 
 		// Set the sender's public key
@@ -269,6 +285,15 @@ func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{},
 			return nil, fmt.Errorf("invalid signature format: %v", hexErr)
 		}
 		tx.Signature = args.Signature
+
+		// Ensure the transaction has inputs if it's a regular transaction
+		if tx.TxType == blockchain.TX_REGULAR && len(tx.Inputs) == 0 {
+			// Select UTXOs for the transaction
+			err = tx.SelectUTXOs(api.node.UTXOPool)
+			if err != nil {
+				return nil, fmt.Errorf("failed to select UTXOs for transaction: %v", err)
+			}
+		}
 
 		// Verify the signature matches the transaction and sender
 		if !tx.VerifySignature() {
@@ -1331,6 +1356,177 @@ func (api *TransactionAPI) SearchByAddress(params json.RawMessage) (interface{},
 		"address":      args.Address,
 		"transactions": transactions,
 		"total":        totalCount,
+	}
+
+	return result, nil
+}
+
+// GetFullTransactionHistory retrieves complete transaction history for an address without pagination limits
+func (api *TransactionAPI) GetFullTransactionHistory(params json.RawMessage) (interface{}, error) {
+	var args struct {
+		Address    string `json:"address"`
+		MaxResults int    `json:"maxResults,omitempty"` // Optional upper limit for extremely large histories
+		SortBy     string `json:"sortBy,omitempty"`     // time, amount, blockHeight
+		SortDesc   bool   `json:"sortDesc,omitempty"`   // Sort direction
+	}
+
+	if err := json.Unmarshal(params, &args); err != nil {
+		return nil, fmt.Errorf("invalid parameters: %v", err)
+	}
+
+	if !blockchain.ValidateAddress(args.Address) {
+		return nil, fmt.Errorf("invalid address format")
+	}
+
+	// Set optional maximum to prevent potential memory issues
+	// A very high value that essentially means "no limit"
+	if args.MaxResults <= 0 {
+		args.MaxResults = 1000000
+	}
+
+	if args.SortBy == "" {
+		args.SortBy = "time" // Default sort by time
+	}
+
+	// Initialize slice with reasonable capacity to reduce reallocations
+	history := make([]map[string]interface{}, 0, 1000)
+
+	// Get any pending transactions in mempool
+	if api.node.Mempool != nil {
+		for _, tx := range api.node.Mempool.GetTransactions() {
+			if tx.Sender == args.Address || tx.Receiver == args.Address {
+				// Add to history with 0 confirmations
+				history = append(history, map[string]interface{}{
+					"txid":          tx.TransactionID,
+					"sender":        tx.Sender,
+					"receiver":      tx.Receiver,
+					"amount":        tx.Amount,
+					"timestamp":     tx.Timestamp,
+					"confirmations": 0,
+					"pending":       true,
+					"status":        "pending",
+					"fee":           tx.GasFee,
+					"type": func() string {
+						if args.Address == tx.Sender {
+							return "send"
+						}
+						return "receive"
+					}(),
+				})
+			}
+		}
+	}
+
+	// Scan all blocks for transactions involving the address
+	height := api.blockchain.GetHeight()
+
+	// Use a background logger to provide progress updates for long operations
+	startTime := time.Now()
+	lastLogTime := startTime
+	var logInterval = 5 * time.Second
+
+	for i := height; i >= 1; i-- {
+		// Log progress every 5 seconds for long-running scans
+		now := time.Now()
+		if now.Sub(lastLogTime) > logInterval {
+			progress := float64(height-i) / float64(height) * 100
+			log.Printf("Scanning blockchain for address %s: %.2f%% complete (%d/%d blocks)",
+				args.Address, progress, height-i, height)
+			lastLogTime = now
+		}
+
+		block := api.blockchain.GetBlockByHeight(i)
+		if block == nil || block.Body == nil || block.Body.Transactions == nil {
+			continue
+		}
+
+		txs := block.Body.Transactions.GetAllTransactions()
+		for _, tx := range txs {
+			if tx.Sender == args.Address || tx.Receiver == args.Address {
+				// Add to history
+				history = append(history, map[string]interface{}{
+					"txid":          tx.TransactionID,
+					"sender":        tx.Sender,
+					"receiver":      tx.Receiver,
+					"amount":        tx.Amount,
+					"timestamp":     tx.Timestamp,
+					"confirmations": height - i + 1,
+					"blockHeight":   block.Header.BlockNumber,
+					"blockHash":     block.Hash(),
+					"status":        "confirmed",
+					"confirmed":     true,
+					"type": func() string {
+						if args.Address == tx.Sender {
+							return "send"
+						}
+						return "receive"
+					}(),
+					"fee": tx.GasFee,
+				})
+
+				// Check if we've reached the optional maximum result size
+				if len(history) >= args.MaxResults {
+					log.Printf("Reached maximum results limit of %d for address %s",
+						args.MaxResults, args.Address)
+					i = 0 // Break out of the block loop
+					break
+				}
+			}
+		}
+	}
+
+	// Sort transactions based on sort criteria
+	if args.SortBy == "time" || args.SortBy == "timestamp" {
+		sort.Slice(history, func(i, j int) bool {
+			timeI, _ := history[i]["timestamp"].(int64)
+			timeJ, _ := history[j]["timestamp"].(int64)
+			if args.SortDesc {
+				return timeI > timeJ
+			}
+			return timeI < timeJ
+		})
+	} else if args.SortBy == "amount" {
+		sort.Slice(history, func(i, j int) bool {
+			amtI, _ := history[i]["amount"].(float64)
+			amtJ, _ := history[j]["amount"].(float64)
+			if args.SortDesc {
+				return amtI > amtJ
+			}
+			return amtI < amtJ
+		})
+	} else if args.SortBy == "blockHeight" {
+		sort.Slice(history, func(i, j int) bool {
+			// Handle pending transactions (they have no blockHeight)
+			_, hasI := history[i]["blockHeight"]
+			_, hasJ := history[j]["blockHeight"]
+
+			if !hasI && !hasJ {
+				return false // Both pending, maintain order
+			} else if !hasI {
+				return !args.SortDesc // Pending tx comes first if ascending
+			} else if !hasJ {
+				return args.SortDesc // Pending tx comes first if descending
+			}
+
+			heightI, _ := history[i]["blockHeight"].(uint64)
+			heightJ, _ := history[j]["blockHeight"].(uint64)
+			if args.SortDesc {
+				return heightI > heightJ
+			}
+			return heightI < heightJ
+		})
+	}
+
+	// Report execution time for performance monitoring
+	duration := time.Since(startTime)
+	log.Printf("GetFullTransactionHistory for %s completed in %v, found %d transactions",
+		args.Address, duration, len(history))
+
+	result := map[string]interface{}{
+		"address":         args.Address,
+		"transactions":    history,
+		"total":           len(history),
+		"executionTimeMs": duration.Milliseconds(),
 	}
 
 	return result, nil

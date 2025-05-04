@@ -641,6 +641,7 @@ func (s *RPCServer) registerAllHandlers() {
 	s.registerMethod("createMultiSigWallet", walletAPI.CreateMultiSigWallet)
 	s.registerMethod("signMessage", walletAPI.SignMessage)
 	s.registerMethod("verifySignature", walletAPI.VerifySignature)
+	s.registerMethod("signTransaction", walletAPI.SignTransaction)
 
 	// Register Blockchain API methods
 	s.registerMethod("getBlockByHash", blockchainAPI.GetBlockByHash)
@@ -682,6 +683,7 @@ func (s *RPCServer) registerAllHandlers() {
 	s.registerMethod("getAverageFees", transactionAPI.GetAverageFees)
 	s.registerMethod("traceBlock", transactionAPI.TraceBlock)
 	s.registerMethod("searchByAddress", transactionAPI.SearchByAddress)
+	s.registerMethod("getFullTransactionHistory", transactionAPI.GetFullTransactionHistory)
 
 	// Register Network API methods
 	s.registerMethod("getPeerInfo", networkAPI.GetPeerInfo)
@@ -744,6 +746,9 @@ func (s *RPCServer) registerAllHandlers() {
 	s.registerMethod("_internal_createMultiSigWallet", s.internalCreateMultiSigWallet)
 	s.registerMethod("_internal_getValidators", s.internalGetValidators)
 	s.registerMethod("_internal_getStakeInfo", s.internalGetStakeInfo)
+	s.registerMethod("_internal_signTransaction", s.internalSignTransaction)
+	s.registerMethod("_internal_getTransactionHistory", s.internalGetTransactionHistory)
+	s.registerMethod("_internal_getFullTransactionHistory", s.internalGetFullTransactionHistory)
 }
 
 // Wrappers for subscription handlers to match RPCMethodHandler type
@@ -1833,6 +1838,11 @@ func (s *RPCServer) internalGetStakeInfo(params json.RawMessage) (interface{}, e
 	return result, nil
 }
 
+func (s *RPCServer) internalSignTransaction(params json.RawMessage) (interface{}, error) {
+	walletAPI := api.NewWalletAPI(s.node, s.blockchain)
+	return walletAPI.SignTransaction(params)
+}
+
 // handleWebSocket handles WebSocket connections
 func (s *RPCServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Upgrade HTTP connection to WebSocket
@@ -2292,4 +2302,72 @@ func (s *RPCServer) setupBlockchainSubscriptions() {
 	}()
 
 	s.logger.Printf("✅ Blockchain subscription setup completed for RPC server")
+}
+
+func (s *RPCServer) handleGetFullTransactionHistory(params json.RawMessage) (interface{}, *RPCError) {
+	var args struct {
+		Address    string `json:"address"`
+		MaxResults int    `json:"maxResults,omitempty"`
+		SortBy     string `json:"sortBy,omitempty"`
+		SortDesc   bool   `json:"sortDesc,omitempty"`
+	}
+
+	if err := json.Unmarshal(params, &args); err != nil {
+		return nil, &RPCError{Code: ErrInvalidParams, Message: "Invalid parameters", Data: err.Error()}
+	}
+
+	if args.Address == "" {
+		return nil, &RPCError{Code: ErrInvalidParams, Message: "Address is required", Data: nil}
+	}
+
+	// Validate address format
+	if !blockchain.ValidateAddress(args.Address) {
+		return nil, &RPCError{Code: ErrInvalidParams, Message: "Invalid address format", Data: nil}
+	}
+
+	// Set default max results if not specified
+	if args.MaxResults <= 0 {
+		args.MaxResults = 1000000 // Very high value that essentially means "no limit"
+	}
+
+	// Set default sort field
+	if args.SortBy == "" {
+		args.SortBy = "time"
+	}
+
+	// Log start of operation for performance monitoring
+	startTime := time.Now()
+	s.logger.Printf("Starting full transaction history retrieval for %s", args.Address)
+
+	// Create a new transaction API instance
+	transactionAPI := api.NewTransactionAPI(s.node, s.blockchain)
+
+	// Call the API method
+	result, err := transactionAPI.GetFullTransactionHistory(params)
+	if err != nil {
+		s.logger.Printf("Error retrieving full transaction history: %v", err)
+		return nil, &RPCError{Code: ErrServerError, Message: "Failed to retrieve transaction history", Data: err.Error()}
+	}
+
+	// Log performance information
+	duration := time.Since(startTime)
+	txCount := 0
+	if resultMap, ok := result.(map[string]interface{}); ok {
+		if total, ok := resultMap["total"].(int); ok {
+			txCount = total
+		}
+	}
+	s.logger.Printf("Full transaction history retrieval for %s completed in %v, found %d transactions",
+		args.Address, duration, txCount)
+
+	return result, nil
+}
+
+// Update the internal function to use the handler
+func (s *RPCServer) internalGetFullTransactionHistory(params json.RawMessage) (interface{}, error) {
+	result, rpcErr := s.handleGetFullTransactionHistory(params)
+	if rpcErr != nil {
+		return nil, fmt.Errorf("%s: %v", rpcErr.Message, rpcErr.Data)
+	}
+	return result, nil
 }

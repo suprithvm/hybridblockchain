@@ -150,7 +150,15 @@ func (tx *Transaction) GenerateTransactionID() string {
 
 // Hash computes the hash of the transaction data.
 func (tx *Transaction) Hash() string {
-	data := fmt.Sprintf("%s%s%f%d", tx.Sender, tx.Receiver, tx.Amount, tx.Timestamp)
+	data := fmt.Sprintf("%s%s%f%d%d%d%d",
+		tx.Sender,
+		tx.Receiver,
+		tx.Amount,
+		tx.GasPrice,
+		tx.GasLimit,
+		tx.Priority,
+		tx.Timestamp,
+	)
 	log.Printf("[DEBUG] Transaction hash data: %s", data)
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:])
