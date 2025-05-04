@@ -84,29 +84,12 @@ func (api *TransactionAPI) GetAccountState(params json.RawMessage) (interface{},
 	// Get UTXOs directly from UTXOPool
 	utxos := api.node.UTXOPool.GetUTXOsForAddress(args.Address)
 
-	// IMPORTANT FIX: Get account state from AccountManager first, fallback to UTXOPool
-	var balance float64
-	var nonce uint64
-	var lastUpdated int64 = time.Now().Unix()
+	// Calculate balance from UTXOs
+	balance := api.node.UTXOPool.GetBalance(args.Address)
 
-	// Try to get the account state from AccountManager if available
-	accountManager := api.node.GetAccountManager()
-	if accountManager != nil {
-		accountState, err := accountManager.GetAccountState(args.Address)
-		if err == nil && accountState != nil {
-			balance = accountState.Balance
-			nonce = accountState.Nonce
-			lastUpdated = accountState.LastActivity
-		} else {
-			// Fallback to calculating from UTXOs
-			balance = api.node.UTXOPool.GetBalance(args.Address)
-			nonce = uint64(len(utxos))
-		}
-	} else {
-		// Fallback to UTXOPool if AccountManager is not available
-		balance = api.node.UTXOPool.GetBalance(args.Address)
-		nonce = uint64(len(utxos))
-	}
+	// In UTXO model, nonce can be derived from transaction count or UTXO count
+	// Using the length of UTXOs as an approximation for nonce
+	nonce := uint64(len(utxos))
 
 	// Create account state
 	state := map[string]interface{}{
@@ -114,7 +97,7 @@ func (api *TransactionAPI) GetAccountState(params json.RawMessage) (interface{},
 		"balance":     balance,
 		"nonce":       nonce,
 		"utxoCount":   len(utxos),
-		"lastUpdated": lastUpdated,
+		"lastUpdated": time.Now().Unix(),
 	}
 
 	return state, nil
