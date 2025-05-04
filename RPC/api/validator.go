@@ -25,14 +25,33 @@ func NewValidatorAPI(node *blockchain.Node, blockchain *blockchain.Blockchain) *
 
 // GetValidators lists active validators
 func (api *ValidatorAPI) GetValidators(params json.RawMessage) (interface{}, error) {
-	// In a real implementation, active validators would be retrieved from the blockchain
-	// For this example, we'll return a list of validators from the blockchain
+	var args struct {
+		Limit int `json:"limit"`
+	}
 
+	if err := json.Unmarshal(params, &args); err != nil {
+		// Default to 100 validators if not specified
+		args.Limit = 100
+	}
+
+	if args.Limit <= 0 {
+		args.Limit = 100
+	}
+
+	// Get validators from blockchain validators map
 	validators := api.blockchain.Validators
 
-	// Convert validators map to a slice for the response
-	var validatorList []map[string]interface{}
+	// Get stake pool from blockchain
+	stakePool := api.blockchain.GetStakePool()
+	if stakePool == nil {
+		return nil, fmt.Errorf("stake pool not available")
+	}
 
+	// Convert validators map to a slice for the response
+	validatorMap := make(map[string]map[string]interface{})
+	validatorCount := 0
+
+	// First add validators from the blockchain validators map
 	for addr, val := range validators {
 		validatorInfo := map[string]interface{}{
 			"address":    addr,
@@ -41,6 +60,7 @@ func (api *ValidatorAPI) GetValidators(params json.RawMessage) (interface{}, err
 			"lastActive": val.LastActive,
 		}
 
+		// Add performance data if available
 		if val.Performance != nil {
 			validatorInfo["performance"] = map[string]interface{}{
 				"blocksProposed":    val.Performance.BlocksProposed,
@@ -50,10 +70,106 @@ func (api *ValidatorAPI) GetValidators(params json.RawMessage) (interface{}, err
 			}
 		}
 
-		validatorList = append(validatorList, validatorInfo)
+		// Add stake information if available in the stake pool
+		if stake, exists := stakePool.Stakes[addr]; exists {
+			// Convert stake amount to tokens with proper decimal precision
+			stakeAmount := float64(stake.Amount) / 100000000.0
+
+			validatorInfo["stake"] = map[string]interface{}{
+				"amount":         stakeAmount,
+				"startTime":      stake.StartTime,
+				"lastRewardTime": stake.LastRewardTime,
+				"isValidator":    stake.IsValidator,
+				"lastActive":     stake.LastActive,
+				"hostID":         stake.HostID,
+			}
+
+			// Add withdrawal request if present
+			if stake.WithdrawalReq != nil {
+				validatorInfo["stake"].(map[string]interface{})["withdrawalRequest"] = map[string]interface{}{
+					"requestTime": stake.WithdrawalReq.RequestTime,
+					"amount":      stake.WithdrawalReq.Amount,
+					"status":      stake.WithdrawalReq.Status,
+				}
+			}
+		} else {
+			// No stake info found, set zero values
+			validatorInfo["stake"] = map[string]interface{}{
+				"amount":      0.0,
+				"isValidator": false,
+			}
+		}
+
+		validatorMap[addr] = validatorInfo
+		validatorCount++
 	}
 
-	return validatorList, nil
+	// Then add validators that are in the stake pool but not in blockchain validators map
+	for addr, stake := range stakePool.Stakes {
+		// Skip if this validator was already added
+		if _, exists := validatorMap[addr]; exists {
+			continue
+		}
+
+		// Create a new validator entry
+		validatorInfo := map[string]interface{}{
+			"address":    addr,
+			"status":     0, // Default status for validators not in blockchain.Validators
+			"score":      0, // Default score
+			"lastActive": stake.LastActive,
+		}
+
+		// Add stake information
+		stakeAmount := float64(stake.Amount) / 100000000.0
+
+		validatorInfo["stake"] = map[string]interface{}{
+			"amount":         stakeAmount,
+			"startTime":      stake.StartTime,
+			"lastRewardTime": stake.LastRewardTime,
+			"isValidator":    stake.IsValidator,
+			"lastActive":     stake.LastActive,
+			"hostID":         stake.HostID,
+		}
+
+		// Add withdrawal request if present
+		if stake.WithdrawalReq != nil {
+			validatorInfo["stake"].(map[string]interface{})["withdrawalRequest"] = map[string]interface{}{
+				"requestTime": stake.WithdrawalReq.RequestTime,
+				"amount":      stake.WithdrawalReq.Amount,
+				"status":      stake.WithdrawalReq.Status,
+			}
+		}
+
+		// Add performance if available
+		if stake.Performance != nil {
+			validatorInfo["performance"] = map[string]interface{}{
+				"blocksProposed":    stake.Performance.BlocksProposed,
+				"blocksValidated":   stake.Performance.BlocksValidated,
+				"missedValidations": stake.Performance.MissedValidations,
+				"uptimePercentage":  stake.Performance.UptimePercentage,
+			}
+		}
+
+		validatorMap[addr] = validatorInfo
+		validatorCount++
+	}
+
+	// Convert map to list for response
+	var validatorList []map[string]interface{}
+	for _, info := range validatorMap {
+		validatorList = append(validatorList, info)
+	}
+
+	// Apply limit
+	if len(validatorList) > args.Limit {
+		validatorList = validatorList[:args.Limit]
+	}
+
+	return map[string]interface{}{
+		"validators": validatorList,
+		"total":      validatorCount,
+		"returned":   len(validatorList),
+	}, nil
 }
 
 // GetStakeInfo retrieves validator stake information
@@ -402,145 +518,186 @@ func (api *ValidatorAPI) GetDailyValidatorRewards(params json.RawMessage) (inter
 		return nil, fmt.Errorf("validator address is required")
 	}
 
-	if args.Days <= 0 {
-		args.Days = 30 // Default to 30 days
-	}
-	if args.Days > 365 {
-		args.Days = 365 // Cap at 365 days
-	}
-
 	// Get UTXO pool
 	utxoPool := api.node.UTXOPool
 	if utxoPool == nil {
 		return nil, fmt.Errorf("UTXO pool not available")
 	}
 
-	// Get validator rewards using the GetValidatorRewards function
-	rewardsResult, err := api.GetValidatorRewards(params)
-	if err != nil {
-		return nil, err
-	}
+	// Get all UTXOs for the address
+	allUTXOs := utxoPool.GetUTXOsForAddress(args.Address)
 
-	// Group rewards by day
-	rewardsMap, ok := rewardsResult.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("invalid rewards data format")
-	}
+	// Filter for validator reward transactions
+	var rewardsList []map[string]interface{}
+	var totalRewards float64
 
-	rewardsList, ok := rewardsMap["rewards"].([]map[string]interface{})
-	if !ok {
-		rewardsList = []map[string]interface{}{} // Default to empty list
-	}
+	for _, utxo := range allUTXOs {
+		// Check for signatures or indicators that this was a validator reward
+		// In real UTXO blockchains, you would typically identify validator rewards
+		// by the transaction type or some metadata in the UTXO
 
-	// Map to store daily rewards
-	dailyRewardsMap := make(map[int64]map[string]interface{})
+		// Here we're looking at the transaction input (if it's "system", it's likely a reward)
+		// In a real implementation, you'd have a more reliable way to identify rewards
+		if utxo.TransactionID != "" {
+			// Try to get the block that contains this transaction
+			blockWithReward := api.blockchain.GetBlockByHeight(utxo.BlockHeight)
+			if blockWithReward != nil {
+				// Look for transactions in this block
+				for _, tx := range blockWithReward.Body.Transactions.GetAllTransactions() {
+					// Check if this is our UTXO's transaction and is of type validator reward
+					if tx.TransactionID == utxo.TransactionID && tx.TxType == blockchain.TX_VALIDATOR_REWARD {
+						rewardEvent := map[string]interface{}{
+							"blockHeight": utxo.BlockHeight,
+							"amount":      utxo.Amount,
+							"timestamp":   utxo.Timestamp,
+							"type":        "validator_reward",
+							"txId":        utxo.TransactionID,
+						}
 
-	// Current time to calculate relative days
-	currentTime := time.Now().Unix()
-
-	// Calculate the timestamp for the earliest day we care about
-	earliestTime := currentTime - int64(args.Days*86400)
-
-	// Process each reward and group by day
-	for _, reward := range rewardsList {
-		timestamp, ok := reward["timestamp"].(int64)
-		if !ok {
-			continue // Skip if timestamp is invalid
-		}
-
-		// Skip rewards older than our requested days
-		if timestamp < earliestTime {
-			continue
-		}
-
-		// Convert timestamp to day (UTC midnight)
-		dayTimestamp := (timestamp / 86400) * 86400
-
-		// Calculate relative day (0 = today, 1 = yesterday, etc.)
-		relativeDay := int((currentTime - dayTimestamp) / 86400)
-
-		// Skip if beyond our requested days
-		if relativeDay >= args.Days {
-			continue
-		}
-
-		// Get or create the daily entry
-		dayEntry, exists := dailyRewardsMap[dayTimestamp]
-		if !exists {
-			dayEntry = map[string]interface{}{
-				"day":       relativeDay,
-				"timestamp": dayTimestamp,
-				"reward":    0.0,
-				"blocks":    0,
+						rewardsList = append(rewardsList, rewardEvent)
+						totalRewards += utxo.Amount
+						break
+					}
+				}
 			}
 		}
-
-		// Add this reward to the day
-		rewardAmount, _ := reward["amount"].(float64)
-		dayEntry["reward"] = dayEntry["reward"].(float64) + rewardAmount
-		dayEntry["blocks"] = dayEntry["blocks"].(int) + 1
-
-		// Store updated entry
-		dailyRewardsMap[dayTimestamp] = dayEntry
 	}
 
-	// Convert map to sorted slice
-	var dailyRewards []map[string]interface{}
-	for _, dayEntry := range dailyRewardsMap {
-		dailyRewards = append(dailyRewards, dayEntry)
-	}
-
-	// Sort by day, ascending
-	sort.Slice(dailyRewards, func(i, j int) bool {
-		return dailyRewards[i]["day"].(int) < dailyRewards[j]["day"].(int)
-	})
-
-	// Calculate total rewards
-	totalRewards := 0.0
-	for _, day := range dailyRewards {
-		totalRewards += day["reward"].(float64)
-	}
-
-	// Return the result
 	return map[string]interface{}{
 		"address":      args.Address,
-		"days":         args.Days,
 		"totalRewards": totalRewards,
-		"dailyRewards": dailyRewards,
+		"rewards":      rewardsList,
 	}, nil
 }
 
-// VerifyValidator checks if an address is an active validator
-func (api *ValidatorAPI) VerifyValidator(params json.RawMessage) (interface{}, error) {
+// GetTopValidators gets the top validators by score
+func (api *ValidatorAPI) GetTopValidators(params json.RawMessage) (interface{}, error) {
 	var args struct {
-		Address string `json:"address"`
+		Limit   int  `json:"limit"`
+		ByStake bool `json:"byStake"` // Sort by stake amount instead of score
 	}
 
 	if err := json.Unmarshal(params, &args); err != nil {
-		return nil, fmt.Errorf("invalid parameters: %v", err)
+		// Default to 10 validators if not specified
+		args.Limit = 10
 	}
 
-	if args.Address == "" {
-		return nil, fmt.Errorf("validator address is required")
+	if args.Limit <= 0 {
+		args.Limit = 10
+	}
+	if args.Limit > 100 {
+		args.Limit = 100
 	}
 
-	// Check if the address is in the validators map
-	validator, exists := api.blockchain.Validators[args.Address]
+	// Get validators
+	validators := api.blockchain.Validators
 
-	if !exists {
-		return map[string]interface{}{
-			"isValidator": false,
-		}, nil
+	// Get stake pool from blockchain
+	stakePool := api.blockchain.GetStakePool()
+	if stakePool == nil {
+		return nil, fmt.Errorf("stake pool not available")
 	}
 
-	// Check if the validator is active
-	isActive := validator.Status == blockchain.ValidatorStatusActive
+	// Convert to slice for sorting, including stake information
+	type ValidatorWithDetails struct {
+		Address     string
+		Score       uint64
+		Status      int // Change from string to int to match val.Status type
+		StakeAmount float64
+		Performance *blockchain.ValidatorPerformance
+	}
+
+	var validatorList []ValidatorWithDetails
+
+	for addr, val := range validators {
+		// Get stake amount if available
+		stakeAmount := 0.0
+		if stake, exists := stakePool.Stakes[addr]; exists {
+			stakeAmount = float64(stake.Amount) / 100000000.0
+		}
+
+		validatorList = append(validatorList, ValidatorWithDetails{
+			Address:     addr,
+			Score:       val.Score,
+			Status:      val.Status,
+			StakeAmount: stakeAmount,
+			Performance: val.Performance,
+		})
+	}
+
+	// Sort validators by score or stake amount
+	if args.ByStake {
+		// Sort by stake amount (descending)
+		sort.Slice(validatorList, func(i, j int) bool {
+			return validatorList[i].StakeAmount > validatorList[j].StakeAmount
+		})
+	} else {
+		// Sort by score (descending)
+		sort.Slice(validatorList, func(i, j int) bool {
+			return validatorList[i].Score > validatorList[j].Score
+		})
+	}
+
+	// Limit results
+	if len(validatorList) > args.Limit {
+		validatorList = validatorList[:args.Limit]
+	}
+
+	// Build response with additional details
+	var topValidators []map[string]interface{}
+
+	for _, valInfo := range validatorList {
+		validatorDetails := map[string]interface{}{
+			"address":     valInfo.Address,
+			"score":       valInfo.Score,
+			"status":      valInfo.Status,
+			"stakeAmount": valInfo.StakeAmount,
+		}
+
+		if valInfo.Performance != nil {
+			validatorDetails["performance"] = map[string]interface{}{
+				"blocksProposed":    valInfo.Performance.BlocksProposed,
+				"blocksValidated":   valInfo.Performance.BlocksValidated,
+				"missedValidations": valInfo.Performance.MissedValidations,
+				"uptimePercentage":  valInfo.Performance.UptimePercentage,
+			}
+		}
+
+		// Add additional stake details if available
+		if stake, exists := stakePool.Stakes[valInfo.Address]; exists {
+			validatorDetails["stake"] = map[string]interface{}{
+				"amount":         valInfo.StakeAmount,
+				"startTime":      stake.StartTime,
+				"lastRewardTime": stake.LastRewardTime,
+				"isValidator":    stake.IsValidator,
+				"lastActive":     stake.LastActive,
+				"hostID":         stake.HostID,
+			}
+
+			// Add withdrawal request if present
+			if stake.WithdrawalReq != nil {
+				validatorDetails["stake"].(map[string]interface{})["withdrawalRequest"] = map[string]interface{}{
+					"requestTime": stake.WithdrawalReq.RequestTime,
+					"amount":      stake.WithdrawalReq.Amount,
+					"status":      stake.WithdrawalReq.Status,
+				}
+			}
+		}
+
+		topValidators = append(topValidators, validatorDetails)
+	}
+
+	// Determine sort method string for response
+	sortBy := "score"
+	if args.ByStake {
+		sortBy = "stake"
+	}
 
 	return map[string]interface{}{
-		"isValidator": true,
-		"isActive":    isActive,
-		"status":      validator.Status,
-		"score":       validator.Score,
+		"validators": topValidators,
+		"total":      len(validators),
+		"returned":   len(topValidators),
+		"sortBy":     sortBy,
 	}, nil
 }
 
@@ -596,7 +753,6 @@ func (api *ValidatorAPI) GetValidatorPerformance(params json.RawMessage) (interf
 	}
 
 	// Calculate additional metrics if possible
-
 	// Get total blocks in the blockchain to calculate participation percentage
 	latestBlock := api.blockchain.GetLatestBlock()
 	if latestBlock.Header.BlockNumber > 0 {
@@ -622,6 +778,89 @@ func (api *ValidatorAPI) GetValidatorPerformance(params json.RawMessage) (interf
 		"timeouts":    validator.Timeouts,
 	}
 
+	// Add stake information if available
+	stakePool := api.blockchain.GetStakePool()
+	if stakePool != nil {
+		if stake, exists := stakePool.Stakes[args.Address]; exists {
+			stakeAmount := float64(stake.Amount) / 100000000.0
+
+			result["stake"] = map[string]interface{}{
+				"amount":         stakeAmount,
+				"startTime":      stake.StartTime.Unix(),
+				"lastRewardTime": stake.LastRewardTime.Unix(),
+				"isValidator":    stake.IsValidator,
+				"hostID":         stake.HostID,
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// VerifyValidator checks if an address is an active validator
+func (api *ValidatorAPI) VerifyValidator(params json.RawMessage) (interface{}, error) {
+	var args struct {
+		Address string `json:"address"`
+	}
+
+	if err := json.Unmarshal(params, &args); err != nil {
+		return nil, fmt.Errorf("invalid parameters: %v", err)
+	}
+
+	if args.Address == "" {
+		return nil, fmt.Errorf("validator address is required")
+	}
+
+	// Check if the address is in the validators map
+	validator, exists := api.blockchain.Validators[args.Address]
+
+	if !exists {
+		// Check if address exists in stake pool
+		stakePool := api.blockchain.GetStakePool()
+		if stakePool != nil {
+			if stake, stakeExists := stakePool.Stakes[args.Address]; stakeExists && stake.IsValidator {
+				return map[string]interface{}{
+					"isValidator": true,
+					"isActive":    true,
+					"status":      "staked", // Not in validators map but staked
+					"stake": map[string]interface{}{
+						"amount":      float64(stake.Amount) / 100000000.0,
+						"startTime":   stake.StartTime.Unix(),
+						"isValidator": stake.IsValidator,
+						"hostID":      stake.HostID,
+					},
+				}, nil
+			}
+		}
+
+		return map[string]interface{}{
+			"isValidator": false,
+		}, nil
+	}
+
+	// Check if the validator is active
+	isActive := validator.Status == blockchain.ValidatorStatusActive
+
+	result := map[string]interface{}{
+		"isValidator": true,
+		"isActive":    isActive,
+		"status":      validator.Status,
+		"score":       validator.Score,
+	}
+
+	// Add stake information if available
+	stakePool := api.blockchain.GetStakePool()
+	if stakePool != nil {
+		if stake, stakeExists := stakePool.Stakes[args.Address]; stakeExists {
+			result["stake"] = map[string]interface{}{
+				"amount":      float64(stake.Amount) / 100000000.0,
+				"startTime":   stake.StartTime.Unix(),
+				"isValidator": stake.IsValidator,
+				"hostID":      stake.HostID,
+			}
+		}
+	}
+
 	return result, nil
 }
 
@@ -645,84 +884,8 @@ func (api *ValidatorAPI) GetTotalStaked(params json.RawMessage) (interface{}, er
 	return map[string]interface{}{
 		"totalStaked": totalTokens,
 		"stakers":     len(stakePool.Stakes),
+		"timestamp":   time.Now().Unix(),
 	}, nil
-}
-
-// GetTopValidators gets the top validators by score
-func (api *ValidatorAPI) GetTopValidators(params json.RawMessage) (interface{}, error) {
-	var args struct {
-		Limit int `json:"limit"`
-	}
-
-	if err := json.Unmarshal(params, &args); err != nil {
-		// Default to 10 validators if not specified
-		args.Limit = 10
-	}
-
-	if args.Limit <= 0 {
-		args.Limit = 10
-	}
-	if args.Limit > 100 {
-		args.Limit = 100
-	}
-
-	// Get validators
-	validators := api.blockchain.Validators
-
-	// Convert to slice for sorting
-	type ValidatorWithScore struct {
-		Address string
-		Score   uint64
-	}
-
-	var validatorList []ValidatorWithScore
-
-	for addr, val := range validators {
-		validatorList = append(validatorList, ValidatorWithScore{
-			Address: addr,
-			Score:   val.Score,
-		})
-	}
-
-	// Sort by score (descending)
-	// Note: In production, you'd implement a proper sorting algorithm here
-	// This is just a simplified version for the example
-	for i := 0; i < len(validatorList); i++ {
-		for j := i + 1; j < len(validatorList); j++ {
-			if validatorList[j].Score > validatorList[i].Score {
-				validatorList[i], validatorList[j] = validatorList[j], validatorList[i]
-			}
-		}
-	}
-
-	// Limit results
-	if len(validatorList) > args.Limit {
-		validatorList = validatorList[:args.Limit]
-	}
-
-	// Build response with additional details
-	var topValidators []map[string]interface{}
-
-	for _, valInfo := range validatorList {
-		validator := validators[valInfo.Address]
-
-		validatorDetails := map[string]interface{}{
-			"address": valInfo.Address,
-			"score":   valInfo.Score,
-			"status":  validator.Status,
-		}
-
-		if validator.Performance != nil {
-			validatorDetails["performance"] = map[string]interface{}{
-				"blocksValidated":  validator.Performance.BlocksValidated,
-				"uptimePercentage": validator.Performance.UptimePercentage,
-			}
-		}
-
-		topValidators = append(topValidators, validatorDetails)
-	}
-
-	return topValidators, nil
 }
 
 // GetValidatorStats gets comprehensive validator statistics
@@ -781,9 +944,10 @@ func (api *ValidatorAPI) GetValidatorStats(params json.RawMessage) (interface{},
 	var totalStakeTokens float64 = 0
 
 	if stakePool != nil {
-		// Use StakePool.GetTotalStake() if available
-		totalStake := stakePool.GetTotalStake()
-		totalStakeTokens = float64(totalStake) / 100000000.0 // Convert to tokens with decimal precision
+		// Calculate total stake
+		for _, stake := range stakePool.Stakes {
+			totalStakeTokens += float64(stake.Amount) / 100000000.0
+		}
 	}
 
 	// Get latest block for additional metrics
@@ -802,6 +966,7 @@ func (api *ValidatorAPI) GetValidatorStats(params json.RawMessage) (interface{},
 		"totalBlocksValidated": totalBlocksValidated,
 		"totalBlocksProposed":  totalBlocksProposed,
 		"blockchainHeight":     blockchainHeight,
+		"timestamp":            time.Now().Unix(),
 	}
 
 	return stats, nil

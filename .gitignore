@@ -8,3 +8,5 @@ bootnode.addr
 validator_data/
 Validator_data/
 RPC/gitBook_docs/
+RPC_data/
+txns_data/
