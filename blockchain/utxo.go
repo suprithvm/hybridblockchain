@@ -972,11 +972,13 @@ func (pool *UTXOPool) ProcessBlockTransactions(block *Block) error {
 	for _, tx := range block.Body.Transactions.GetAllTransactions() {
 		// Process inputs (mark UTXOs as spent)
 		if tx.TxType != TX_COINBASE && tx.TxType != TX_VALIDATOR_REWARD {
+			senderBalance := 0.0
 			for _, input := range tx.Inputs {
 				key := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
 				if utxo, exists := pool.utxos[key]; exists {
 					utxo.Spent = true
 					pool.utxos[key] = utxo
+					senderBalance += utxo.Amount
 
 					if pool.updates == nil {
 						pool.updates = make(map[string]UTXO)
@@ -984,6 +986,19 @@ func (pool *UTXOPool) ProcessBlockTransactions(block *Block) error {
 					pool.updates[key] = utxo
 				} else {
 					log.Printf("⚠️ Warning: Input UTXO %s not found in pool during block processing", key)
+				}
+			}
+
+			// Update sender account state for regular transactions
+			if pool.node != nil && pool.node.accountManager != nil && tx.Sender != "" {
+				state, err := pool.node.accountManager.GetAccountState(tx.Sender)
+				if err == nil && state != nil {
+					// We subtract the total transaction amount from the sender's balance
+					state.Balance -= (tx.Amount + tx.GasFee)
+					state.LastActivity = time.Now().Unix()
+
+					// Store for batch update
+					accountUpdates[tx.Sender] = state
 				}
 			}
 		}

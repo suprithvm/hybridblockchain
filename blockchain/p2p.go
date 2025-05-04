@@ -131,11 +131,8 @@ type Node struct {
 	broadcastedBlocks      map[string]bool // Track broadcasted blocks by hash
 	broadcastMu            sync.RWMutex    // Mutex for broadcasted blocks map
 
-	
-	callbacksMu             sync.RWMutex
+	callbacksMu sync.RWMutex
 }
-
-
 
 // publishMessage publishes a message to a specific topic using pubsub
 func (n *Node) publishMessage(topic string, message interface{}) error {
@@ -240,6 +237,11 @@ func NewNode(config *NetworkConfig) (*Node, error) {
 	// Also update the blockchain's mempool reference to use the same instance
 	if config.Blockchain != nil {
 		config.Blockchain.mempool = node.Mempool
+	}
+
+	// Set the node reference in the UTXOPool to enable account state updates
+	if node.UTXOPool != nil {
+		node.UTXOPool.node = node
 	}
 
 	// Set validator mode if specified
@@ -520,8 +522,6 @@ func (n *Node) handleBlockStream(s network.Stream) {
 		}
 	}
 
-	
-
 	// Update peer score positively for good behavior
 	n.PeerManager.UpdatePeerScore(peerID, 5)
 }
@@ -642,8 +642,6 @@ func processTransaction(n *Node, peerID peer.ID, tx *Transaction) {
 		return
 	}
 	log.Printf("✅ Transaction %s successfully added to mempool", tx.TransactionID)
-
-	
 
 	// Update peer score positively
 	n.PeerManager.UpdatePeerScore(peerID, 1)
@@ -3072,6 +3070,11 @@ func NewNodeWithPrivKey(config *NetworkConfig, privKey crypto.PrivKey) (*Node, e
 	// Also update the blockchain's mempool reference to use the same instance
 	if config.Blockchain != nil {
 		config.Blockchain.mempool = node.Mempool
+	}
+
+	// Set the node reference in the UTXOPool to enable account state updates
+	if node.UTXOPool != nil {
+		node.UTXOPool.node = node
 	}
 
 	// Set validator mode if specified
