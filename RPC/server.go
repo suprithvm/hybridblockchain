@@ -1342,12 +1342,29 @@ func (s *RPCServer) handleGetAccountState(params json.RawMessage) (interface{}, 
 	// Get UTXOs directly from UTXOPool
 	utxos := s.node.UTXOPool.GetUTXOsForAddress(args.Address)
 
-	// Calculate balance from UTXOs
-	balance := s.node.UTXOPool.GetBalance(args.Address)
+	// IMPORTANT FIX: Get account state from AccountManager instead of directly from UTXOPool
+	var balance float64
+	var nonce uint64
+	var lastUpdated int64 = time.Now().Unix()
 
-	// In UTXO model, nonce can be derived from transaction count or UTXO count
-	// Using the length of UTXOs as an approximation for nonce
-	nonce := uint64(len(utxos))
+	// Try to get account state from AccountManager first
+	accountManager := s.node.GetAccountManager()
+	if accountManager != nil {
+		accountState, err := accountManager.GetAccountState(args.Address)
+		if err == nil && accountState != nil {
+			balance = accountState.Balance
+			nonce = accountState.Nonce
+			lastUpdated = accountState.LastActivity
+		} else {
+			// Fallback to calculating from UTXOs if account state not found
+			balance = s.node.UTXOPool.GetBalance(args.Address)
+			nonce = uint64(len(utxos))
+		}
+	} else {
+		// Fallback to calculating from UTXOs if AccountManager not available
+		balance = s.node.UTXOPool.GetBalance(args.Address)
+		nonce = uint64(len(utxos))
+	}
 
 	// Check if address is a validator
 	_, isValidator := s.blockchain.Validators[args.Address]
@@ -1404,6 +1421,7 @@ func (s *RPCServer) handleGetAccountState(params json.RawMessage) (interface{}, 
 		"balance":     balance,
 		"nonce":       nonce,
 		"utxoCount":   len(utxos),
+		"lastUpdated": lastUpdated,
 		"isValidator": isValidator,
 		"pending": map[string]interface{}{
 			"transactions": pendingTxCount,
