@@ -160,6 +160,10 @@ func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{},
 		PublicKey      string  `json:"publicKey"`      // Sender's public key in hex format
 		RawTransaction string  `json:"rawTransaction"` // Optional: Complete serialized transaction
 		CallbackURL    string  `json:"callbackUrl"`    // Optional: URL to notify when transaction status changes
+
+		Timestamp     int64  `json:"timestamp"`
+		Nonce         int64  `json:"nonce"`
+		TransactionID string `json:"transactionId"`
 	}
 
 	if err := json.Unmarshal(params, &args); err != nil {
@@ -207,10 +211,53 @@ func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{},
 			return nil, fmt.Errorf("invalid public key format: %v", err)
 		}
 
-		// Create unsigned transaction
-		tx, err = blockchain.NewTransaction(args.From, args.To, args.Amount, args.GasPrice, args.GasLimit)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create transaction: %v", err)
+		if args.TransactionID != "" {
+			tx = &blockchain.Transaction{
+				TransactionID: args.TransactionID,
+				Sender:        args.From,
+				Receiver:      args.To,
+				Amount:        args.Amount,
+				GasPrice:      args.GasPrice,
+				GasLimit:      args.GasLimit,
+				SenderPubKey:  publicKeyBytes,
+				Signature:     args.Signature,
+			}
+			if args.Timestamp > 0 {
+				tx.Timestamp = args.Timestamp
+			} else {
+				tx.Timestamp = time.Now().Unix()
+			}
+			if args.Nonce > 0 {
+				tx.Nonce = uint64(args.Nonce)
+			} else {
+				tx.Nonce = 0
+			}
+
+			tx.GasFee = blockchain.ConvertGasToTokens(args.GasPrice * args.GasLimit)
+
+			if args.TransactionID == "" {
+				tx.TransactionID = tx.Hash()
+			}
+
+		} else {
+			tx, err = blockchain.NewTransaction(args.From, args.To, args.Amount, args.GasPrice, args.GasLimit)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create transaction: %v", err)
+			}
+
+			if args.Timestamp > 0 {
+				tx.Timestamp = args.Timestamp
+				tx.TransactionID = tx.Hash()
+			} 
+
+			if args.Nonce > 0 {
+				tx.Nonce = uint64(args.Nonce)
+
+				tx.TransactionID = tx.Hash()
+			}
+			
+			
+
 		}
 
 		// Set the sender's public key
