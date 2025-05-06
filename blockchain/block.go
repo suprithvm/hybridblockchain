@@ -246,7 +246,6 @@ func (b *Block) Hash() string {
 	b.mu.RLock()
 	if b.originalHash != "" {
 		defer b.mu.RUnlock()
-		log.Printf("🔑 [HASH CACHE] Returning original hash: %s (ptr: %p)", b.originalHash, &b.originalHash)
 		return b.originalHash
 	}
 	b.mu.RUnlock()
@@ -256,7 +255,6 @@ func (b *Block) Hash() string {
 
 	// Double check after acquiring write lock
 	if b.originalHash != "" {
-		log.Printf("🔑 [HASH CACHE] Original hash already calculated after lock: %s (ptr: %p)", b.originalHash, &b.originalHash)
 		return b.originalHash
 	}
 
@@ -286,14 +284,10 @@ func (b *Block) Hash() string {
 	}
 
 	hashInput := data.String()
-	log.Printf("🔑 [HASH CACHE] Hash input data: %s", hashInput)
 
 	hash := sha256.Sum256([]byte(hashInput))
 	b.originalHash = hex.EncodeToString(hash[:])
 	b.hash = b.originalHash
-
-	log.Printf("🔑 [HASH CACHE] Calculated new hash: %s (ptr: %p)", b.originalHash, &b.originalHash)
-	log.Printf("🔑 [HASH CACHE] Hash calculation complete")
 	return b.originalHash
 }
 

@@ -358,7 +358,7 @@ func NewBootstrapNode(config *BootstrapNodeConfig) (*BootstrapNode, error) {
 	// 	},
 	// })
 
-	log.Printf(" DHT Table: %+v\n", bn.dht)
+	
 
 	log.Println(" Network is active and listening...")
 

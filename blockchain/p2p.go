@@ -1048,35 +1048,8 @@ func (n *Node) bootstrapDHT(ctx context.Context) error {
 		return fmt.Errorf("failed to bootstrap DHT: %v", err)
 	}
 
-	// Wait for routing table to populate
-	log.Printf("⏳ Waiting for routing table to populate...")
-	ticker := time.NewTicker(100 * time.Millisecond)
-	timeout := time.After(10 * time.Second)
-
-	for {
-		select {
-		case <-ticker.C:
-			rtSize := n.DHT.RoutingTable().Size()
-			connCount := len(n.Host.Network().Peers())
-			log.Printf("📊 DHT Status Update:")
-			log.Printf("• Routing Table Size: %d", rtSize)
-			log.Printf("• Connected Peers: %d", connCount)
-
-			if rtSize > 0 {
-				log.Printf("✅ DHT bootstrap completed successfully")
-				ticker.Stop()
-				return nil
-			}
-		case <-timeout:
-			log.Printf("⚠️ DHT bootstrap timeout - continuing with current state")
-			ticker.Stop()
-			return nil
-		case <-ctx.Done():
-			log.Printf("⚠️ DHT bootstrap cancelled")
-			ticker.Stop()
-			return ctx.Err()
-		}
-	}
+	log.Printf("✅ DHT bootstrap successful")
+	return nil
 }
 
 // ConnectToPeer connects to a peer using multiaddr
