@@ -220,6 +220,8 @@ func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{},
 		}
 
 		if args.TransactionID != "" {
+			// For manually created transactions with a predefined ID, we need to ensure
+			// the transaction structure is complete, especially the outputs
 			tx = &blockchain.Transaction{
 				TransactionID: args.TransactionID,
 				Sender:        args.From,
@@ -230,12 +232,17 @@ func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{},
 				SenderPubKey:  publicKeyBytes,
 				Signature:     args.Signature,
 				Priority:      gas.PriorityNormal,
+				TxType:        blockchain.TX_REGULAR,
+				Inputs:        []blockchain.TransactionInput{},  // Will be populated by SelectUTXOs
+				Outputs:       []blockchain.TransactionOutput{}, // Initialize empty outputs array
 			}
+
 			if args.Timestamp > 0 {
 				tx.Timestamp = args.Timestamp
 			} else {
 				tx.Timestamp = time.Now().Unix()
 			}
+
 			if args.Nonce > 0 {
 				tx.Nonce = uint64(args.Nonce)
 			} else {
@@ -244,25 +251,70 @@ func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{},
 
 			tx.GasFee = blockchain.ConvertGasToTokens(args.GasPrice * args.GasLimit)
 
-			if args.TransactionID == "" {
-				tx.TransactionID = tx.Hash()
+			// Select UTXOs for the transaction - this will fill in the Inputs
+			err = tx.SelectUTXOs(api.node.UTXOPool)
+			if err != nil {
+				return nil, fmt.Errorf("failed to select UTXOs for transaction: %v", err)
 			}
 
+			// Add main output to receiver
+			mainOutput := blockchain.TransactionOutput{
+				Receiver: args.To,
+				Amount:   args.Amount,
+			}
+			tx.Outputs = append(tx.Outputs, mainOutput)
+
+			// Calculate total input amount from selected UTXOs
+			totalInput := 0.0
+			for _, input := range tx.Inputs {
+				// Get the UTXO being spent
+				key := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
+				if utxo, exists := api.node.UTXOPool.GetUTXOs()[key]; exists {
+					totalInput += utxo.Amount
+				}
+			}
+
+			// Calculate change amount
+			changeAmount := totalInput - args.Amount - tx.GasFee
+
+			// Add change output if needed
+			if changeAmount > 0 {
+				changeOutput := blockchain.TransactionOutput{
+					Receiver: args.From,
+					Amount:   changeAmount,
+				}
+				tx.Outputs = append(tx.Outputs, changeOutput)
+				log.Printf("Adding change output: %.8f back to %s", changeAmount, args.From)
+			}
+
+			// If TransactionID wasn't provided or has changed due to output changes, recalculate it
+			tx.TransactionID = tx.Hash()
+
 		} else {
+			// Create a new transaction the standard way
 			tx, err = blockchain.NewTransaction(args.From, args.To, args.Amount, args.GasPrice, args.GasLimit)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create transaction: %v", err)
 			}
 
+			// Override timestamp if provided
 			if args.Timestamp > 0 {
 				tx.Timestamp = args.Timestamp
 				tx.TransactionID = tx.Hash()
 			}
 
+			// Override nonce if provided
 			if args.Nonce > 0 {
 				tx.Nonce = uint64(args.Nonce)
-
 				tx.TransactionID = tx.Hash()
+			}
+
+			// Ensure UTXOs are selected
+			if len(tx.Inputs) == 0 {
+				err = tx.SelectUTXOs(api.node.UTXOPool)
+				if err != nil {
+					return nil, fmt.Errorf("failed to select UTXOs for transaction: %v", err)
+				}
 			}
 		}
 
@@ -286,18 +338,21 @@ func (api *TransactionAPI) SendTransaction(params json.RawMessage) (interface{},
 		}
 		tx.Signature = args.Signature
 
-		// Ensure the transaction has inputs if it's a regular transaction
-		if tx.TxType == blockchain.TX_REGULAR && len(tx.Inputs) == 0 {
-			// Select UTXOs for the transaction
-			err = tx.SelectUTXOs(api.node.UTXOPool)
-			if err != nil {
-				return nil, fmt.Errorf("failed to select UTXOs for transaction: %v", err)
-			}
-		}
-
 		// Verify the signature matches the transaction and sender
 		if !tx.VerifySignature() {
 			return nil, fmt.Errorf("transaction signature verification failed")
+		}
+
+		// Debug info - log the transaction structure before broadcasting
+		log.Printf("Transaction ready for broadcast: ID=%s", tx.TransactionID)
+		log.Printf("• From: %s", tx.Sender)
+		log.Printf("• To: %s", tx.Receiver)
+		log.Printf("• Amount: %.8f", tx.Amount)
+		log.Printf("• Gas Fee: %.8f", tx.GasFee)
+		log.Printf("• Inputs: %d", len(tx.Inputs))
+		log.Printf("• Outputs: %d", len(tx.Outputs))
+		for i, output := range tx.Outputs {
+			log.Printf("  - Output #%d: %.8f to %s", i, output.Amount, output.Receiver)
 		}
 	}
 
@@ -1530,4 +1585,122 @@ func (api *TransactionAPI) GetFullTransactionHistory(params json.RawMessage) (in
 	}
 
 	return result, nil
+}
+
+// SendTransactionWithKey creates, signs, and broadcasts a transaction using a mnemonic phrase
+func (api *TransactionAPI) SendTransactionWithKey(params json.RawMessage) (interface{}, error) {
+	var args struct {
+		From        string  `json:"from"`
+		To          string  `json:"to"`
+		Amount      float64 `json:"amount"`
+		GasPrice    uint64  `json:"gasPrice"`
+		GasLimit    uint64  `json:"gasLimit"`
+		Mnemonic    string  `json:"mnemonic"`    // Mnemonic phrase to recover the wallet
+		CallbackURL string  `json:"callbackUrl"` // Optional: URL to notify when transaction status changes
+	}
+
+	if err := json.Unmarshal(params, &args); err != nil {
+		return nil, fmt.Errorf("invalid parameters: %v", err)
+	}
+
+	// Basic validation
+	if !blockchain.ValidateAddress(args.From) {
+		return nil, fmt.Errorf("invalid sender address")
+	}
+	if !blockchain.ValidateAddress(args.To) {
+		return nil, fmt.Errorf("invalid receiver address")
+	}
+	if args.Amount <= 0 {
+		return nil, fmt.Errorf("amount must be greater than zero")
+	}
+	if args.Mnemonic == "" {
+		return nil, fmt.Errorf("mnemonic phrase is required")
+	}
+
+	// Set default gas values if not provided
+	if args.GasPrice == 0 {
+		args.GasPrice = blockchain.DefaultGasPrice
+	}
+	if args.GasLimit == 0 {
+		args.GasLimit = blockchain.DefaultGasLimit
+	}
+
+	log.Printf("[DEBUG] Creating transaction for %s -> %s, amount: %.8f", args.From, args.To, args.Amount)
+
+	// Recover wallet from mnemonic
+	wallet, err := blockchain.RecoverWallet(args.Mnemonic)
+	if err != nil {
+		return nil, fmt.Errorf("failed to recover wallet from mnemonic: %v", err)
+	}
+
+	// Verify the recovered wallet matches the sender address
+	if wallet.Address != args.From {
+		return nil, fmt.Errorf("recovered wallet address (%s) does not match sender address (%s)",
+			wallet.Address, args.From)
+	}
+
+	log.Printf("[DEBUG] Successfully recovered wallet for %s", wallet.Address)
+
+	// Create transaction
+	tx, err := blockchain.NewTransaction(args.From, args.To, args.Amount, args.GasPrice, args.GasLimit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transaction: %v", err)
+	}
+
+	// Select UTXOs
+	log.Printf("[DEBUG] Selecting UTXOs...")
+	err = tx.SelectUTXOs(api.node.UTXOPool)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select UTXOs: %v", err)
+	}
+
+	// Sign the transaction with the wallet's private key
+	log.Printf("[DEBUG] Signing transaction...")
+	err = wallet.SignTransaction(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %v", err)
+	}
+
+	// Log transaction details for debugging
+	log.Printf("Transaction created: ID=%s", tx.TransactionID)
+	log.Printf("• From: %s", tx.Sender)
+	log.Printf("• To: %s", tx.Receiver)
+	log.Printf("• Amount: %.8f", tx.Amount)
+	log.Printf("• Gas Fee: %.8f", tx.GasFee)
+	log.Printf("• Inputs: %d", len(tx.Inputs))
+	log.Printf("• Outputs: %d", len(tx.Outputs))
+	for i, output := range tx.Outputs {
+		log.Printf("  - Output #%d: %.8f to %s", i, output.Amount, output.Receiver)
+	}
+
+	// Broadcast the transaction
+	log.Printf("[DEBUG] Broadcasting transaction...")
+	if err := api.node.BroadcastTransaction(tx, nil); err != nil {
+		return nil, fmt.Errorf("failed to broadcast transaction: %v", err)
+	}
+
+	// If a callback URL is provided, store it and start monitoring the transaction
+	if args.CallbackURL != "" {
+		api.pendingTxCallbacks[tx.TransactionID] = args.CallbackURL
+		// Start monitoring in a goroutine
+		go api.monitorTransaction(tx.TransactionID)
+	}
+
+	// Return comprehensive transaction data
+	return map[string]interface{}{
+		"transactionId": tx.TransactionID,
+		"status":        "pending",
+		"from":          tx.Sender,
+		"to":            tx.Receiver,
+		"amount":        tx.Amount,
+		"gasFee":        tx.GasFee,
+		"gasPrice":      tx.GasPrice,
+		"gasLimit":      tx.GasLimit,
+		"changeAmount":  tx.Outputs[1].Amount, // The change output (if any)
+		"timestamp":     tx.Timestamp,
+		"inMempool":     true,
+		"confirmations": 0,
+		"inputs":        len(tx.Inputs),
+		"outputs":       len(tx.Outputs),
+	}, nil
 }

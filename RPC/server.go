@@ -670,6 +670,7 @@ func (s *RPCServer) registerAllHandlers() {
 	s.registerMethod("createUnsignedTransaction", transactionAPI.CreateUnsignedTransaction)
 	s.registerMethod("createTransaction", transactionAPI.CreateUnsignedTransaction) // Alias for backward compatibility
 	s.registerMethod("sendTransaction", transactionAPI.SendTransaction)
+	s.registerMethod("sendTransactionWithKey", transactionAPI.SendTransactionWithKey)
 	s.registerMethod("getTransaction", transactionAPI.GetTransaction)
 	s.registerMethod("getPendingTransactions", transactionAPI.GetPendingTransactions)
 	s.registerMethod("estimateFee", transactionAPI.EstimateFee)
@@ -749,6 +750,7 @@ func (s *RPCServer) registerAllHandlers() {
 	s.registerMethod("_internal_signTransaction", s.internalSignTransaction)
 	s.registerMethod("_internal_getTransactionHistory", s.internalGetTransactionHistory)
 	s.registerMethod("_internal_getFullTransactionHistory", s.internalGetFullTransactionHistory)
+	s.registerMethod("_internal_sendTransactionWithKey", s.internalSendTransactionWithKey)
 }
 
 // Wrappers for subscription handlers to match RPCMethodHandler type
@@ -1342,12 +1344,12 @@ func (s *RPCServer) handleGetAccountState(params json.RawMessage) (interface{}, 
 	// Get UTXOs directly from UTXOPool
 	utxos := s.node.UTXOPool.GetUTXOsForAddress(args.Address)
 
-      // Calculate balance from UTXOs
-       balance := s.node.UTXOPool.GetBalance(args.Address)
+	// Calculate balance from UTXOs
+	balance := s.node.UTXOPool.GetBalance(args.Address)
 
-       // In UTXO model, nonce can be derived from transaction count or UTXO count
-       // Using the length of UTXOs as an approximation for nonce
-       nonce := uint64(len(utxos))
+	// In UTXO model, nonce can be derived from transaction count or UTXO count
+	// Using the length of UTXOs as an approximation for nonce
+	nonce := uint64(len(utxos))
 
 	// Check if address is a validator
 	_, isValidator := s.blockchain.Validators[args.Address]
@@ -1841,6 +1843,13 @@ func (s *RPCServer) internalGetStakeInfo(params json.RawMessage) (interface{}, e
 func (s *RPCServer) internalSignTransaction(params json.RawMessage) (interface{}, error) {
 	walletAPI := api.NewWalletAPI(s.node, s.blockchain)
 	return walletAPI.SignTransaction(params)
+}
+
+// internalSendTransactionWithKey handles sending transactions with a mnemonic key
+func (s *RPCServer) internalSendTransactionWithKey(params json.RawMessage) (interface{}, error) {
+	transactionAPI := api.NewTransactionAPI(s.node, s.blockchain)
+	result, err := transactionAPI.SendTransactionWithKey(params)
+	return result, err
 }
 
 // handleWebSocket handles WebSocket connections
