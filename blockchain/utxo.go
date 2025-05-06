@@ -142,6 +142,30 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 	// Create a map to collect UTXOs by owner
 	ownerUTXOs := make(map[string][]string)
 
+	// CRITICAL FIX: Mark inputs as spent BEFORE adding new outputs
+	// Only for non-system transactions (regular transfers)
+	if !isSystemTx {
+		for _, input := range tx.Inputs {
+			inputKey := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
+
+			// Check if the UTXO exists before attempting to mark it as spent
+			if utxo, exists := pool.utxos[inputKey]; exists {
+				utxo.Spent = true
+				pool.utxos[inputKey] = utxo
+
+				// Track the update
+				if pool.updates == nil {
+					pool.updates = make(map[string]UTXO)
+				}
+				pool.updates[inputKey] = utxo
+
+				log.Printf("💸 Marked UTXO as spent: %s", inputKey)
+			} else {
+				log.Printf("⚠️ Warning: Input UTXO %s not found in pool", inputKey)
+			}
+		}
+	}
+
 	// Add new UTXOs from transaction outputs
 	for i, output := range tx.Outputs {
 		utxoKey := fmt.Sprintf("%s-%d", tx.TransactionID, i)
@@ -157,9 +181,16 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 			BlockHeight:   blockHeight,
 			Timestamp:     tx.Timestamp,
 			ScriptPubKey:  output.ScriptPubKey,
+			Spent:         false, // Explicitly mark as unspent
 		}
 
 		pool.utxos[utxoKey] = utxo
+
+		// Track updates for syncing
+		if pool.updates == nil {
+			pool.updates = make(map[string]UTXO)
+		}
+		pool.updates[utxoKey] = utxo
 
 		// Track UTXOs by owner for account state updates
 		if _, exists := ownerUTXOs[owner]; !exists {
@@ -178,79 +209,51 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 		}
 	}
 
-	// Only mark inputs as spent for non-system transactions
-	if !isSystemTx {
-		// Mark spent inputs
-		for _, input := range tx.Inputs {
-			inputKey := fmt.Sprintf("%s-%d", input.TransactionID, input.OutputIndex)
-			if utxo, exists := pool.utxos[inputKey]; exists {
-				utxo.Spent = true
-				pool.utxos[inputKey] = utxo
-			}
-		}
-	}
-
-	// Track update
-	if pool.updates == nil {
-		pool.updates = make(map[string]UTXO)
-	}
-	for k, v := range pool.utxos {
-		pool.updates[k] = v
-	}
+	// Update the Merkle root
+	pool.merkleRoot = pool.CalculateMerkleRoot()
 	pool.lastUpdateTime = time.Now().Unix()
 
-	pool.merkleRoot = pool.CalculateMerkleRoot()
-
-	// Persist changes
-	pool.saveState()
-
-	// Update account states only if node and accountManager are available
+	// Update account states if accountManager is available
 	if pool.node != nil && pool.node.accountManager != nil {
 		accountStates := make(map[string]*AccountState)
 
-		// Process each owner's UTXOs
+		// Update account states for UTXO receivers
 		for owner, utxoKeys := range ownerUTXOs {
-			// Flag to detect new accounts
-			isNew := false
-
-			// Get or create account state
 			state, err := pool.node.accountManager.GetAccountState(owner)
-			if err != nil || state == nil || state.Balance == 0 {
-				isNew = true
-				// Create a new account state if none exists
-				log.Printf("Creating new account state for %s", owner)
+			if err != nil || state == nil {
+				// Create a new account state if it doesn't exist
 				state = &AccountState{
 					Address:      owner,
-					Balance:      0, // Will add up from UTXOs
 					Nonce:        0,
+					Balance:      0,
 					LastActivity: time.Now().Unix(),
 					UTXOs:        make(map[string]string),
 					PendingTxs:   make(map[string]bool),
 				}
 			}
 
-			// Ensure UTXOs map exists
+			// Add new UTXOs to the account state
 			if state.UTXOs == nil {
 				state.UTXOs = make(map[string]string)
 			}
 
-			// Add UTXOs and update balance
+			// Calculate the total amount received by this owner
+			totalReceived := 0.0
 			for _, utxoKey := range utxoKeys {
-				utxo := pool.utxos[utxoKey]
-				state.UTXOs[utxoKey] = tx.TransactionID
-				state.Balance += utxo.Amount
+				if utxo, exists := pool.utxos[utxoKey]; exists {
+					totalReceived += utxo.Amount
+					state.UTXOs[utxoKey] = utxo.TransactionID
+				}
 			}
 
-			// Log newly created/updated accounts
-			if isNew {
-				log.Printf("💰 New account %s created with initial balance %.8f from transaction %s",
-					owner, state.Balance, tx.TransactionID)
-			}
+			// Update the balance (only add received amount, we've already subtracted spent amount)
+			state.Balance += totalReceived
+			state.LastActivity = time.Now().Unix()
 
 			accountStates[owner] = state
 		}
 
-		// Update sender's account state for non-system transactions
+		// CRITICAL FIX: Make sure sender's balance is properly updated by removing spent UTXOs
 		if !isSystemTx && tx.Sender != "" {
 			state, err := pool.node.accountManager.GetAccountState(tx.Sender)
 			if err == nil && state != nil {
@@ -260,8 +263,12 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 					delete(state.UTXOs, inputKey)
 				}
 
-				// Update the sender's balance
-				state.Balance -= (tx.Amount + tx.GasFee)
+				// Calculate spent amount (transaction amount + fee)
+				spentAmount := tx.Amount + tx.GasFee
+
+				// Update the sender's balance (subtract only what was actually spent)
+				state.Balance = state.Balance - spentAmount
+
 				state.LastActivity = time.Now().Unix()
 
 				accountStates[tx.Sender] = state
@@ -283,6 +290,9 @@ func (pool *UTXOPool) AddUTXO(tx *Transaction, blockHeight uint64) {
 	} else {
 		log.Printf("⚠️ Skipping account state update: node or accountManager not initialized")
 	}
+
+	// Persist UTXO state
+	pool.saveState()
 }
 
 // RemoveUTXO removes a UTXO from the pool
