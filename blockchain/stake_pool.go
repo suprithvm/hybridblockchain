@@ -287,7 +287,7 @@ func (sp *StakePool) GetValidators(count int) ([]ValidatorNode, error) {
 
 // Add these constants at the top
 const (
-	MinStakeAge          = 2 * time.Minute      // Minimum time before stake becomes active (reduced from 24h)
+	MinStakeAge          = 0 * time.Minute      // Minimum time before stake becomes active (reduced from 24h)
 	MaxStakeAge          = 365 * 24 * time.Hour // Maximum age for stake weight calculation
 	BaseStakeWeight      = 100                  // Base weight for stake calculations
 	WithdrawalLockPeriod = 72 * time.Hour       // Time required before withdrawal
